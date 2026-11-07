@@ -7,7 +7,12 @@ all-features = true
 [advisories]
 # Every RustSec advisory fails the build unless it is explicitly ignored here
 # with a reason.
-ignore = []
+ignore = [
+    # ttf-parser is unmaintained (no vulnerability). It comes in through
+    # cosmic-text 0.19 -> fontdb 0.23 (ADR-0007), which has no release without
+    # it yet; revisit when cosmic-text moves fontdb to skrifa.
+    { id = "RUSTSEC-2026-0192", reason = "unmaintained, via cosmic-text/fontdb; no alternative release yet" },
+]
 
 [licenses]
 # Permissive licences compatible with shipping Hoarder under MIT.

@@ -28,6 +28,7 @@ enum Command {
     /// Take a Capture.
     Shot {
         /// What to capture.
+        #[arg(default_value = "region")]
         target: shot::Target,
         /// Write the image to PATH, or to stdout with `-`, instead of saving it
         /// to `screenshot.dir`.
@@ -59,7 +60,8 @@ enum Command {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exit {
     Success = 0,
-    /// Cancelled by the user, or (for `paste`) nothing to paste.
+    /// Cancelled by the user (Esc or right-click in the Overlay), or (for
+    /// `paste`) nothing to paste.
     Cancelled = 1,
     /// Bad arguments or an invalid config.
     Usage = 2,

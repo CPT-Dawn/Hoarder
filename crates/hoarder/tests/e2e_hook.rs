@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 use std::time::{Duration, Instant};
 
-use hoarder_e2e::{OutputSpec, Session};
+use hoarder_e2e::{OutputSpec, Pattern, Session, keys};
+
+mod common;
+use common::Overlay;
 
 fn hoarder(session: &Session, args: &[&str]) -> Output {
     session
@@ -199,5 +202,40 @@ fn no_hook_runs_when_on_capture_is_empty() {
         !String::from_utf8_lossy(&out.stderr).contains("hook"),
         "{}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn hook_names_a_region_target() {
+    let session = Session::start(&[OutputSpec::new(320, 240)]).unwrap();
+    let dump = session.runtime_dir().join("hook-env");
+    write_config(
+        &session,
+        &format!(
+            "[screenshot]\nnotify = false\non_capture = {}\n",
+            toml_string(&env_dump_hook(&dump))
+        ),
+    );
+    let out = session.output("HEADLESS-1");
+    // Something to dim, so the Overlay is seen to arrive.
+    let app = session.client().unwrap();
+    app.paint(out, &Pattern::Quadrants).unwrap();
+
+    let overlay = Overlay::start(&session, &["shot", "region"], &["HEADLESS-1"]);
+    let input = session.input();
+    input.move_to(out, 10.0, 20.0).unwrap();
+    input.button(keys::BTN_LEFT, true).unwrap();
+    input.move_to(out, 50.0, 50.0).unwrap();
+    input.move_to(out, 110.0, 70.0).unwrap();
+    input.button(keys::BTN_LEFT, false).unwrap();
+    let finished = overlay.finish();
+
+    assert!(finished.status.success(), "{}", finished.stderr);
+    let saved = String::from_utf8_lossy(&finished.stdout)
+        .trim_end()
+        .to_owned();
+    assert_eq!(
+        wait_for_file(&dump),
+        format!("PATH={saved}\nWIDTH=100\nHEIGHT=50\nTARGET=region\n")
     );
 }

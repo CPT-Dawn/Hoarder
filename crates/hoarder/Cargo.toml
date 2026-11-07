@@ -12,6 +12,7 @@ authors.workspace = true
 clap.workspace = true
 futures-util.workspace = true
 hoarder-config.workspace = true
+hoarder-ui.workspace = true
 hoarder-wayland.workspace = true
 jiff.workspace = true
 png.workspace = true
