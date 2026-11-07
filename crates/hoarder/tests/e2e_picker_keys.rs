@@ -211,13 +211,13 @@ fn type_text(session: &Session, text: &str) {
     }
 }
 
-fn picker(session: &Session) -> Overlay {
+fn open_picker(session: &Session) -> Overlay {
     Overlay::start(session, &["picker"], &["HEADLESS-1"])
 }
 
 /// Open the Picker, type `keys_typed`, then press Enter; it must succeed.
 fn pick_with(session: &Session, keys_typed: &str) {
-    let picker = picker(session);
+    let picker = open_picker(session);
     type_text(session, keys_typed);
     session.input().tap(keys::KEY_ENTER).unwrap();
     let done = picker.finish();
@@ -305,7 +305,7 @@ fn a_filter_that_matches_nothing_restores_nothing() {
     );
     let _daemon = Daemon::start(&session);
 
-    let picker = picker(&session);
+    let picker = open_picker(&session);
     type_text(&session, "img:");
     session.input().tap(keys::KEY_ENTER).unwrap();
     session.input().tap(keys::KEY_ESC).unwrap();
@@ -314,11 +314,223 @@ fn a_filter_that_matches_nothing_restores_nothing() {
     assert_eq!(done.status.code(), Some(1), "{}", done.stderr);
 }
 
+#[test]
+fn shift_enter_restores_only_the_plain_text() {
+    let (session, _paint) = painted();
+    seed(
+        &session,
+        &[Seed {
+            reprs: &[
+                ("text/html", b"<b>bold</b> move"),
+                ("text/plain;charset=utf-8", b"bold move"),
+            ],
+            app: None,
+            pinned: false,
+        }],
+    );
+    let _daemon = Daemon::start(&session);
+
+    let picker = open_picker(&session);
+    session
+        .input()
+        .chord(&[keys::KEY_LEFTSHIFT, keys::KEY_ENTER])
+        .unwrap();
+    let done = picker.finish();
+
+    assert!(done.status.success(), "{}", done.stderr);
+    assert_eq!(pasteable_types(&session), ["text/plain;charset=utf-8"]);
+    assert_eq!(paste(&session, None), "bold move");
+}
+
+#[test]
+fn shift_enter_on_a_clip_without_text_restores_nothing() {
+    let (session, _paint) = painted();
+    let image = png(4, 4, [0, 0, 255]);
+    seed(
+        &session,
+        &[Seed {
+            reprs: &[("image/png", &image)],
+            app: None,
+            pinned: false,
+        }],
+    );
+    let _daemon = Daemon::start(&session);
+
+    let picker = open_picker(&session);
+    session
+        .input()
+        .chord(&[keys::KEY_LEFTSHIFT, keys::KEY_ENTER])
+        .unwrap();
+    let done = picker.finish();
+
+    assert!(!done.status.success());
+    assert!(done.stderr.contains("no plain text"), "{}", done.stderr);
+    assert!(pasteable_types(&session).is_empty());
+}
+
+#[test]
+fn ctrl_p_pins_the_selected_clip_and_unpins_a_pinned_one() {
+    let (session, _paint) = painted();
+    let ids = seed(
+        &session,
+        &[
+            Seed {
+                reprs: &text("older"),
+                app: None,
+                pinned: false,
+            },
+            Seed {
+                reprs: &text("newer"),
+                app: None,
+                pinned: false,
+            },
+        ],
+    );
+    let _daemon = Daemon::start(&session);
+    let pinned = |id: i64| {
+        history(&session).iter().find(|c| c["id"] == id).unwrap()["pinned"]
+            .as_bool()
+            .unwrap()
+    };
+
+    // The pin shows at once: `pin:` then finds it.
+    let picker = open_picker(&session);
+    session.input().tap(keys::KEY_DOWN).unwrap();
+    session
+        .input()
+        .chord(&[keys::KEY_LEFTCTRL, keys::KEY_P])
+        .unwrap();
+    type_text(&session, "pin:");
+    session.input().tap(keys::KEY_ENTER).unwrap();
+    let done = picker.finish();
+    assert!(done.status.success(), "{}", done.stderr);
+    assert!(pinned(ids[0]));
+    assert!(!pinned(ids[1]));
+    assert_eq!(paste(&session, None), "older");
+
+    let picker = open_picker(&session);
+    session
+        .input()
+        .chord(&[keys::KEY_LEFTCTRL, keys::KEY_P])
+        .unwrap();
+    session.input().tap(keys::KEY_ESC).unwrap();
+    picker.finish();
+    assert!(!pinned(ids[0]));
+}
+
+#[test]
+fn del_deletes_the_selected_clip_and_selects_the_next() {
+    let (session, _paint) = painted();
+    seed(
+        &session,
+        &[
+            Seed {
+                reprs: &text("first"),
+                app: None,
+                pinned: false,
+            },
+            Seed {
+                reprs: &text("second"),
+                app: None,
+                pinned: false,
+            },
+            Seed {
+                reprs: &text("third"),
+                app: None,
+                pinned: false,
+            },
+        ],
+    );
+    let _daemon = Daemon::start(&session);
+
+    let picker = open_picker(&session);
+    session.input().tap(keys::KEY_DOWN).unwrap();
+    session.input().tap(keys::KEY_DELETE).unwrap();
+    session.input().tap(keys::KEY_ENTER).unwrap();
+    let done = picker.finish();
+
+    assert!(done.status.success(), "{}", done.stderr);
+    let previews: Vec<_> = history(&session)
+        .iter()
+        .map(|c| c["preview"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(previews, ["first", "third"]);
+    assert_eq!(paste(&session, None), "first");
+}
+
+#[test]
+fn ctrl_digits_restore_that_row_at_once() {
+    let (session, _paint) = painted();
+    let texts: Vec<String> = (0..10).map(|n| format!("clip {n}")).collect();
+    let reprs: Vec<_> = texts.iter().map(|t| text(t)).collect();
+    let seeds: Vec<_> = reprs
+        .iter()
+        .map(|r| Seed {
+            reprs: r,
+            app: None,
+            pinned: false,
+        })
+        .collect();
+    seed(&session, &seeds);
+    let _daemon = Daemon::start(&session);
+
+    let quick = |digit: u32| {
+        let picker = open_picker(&session);
+        session.input().chord(&[keys::KEY_LEFTCTRL, digit]).unwrap();
+        let done = picker.finish();
+        assert!(done.status.success(), "{}", done.stderr);
+        paste(&session, None)
+    };
+
+    // Rows, newest first: clip 9, clip 8, clip 7, …
+    assert_eq!(quick(keys::KEY_3), "clip 7");
+    // Now clip 7, clip 9, clip 8, clip 6, …, clip 1, then clip 1 on top.
+    assert_eq!(quick(keys::KEY_9), "clip 1");
+    assert_eq!(quick(keys::KEY_1), "clip 1");
+    assert_eq!(quick(keys::KEY_5), "clip 6");
+}
+
+#[test]
+fn ctrl_digits_count_the_rows_a_query_left() {
+    let (session, _paint) = painted();
+    seed(
+        &session,
+        &[
+            Seed {
+                reprs: &text("apple one"),
+                app: None,
+                pinned: false,
+            },
+            Seed {
+                reprs: &text("berry"),
+                app: None,
+                pinned: false,
+            },
+            Seed {
+                reprs: &text("apple two"),
+                app: None,
+                pinned: false,
+            },
+        ],
+    );
+    let _daemon = Daemon::start(&session);
+
+    let picker = open_picker(&session);
+    type_text(&session, "apple");
+    session
+        .input()
+        .chord(&[keys::KEY_LEFTCTRL, keys::KEY_2])
+        .unwrap();
+    let done = picker.finish();
+
+    assert!(done.status.success(), "{}", done.stderr);
+    assert_eq!(paste(&session, None), "apple one");
+}
+
 // Silence unused-helper warnings until the tests below use them.
 #[allow(dead_code)]
-fn _unused(session: &Session) -> (Vec<String>, Image, Rgb8, Selection) {
+fn _unused(session: &Session) -> (Image, Rgb8, Selection) {
     (
-        pasteable_types(session),
         session.screenshot("HEADLESS-1").unwrap(),
         Rgb8(0, 0, 0),
         Selection::Clipboard,

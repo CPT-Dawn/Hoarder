@@ -118,7 +118,14 @@ pub enum Op {
     },
     /// Make a Clip the clipboard Selection again, and move it to the top.
     /// Answered with its [`ClipSummary`] once the compositor has applied it.
-    Restore { clip: i64 },
+    Restore {
+        clip: i64,
+        /// Restore only its plain text (`text/plain…`, `UTF8_STRING`,
+        /// `STRING`, `TEXT`), dropping formatting; `not_found` if it has
+        /// none.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        plain: bool,
+    },
     /// Remove a Clip from History.
     Delete { clip: i64 },
     /// Exempt a Clip from expiry and eviction; answered with its
@@ -631,7 +638,21 @@ impl Connection {
 
     /// [`Op::Restore`], decoded.
     pub fn restore(&mut self, clip: i64) -> std::io::Result<Result<ClipSummary, Failure>> {
-        self.typed(Op::Restore { clip })
+        self.restore_as(clip, false)
+    }
+
+    /// [`Op::Restore`], as plain text only if `plain`, decoded.
+    pub fn restore_as(
+        &mut self,
+        clip: i64,
+        plain: bool,
+    ) -> std::io::Result<Result<ClipSummary, Failure>> {
+        self.typed(Op::Restore { clip, plain })
+    }
+
+    /// [`Op::Delete`].
+    pub fn delete(&mut self, clip: i64) -> std::io::Result<Result<(), Failure>> {
+        Ok(self.call(Op::Delete { clip })?.map(drop))
     }
 
     /// [`Op::Pin`] or [`Op::Unpin`], decoded.

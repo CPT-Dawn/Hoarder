@@ -179,6 +179,12 @@ fn wayland_error(e: ClipboardError) -> Fail {
 /// One representation the Daemon holds: a MIME type and its bytes.
 type Representation = (String, Arc<[u8]>);
 
+/// Whether `mime` is plain text, as a plain-text Restore keeps it.
+fn is_plain_text(mime: &str) -> bool {
+    let essence = mime.split(';').next().unwrap_or(mime).trim();
+    essence == "text/plain" || matches!(essence, "UTF8_STRING" | "STRING" | "TEXT")
+}
+
 /// What the Daemon knows and holds for one Selection.
 #[derive(Debug, Default)]
 struct Slot {

@@ -41,11 +41,11 @@ pub fn run(overrides: &[(String, String)]) -> Result<(), Fail> {
         OverlayError::Unsupported(m) => (Exit::Unsupported, m),
         OverlayError::Failed(m) => (Exit::Io, m),
     })?;
-    let Some(clip) = picked else {
+    let Some(pick) = picked else {
         return Err((Exit::Cancelled, "cancelled".into()));
     };
     let mut daemon = history.connection()?;
-    match daemon.restore(clip) {
+    match daemon.restore_as(pick.id, pick.plain) {
         Ok(Ok(_)) => Ok(()),
         Ok(Err(failure)) => Err((Exit::Io, failure.message)),
         Err(e) => Err((Exit::Io, format!("lost the Daemon: {e}"))),
@@ -101,6 +101,20 @@ impl picker::History for Daemon {
                 concealed: c.sensitivity == hoarder_ipc::Sensitivity::Concealed,
             })
             .collect())
+    }
+
+    fn pin(&mut self, id: i64, pinned: bool) -> bool {
+        let Daemon::Ready(connection) = self else {
+            return false;
+        };
+        matches!(connection.pin(id, pinned), Ok(Ok(_)))
+    }
+
+    fn delete(&mut self, id: i64) -> bool {
+        let Daemon::Ready(connection) = self else {
+            return false;
+        };
+        matches!(connection.delete(id), Ok(Ok(())))
     }
 
     fn search(&mut self, query: &str) -> Vec<i64> {

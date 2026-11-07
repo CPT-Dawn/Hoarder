@@ -263,7 +263,15 @@ impl Daemon {
                 };
                 self.ask_history(client, id, job);
             }
-            Op::Restore { clip } => self.ask_history(client, id, Job::Restore { client, id, clip }),
+            Op::Restore { clip, plain } => {
+                let job = Job::Restore {
+                    client,
+                    id,
+                    clip,
+                    plain,
+                };
+                self.ask_history(client, id, job);
+            }
             Op::Delete { clip } => self.ask_history(client, id, Job::Delete { client, id, clip }),
             Op::Offer {
                 selection,

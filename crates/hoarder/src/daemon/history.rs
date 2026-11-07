@@ -58,6 +58,8 @@ pub(super) enum Job {
         client: u64,
         id: u64,
         clip: i64,
+        /// Plain text only.
+        plain: bool,
     },
     Delete {
         client: u64,
@@ -234,7 +236,12 @@ fn worker(mut store: Store, jobs: mpsc::Receiver<Job>, done: calloop::channel::S
                 mime,
                 pipe,
             } => reply(client, id, get(&store, clip, mime, pipe)),
-            Job::Restore { client, id, clip } => match restore(&mut store, clip) {
+            Job::Restore {
+                client,
+                id,
+                clip,
+                plain,
+            } => match restore(&mut store, clip, plain) {
                 Ok((clip, reprs)) => Done::Restore {
                     client,
                     id,
@@ -365,11 +372,21 @@ fn thumb(store: &Store, clip: i64, pipe: OwnedFd) -> Result<Value, Failure> {
     Ok(to_value(&got))
 }
 
-fn restore(store: &mut Store, clip: i64) -> Result<(ClipSummary, Vec<Representation>), Failure> {
-    let reprs = store
+fn restore(
+    store: &mut Store,
+    clip: i64,
+    plain: bool,
+) -> Result<(ClipSummary, Vec<Representation>), Failure> {
+    let mut reprs = store
         .representations(clip)
         .map_err(failed)?
         .ok_or(not_found(clip))?;
+    if plain {
+        reprs.retain(|(m, _)| super::is_plain_text(m));
+        if reprs.is_empty() {
+            return Err(no_plain_text(clip));
+        }
+    }
     if reprs.is_empty() {
         return Err(Failure {
             code: ErrorCode::Failed,
@@ -403,6 +420,13 @@ pub(super) fn summary(clip: &Clip) -> ClipSummary {
         types: clip.types.clone(),
         sensitivity: Default::default(),
         expires: None,
+    }
+}
+
+pub(super) fn no_plain_text(clip: i64) -> Failure {
+    Failure {
+        code: ErrorCode::NotFound,
+        message: format!("Clip {clip} has no plain text"),
     }
 }
 

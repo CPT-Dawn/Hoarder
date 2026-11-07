@@ -153,15 +153,59 @@ impl Model {
         self.shown.get(self.selected).map(|&i| &self.entries[i])
     }
 
-    /// The Clips on screen in a list `rows` tall, scrolled so the selection
-    /// shows, with whether each is the selected one.
-    pub(crate) fn visible(&mut self, rows: usize) -> Vec<(&Entry, bool)> {
+    /// Scroll a list `rows` tall so the selection shows.
+    fn scroll(&mut self, rows: usize) {
         let rows = rows.max(1);
         if self.selected < self.top {
             self.top = self.selected;
         } else if self.selected >= self.top + rows {
             self.top = self.selected + 1 - rows;
         }
+    }
+
+    /// The Clip on the `n`th row (from 0) of a list `rows` tall, as it is
+    /// on screen.
+    pub(crate) fn row(&mut self, n: usize, rows: usize) -> Option<&Entry> {
+        self.scroll(rows);
+        if n >= rows {
+            return None;
+        }
+        let i = *self.shown.get(self.top + n)?;
+        Some(&self.entries[i])
+    }
+
+    /// Mark Clip `id` pinned or not.
+    pub(crate) fn set_pinned(&mut self, id: i64, pinned: bool) {
+        if let Some(&i) = self.by_id.get(&id) {
+            self.entries[i].pinned = pinned;
+        }
+    }
+
+    /// Drop Clip `id`; the selection moves to the Clip after it, or the
+    /// one before at the end.
+    pub(crate) fn remove(&mut self, id: i64) {
+        let Some(gone) = self.by_id.remove(&id) else {
+            return;
+        };
+        self.entries.remove(gone);
+        self.by_id = (self.entries.iter().enumerate())
+            .map(|(i, e)| (e.id, i))
+            .collect();
+        self.shown.retain(|&i| i != gone);
+        for i in &mut self.shown {
+            if *i > gone {
+                *i -= 1;
+            }
+        }
+        self.selected = self.selected.min(self.shown.len().saturating_sub(1));
+        self.top = self.top.min(self.selected);
+    }
+
+    /// The Clips on screen in a list `rows` tall, scrolled so the selection
+    /// shows, with whether each is the selected one.
+    pub(crate) fn visible(&mut self, rows: usize) -> Vec<(&Entry, bool)> {
+        let rows = rows.max(1);
+        self.scroll(rows);
         self.shown
             .iter()
             .enumerate()
@@ -251,6 +295,31 @@ mod tests {
         m.set_query("a", &[]);
 
         assert_eq!(m.selected().unwrap().preview, "a1");
+    }
+
+    #[test]
+    fn rows_count_from_the_top_of_the_scrolled_list() {
+        let mut m = model(&["r0", "r1", "r2", "r3", "r4"]);
+        assert_eq!(m.row(1, 3).unwrap().preview, "r1");
+        m.move_by(4);
+
+        assert_eq!(m.row(0, 3).unwrap().preview, "r2");
+        assert!(m.row(3, 3).is_none());
+    }
+
+    #[test]
+    fn removing_a_clip_selects_the_next_one_and_keeps_the_order() {
+        let mut m = model(&["a", "b", "c"]);
+        m.move_by(1);
+
+        m.remove(101);
+
+        assert_eq!(m.selected().unwrap().preview, "c");
+        assert_eq!(shown(&mut m), ["a", "c"]);
+        m.remove(102);
+        assert_eq!(m.selected().unwrap().preview, "a");
+        m.set_query("a", &[]);
+        assert_eq!(shown(&mut m), ["a"]);
     }
 
     #[test]
