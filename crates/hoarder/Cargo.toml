@@ -38,6 +38,8 @@ zbus = { workspace = true, features = ["service"] }
 hoarder-e2e.workspace = true
 image.workspace = true
 png.workspace = true
+# Holds History's database locked, to keep the Daemon's History thread busy.
+rusqlite.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 

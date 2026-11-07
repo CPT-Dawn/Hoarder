@@ -1404,6 +1404,7 @@ dependencies = [
  "png",
  "regex",
  "region",
+ "rusqlite",
  "rustix",
  "serde",
  "serde_json",

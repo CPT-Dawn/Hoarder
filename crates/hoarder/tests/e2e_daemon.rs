@@ -726,14 +726,56 @@ fn context_switches(pid: u32) -> u64 {
     total
 }
 
+/// Wait until no thread of `pid` has switched for 300 ms running.
+fn at_rest(pid: u32) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut last = context_switches(pid);
+    let mut quiet_since = Instant::now();
+    while quiet_since.elapsed() < Duration::from_millis(300) {
+        assert!(Instant::now() < deadline, "the Daemon never came to rest");
+        std::thread::sleep(Duration::from_millis(50));
+        let now = context_switches(pid);
+        if now != last {
+            last = now;
+            quiet_since = Instant::now();
+        }
+    }
+}
+
+/// Lock the session's History for `long`, so the Daemon's History thread is
+/// still at its first jobs when the Takeover is done, as on a slow disk.
+fn lock_history(session: &Session, long: Duration) -> std::thread::JoinHandle<()> {
+    let dir = session.runtime_dir().join("home/.local/share/hoarder");
+    drop(hoarder_store::Store::open(&dir).unwrap());
+    let db = rusqlite::Connection::open(dir.join("history.db")).unwrap();
+    db.execute_batch("PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE")
+        .unwrap();
+    std::thread::spawn(move || {
+        std::thread::sleep(long);
+        db.execute_batch("COMMIT").unwrap();
+    })
+}
+
 #[test]
 fn an_idle_daemon_never_wakes_up() {
     let session = Session::start_default().unwrap();
+    // CI's /tmp is a disk, not a tmpfs: History may lag far behind.
+    let unlocked = lock_history(&session, Duration::from_millis(1500));
     let daemon = Daemon::start(&session, &[]);
     // Something held, so idle includes serving a Takeover.
     let kept = taken_over(&session, &daemon, vec![("text/plain", now(b"zzz"))]);
     assert!(kept.is_some());
-    std::thread::sleep(Duration::from_millis(300));
+    // Idle starts once History has caught up: the socket answers before the
+    // History thread has even opened the Store, and no fixed nap outlasts a
+    // slow disk. Then the last replies drain.
+    wait_until("History to record the Clip", || {
+        let listed = daemon.call(json!({"v": 1, "id": 1, "op": "list"}));
+        listed["ok"]
+            .as_array()
+            .is_some_and(|clips| clips.len() == 1)
+    });
+    unlocked.join().unwrap();
+    at_rest(daemon.child.id());
 
     let before = context_switches(daemon.child.id());
     std::thread::sleep(Duration::from_secs(3));
