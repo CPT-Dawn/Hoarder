@@ -58,6 +58,8 @@ persist = true
 deny_types = []
 max_offer_mb = 64
 no_takeover_apps = []     # app_ids whose copies are never kept alive after they exit
+# Run for each Normal copy, the copy on stdin (like wl-paste --watch);
+# $HOARDER_MIME, $HOARDER_TYPES and $HOARDER_APP describe it
 on_clip = ""
 [clipboard.primary]
 persist = false

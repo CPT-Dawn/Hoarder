@@ -326,7 +326,7 @@ persist = true
 deny_types = []
 max_offer_mb = 64
 no_takeover_apps = []     # escape hatch: app_ids whose copies are never taken over
-on_clip = ""
+on_clip = ""              # shell hook per Normal copy, the copy on stdin
 [clipboard.primary]
 persist = false
 history = false

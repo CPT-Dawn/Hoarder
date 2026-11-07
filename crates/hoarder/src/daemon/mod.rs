@@ -566,6 +566,9 @@ impl Daemon {
         if sensitive {
             kept.push((PASSWORD_HINT.into(), Arc::from(&b"secret"[..])));
         }
+        if sensitivity == Sensitivity::Normal {
+            self.on_clip(which, &kept, None);
+        }
         if sensitivity == Sensitivity::Normal && self.records(which) && self.pause.is_none() {
             let job = history::Job::Record {
                 reprs: kept.clone(),
@@ -736,6 +739,12 @@ impl Daemon {
                 self.conceal(which, read.offer.focused_app.clone());
             }
         }
+        if let Some(read) = &read
+            && self.slots[which as usize].sensitivity == Sensitivity::Normal
+        {
+            let kept = self.slots[which as usize].kept.clone();
+            self.on_clip(which, &kept, read.offer.focused_app.as_deref());
+        }
         let slot = &mut self.slots[which as usize];
         if let Some(read) = read
             && std::mem::take(&mut slot.record)
@@ -753,6 +762,25 @@ impl Daemon {
         if std::mem::take(&mut slot.take_over_after_read) {
             self.take_over(which);
         }
+    }
+
+    /// Run `clipboard.on_clip` for a Normal copy to the clipboard of `reprs`
+    /// (copied in `app`, if known). Not while Paused: a Pause means nothing
+    /// is looked at.
+    fn on_clip(&self, which: Selection, reprs: &[Representation], app: Option<&str>) {
+        let hook = &self.config.clipboard.on_clip;
+        if hook.trim().is_empty() || which != Selection::Clipboard || self.pause.is_some() {
+            return;
+        }
+        let Some((mime, data)) = reprs
+            .iter()
+            .find(|(m, _)| is_plain_text(m))
+            .or_else(|| reprs.first())
+        else {
+            return;
+        };
+        let types: Vec<String> = reprs.iter().map(|(m, _)| m.clone()).collect();
+        crate::hook::spawn_on_clip(hook, mime, Arc::clone(data), &types, app);
     }
 
     /// Move what `which` keeps into the vault, to expire after the TTL.
