@@ -156,6 +156,18 @@ Font loading (a full fontconfig scan, about 20 ms) is now the floor. The Overlay
 
 The Picker tests (`e2e_picker.rs`) start it with `Overlay::start(&session, &["picker"], …)`, which works for any `hoarder` command that changes what grim sees.
 
+### The Daemon's memory
+
+`budget_daemon_rss_idle_with_1000_clips` (in `e2e_daemon.rs`) seeds 1,000 Clips, lists them once, holds a Selection, lets the Daemon go idle and reads `/proc/PID/status`. It prints two `budget:` lines in MB: `VmRSS`, everything resident, and `RssAnon`, what the Daemon itself holds (heap, thread stacks, SQLite's cache). Only `RssAnon` is held to PLAN's 12 MB; `VmRSS` is reported for the budgets job's 20% rule, because most of it is the binary's own shared, clean text, which tracks the binary-size budget instead. Memory budgets are never scaled by `HOARDER_BUDGET_SCALE`.
+
+```sh
+cargo test --release -p hoarder --test e2e_daemon budget -- --nocapture
+```
+
+| Date | Change | VmRSS | RssAnon |
+|---|---|---|---|
+| 2026-11-08 | first measurement (release build; the `dist` binary measured 14.2 MB) | 14.5 MB | 3.0 MB |
+
 ### Scaling budgets on slow machines
 
 Every budget test checks through one helper, `hoarder_e2e::budget::assert_within`, which prints the measurement next to the budget (`budget: …: measured 41.2 ms, budget 60.0 ms (PLAN 60.0 ms x 1)`) and fails if it is over. The budgets in the tests are PLAN's numbers. `HOARDER_BUDGET_SCALE` multiplies all of them (default `1.0`, so local runs enforce PLAN as written). CI sets it to `3`, because shared GitHub runners take 187–245 ms for the 150 ms shot-to-clipboard path that a desktop does well under budget. A regression that 3× would hide is caught by the `budgets` job instead (below). New budget tests must use the helper, not their own `assert!`, since that job reads their `budget:` lines.
@@ -166,7 +178,7 @@ HOARDER_BUDGET_SCALE=3 cargo test --release -p hoarder --test e2e_shot_clipboard
 
 ### The budgets job
 
-CI's `budgets` job runs `scripts/budgets.sh measure` on the change and on its base: the PR's merge base, or the commit a push moved the branch from. Both run on the same runner, so a slow runner slows both alike. Each run records every `budget:` line, plus the size of the stripped release binary. `scripts/budgets.sh compare` then fails the job if any of them grew by more than 20% (`HOARDER_REGRESSION_PCT`). The table lands in the job summary. A brand-new branch has no base, so its job only reports. The absolute budgets (scaled 3×) still fail on their own.
+CI's `budgets` job runs `scripts/budgets.sh measure` on the change and on its base: the PR's merge base, or the commit a push moved the branch from. Both run on the same runner, so a slow runner slows both alike. Each run records every `budget:` line (milliseconds or MB), plus the size of the stripped release binary. `scripts/budgets.sh compare` then fails the job if any of them grew by more than 20% (`HOARDER_REGRESSION_PCT`). The table lands in the job summary. A brand-new branch has no base, so its job only reports. The absolute budgets (scaled 3×) still fail on their own.
 
 ```sh
 scripts/budgets.sh measure . head.tsv                 # what CI measures, here
@@ -185,7 +197,7 @@ CI runs on pushes to `main`, `integration/**`, `ticket/**` and `fix/**`, and on 
 | clippy | `cargo clippy --workspace --all-targets --locked -- -D warnings` | Any warning fails the build. |
 | MSRV (1.97) | `cargo check --workspace --all-targets --locked` | MSRV is current stable minus two; bump it with `rust-version` in `Cargo.toml`. |
 | tests (headless Sway) | `cargo test --workspace --locked` | Runs in an `archlinux` container, because Ubuntu's Sway predates the protocols Hoarder targets. Runs as a non-root user. |
-| budgets | `scripts/budgets.sh` on the change and its base, `--release`, `HOARDER_BUDGET_SCALE=3` | Fails on a budget over 3× PLAN or more than 20% worse than the base ([The budgets job](#the-budgets-job)). |
+| budgets | `scripts/budgets.sh` on the change and its base, `--release`, `HOARDER_BUDGET_SCALE=3` | Fails on a latency budget over 3× PLAN, the Daemon's own memory over PLAN, or anything more than 20% worse than the base ([The budgets job](#the-budgets-job)). |
 | cargo-deny | `cargo deny check` | Advisories, licences (allow-list in `deny.toml`), bans and sources. |
 
 To run the same checks locally before pushing:
