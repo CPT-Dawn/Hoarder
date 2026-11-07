@@ -10,7 +10,10 @@ Arch Linux (AUR): `hoarder` (from source), `hoarder-bin` (prebuilt), `hoarder-gi
 
 ```sh
 systemctl --user enable --now hoarder   # or: hoarder service enable
+hoarder setup hyprland --apply          # or sway, niri: keybindings and login-time start
 ```
+
+`setup --apply` writes a file of Hoarder's own next to your compositor config (`hoarder.lua` for a Lua `hyprland.lua`, `hoarder.conf` for hyprlang) and prints the one line to add, such as `require("hoarder")`; it never edits your main config.
 
 Elsewhere: a tarball from [Releases](https://github.com/CPT-Dawn/Hoarder/releases), or build a tag with `cargo install --locked --git https://github.com/CPT-Dawn/Hoarder --tag v1.0.0 hoarder`. Nothing is published to crates.io. `hoarder completions bash|zsh|fish` prints a completion script.
 

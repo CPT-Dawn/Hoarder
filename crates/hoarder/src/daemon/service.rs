@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use clap::Subcommand;
 
@@ -100,8 +101,46 @@ fn enable() -> Result<(), (Exit, String)> {
     std::fs::write(&path, unit_text()?).map_err(io)?;
     systemctl(&["daemon-reload"])?;
     systemctl(&["enable", "--now", UNIT])?;
+    // `enable --now` returns once the process is forked, before the Daemon
+    // listens: only claim it runs once it says hello.
+    if !answers_within(START_DEADLINE) {
+        return Err((
+            Exit::Io,
+            format!(
+                "enabled {UNIT}, but the Daemon did not answer within {}s; \
+                 see `journalctl --user -u hoarder` for why",
+                START_DEADLINE.as_secs()
+            ),
+        ));
+    }
     println!("Enabled {UNIT}: the Daemon runs now and on every login.");
     Ok(())
+}
+
+/// How long `enable` waits for a freshly started Daemon to answer.
+const START_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Whether the Daemon answers `hello` on its socket before `deadline` runs
+/// out, asking every 50 ms.
+fn answers_within(deadline: Duration) -> bool {
+    // Without XDG_RUNTIME_DIR the Daemon has nowhere to listen.
+    if hoarder_ipc::socket_path().is_none() {
+        return false;
+    }
+    let until = Instant::now() + deadline;
+    loop {
+        let hello = hoarder_ipc::Connection::connect()
+            .ok()
+            .and_then(|mut c| c.hello().ok())
+            .is_some_and(|r| r.is_ok());
+        if hello {
+            return true;
+        }
+        if Instant::now() >= until {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 fn disable() -> Result<(), (Exit, String)> {

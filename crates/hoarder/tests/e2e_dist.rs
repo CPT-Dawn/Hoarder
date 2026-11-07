@@ -204,13 +204,20 @@ fn service_enable_writes_the_unit_the_package_ships() {
         bin.display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    ok(&Command::new(HOARDER)
+    // The stand-in starts no Daemon, so `enable` honestly fails after
+    // writing the unit; only the unit matters here.
+    let enabled = Command::new(HOARDER)
         .args(["service", "enable"])
         .env_clear()
         .env("HOME", home.path())
         .env("PATH", path)
         .output()
-        .unwrap());
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&enabled.stderr).contains("did not answer"),
+        "{}",
+        String::from_utf8_lossy(&enabled.stderr)
+    );
     let written =
         std::fs::read_to_string(home.path().join(".config/systemd/user/hoarder.service")).unwrap();
 

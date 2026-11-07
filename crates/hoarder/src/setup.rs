@@ -5,6 +5,12 @@
 //! `--apply` writes them to a file of Hoarder's own that the main compositor
 //! config includes. The main config is never written: when it lacks the
 //! include, the line to add is printed instead.
+//!
+//! Hyprland speaks two config languages. A config dir with `hyprland.lua` is
+//! a Lua config: Hoarder's file is then the Lua module `hoarder.lua`, pulled
+//! in by `require("hoarder")` (Hyprland looks modules up next to
+//! `hyprland.lua`). Otherwise it is hyprlang's `hoarder.conf`, pulled in by
+//! `source =`.
 
 use std::path::PathBuf;
 
@@ -52,16 +58,72 @@ impl Wm {
         )
     }
 
+    /// The compositor's own config directory.
+    fn dir(self) -> PathBuf {
+        hoarder_config::config_home().join(match self {
+            Wm::Hyprland => "hypr",
+            Wm::Sway => "sway",
+            Wm::Niri => "niri",
+        })
+    }
+}
+
+/// The language a compositor's config is written in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lang {
+    /// The compositor's own format: hyprlang, Sway's config, niri's KDL.
+    Native,
+    /// Hyprland's Lua config (`hyprland.lua`).
+    Lua,
+}
+
+/// What `setup` writes for one compositor, in the language its config uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Target {
+    pub wm: Wm,
+    pub lang: Lang,
+}
+
+impl Target {
+    /// Read the compositor's config dir: Hyprland with a `hyprland.lua` is a
+    /// Lua config, even beside a `hyprland.conf`, because that is the file
+    /// Hyprland loads then (0.57 ignores `hyprland.conf` entirely).
+    /// Everything else, a fresh Hyprland included, is native.
+    pub fn detect(wm: Wm) -> Self {
+        let lua = wm == Wm::Hyprland && wm.dir().join("hyprland.lua").is_file();
+        Target {
+            wm,
+            lang: if lua { Lang::Lua } else { Lang::Native },
+        }
+    }
+
     /// The included file's contents. Deterministic, so `--apply` is
     /// idempotent.
     pub fn snippet(self) -> String {
         let header = format!(
             "Written by `hoarder setup {} --apply`; re-run it to update this file.",
-            self.name()
+            self.wm.name()
         );
-        let startup = self.startup_command();
-        match self {
-            Wm::Hyprland => format!(
+        let startup = self.wm.startup_command();
+        match (self.wm, self.lang) {
+            (Wm::Hyprland, Lang::Lua) => {
+                let bind = |keys: &str, cmd: &str| {
+                    format!("hl.bind(\"{keys}\", function() hl.exec_cmd(\"{cmd}\") end)\n")
+                };
+                format!(
+                    "-- {header}\n\
+                     -- hyprland.lua loads it with `require(\"hoarder\")`.\n\
+                     hl.on(\"hyprland.start\", function()\n    \
+                         hl.exec_cmd(\"{startup}\")\n\
+                     end)\n\
+                     {}{}{}{}",
+                    bind("Print", "hoarder shot"),
+                    bind("SHIFT + Print", "hoarder shot all"),
+                    bind("ALT + Print", "hoarder pick"),
+                    bind("SUPER + V", "hoarder picker"),
+                )
+            }
+            (Wm::Hyprland, Lang::Native) => format!(
                 "# {header}\n\
                  exec-once = {startup}\n\
                  bind = , Print, exec, hoarder shot\n\
@@ -69,7 +131,7 @@ impl Wm {
                  bind = ALT, Print, exec, hoarder pick\n\
                  bind = SUPER, V, exec, hoarder picker\n"
             ),
-            Wm::Sway => format!(
+            (Wm::Sway, _) => format!(
                 "# {header}\n\
                  exec {startup}\n\
                  bindsym Print exec hoarder shot\n\
@@ -77,7 +139,7 @@ impl Wm {
                  bindsym Mod1+Print exec hoarder pick\n\
                  bindsym Mod4+v exec hoarder picker\n"
             ),
-            Wm::Niri => format!(
+            (Wm::Niri, _) => format!(
                 "// {header}\n\
                  spawn-at-startup \"sh\" \"-c\" \"{startup}\"\n\
                  binds {{\n    \
@@ -90,40 +152,34 @@ impl Wm {
         }
     }
 
-    /// The compositor's own config directory.
-    fn dir(self) -> PathBuf {
-        hoarder_config::config_home().join(match self {
-            Wm::Hyprland => "hypr",
-            Wm::Sway => "sway",
-            Wm::Niri => "niri",
-        })
-    }
-
     /// The file `--apply` writes.
     pub fn include_path(self) -> PathBuf {
-        match self {
-            Wm::Hyprland => self.dir().join("hoarder.conf"),
-            Wm::Sway => self.dir().join("config.d/hoarder"),
-            Wm::Niri => self.dir().join("hoarder.kdl"),
-        }
+        self.wm.dir().join(match (self.wm, self.lang) {
+            (Wm::Hyprland, Lang::Lua) => "hoarder.lua",
+            (Wm::Hyprland, Lang::Native) => "hoarder.conf",
+            (Wm::Sway, _) => "config.d/hoarder",
+            (Wm::Niri, _) => "hoarder.kdl",
+        })
     }
 
     /// The main config, which only the user edits.
     fn main_config(self) -> PathBuf {
-        self.dir().join(match self {
-            Wm::Hyprland => "hyprland.conf",
-            Wm::Sway => "config",
-            Wm::Niri => "config.kdl",
+        self.wm.dir().join(match (self.wm, self.lang) {
+            (Wm::Hyprland, Lang::Lua) => "hyprland.lua",
+            (Wm::Hyprland, Lang::Native) => "hyprland.conf",
+            (Wm::Sway, _) => "config",
+            (Wm::Niri, _) => "config.kdl",
         })
     }
 
     /// The line the main config needs to pull the included file in.
     fn include_line(self) -> String {
         let path = self.include_path();
-        match self {
-            Wm::Hyprland => format!("source = {}", path.display()),
-            Wm::Sway => format!("include {}", path.display()),
-            Wm::Niri => format!("include \"{}\"", path.display()),
+        match (self.wm, self.lang) {
+            (Wm::Hyprland, Lang::Lua) => "require(\"hoarder\")".into(),
+            (Wm::Hyprland, Lang::Native) => format!("source = {}", path.display()),
+            (Wm::Sway, _) => format!("include {}", path.display()),
+            (Wm::Niri, _) => format!("include \"{}\"", path.display()),
         }
     }
 
@@ -132,29 +188,46 @@ impl Wm {
     fn includes(self, main: &str) -> bool {
         main.lines()
             .map(str::trim)
-            .filter(|l| !l.starts_with('#') && !l.starts_with("//"))
-            .any(|l| match self {
-                Wm::Hyprland => l.starts_with("source") && l.contains("hoarder.conf"),
-                Wm::Sway => {
+            .filter(|l| !l.starts_with('#') && !l.starts_with("//") && !l.starts_with("--"))
+            .any(|l| match (self.wm, self.lang) {
+                (Wm::Hyprland, Lang::Lua) => requires_hoarder(l),
+                (Wm::Hyprland, Lang::Native) => {
+                    l.starts_with("source") && l.contains("hoarder.conf")
+                }
+                (Wm::Sway, _) => {
                     l.starts_with("include") && (l.contains("hoarder") || l.contains("config.d/*"))
                 }
-                Wm::Niri => l.starts_with("include") && l.contains("hoarder.kdl"),
+                (Wm::Niri, _) => l.starts_with("include") && l.contains("hoarder.kdl"),
             })
     }
 }
 
+/// Whether a Lua line calls `require` on the `hoarder` module, in any of
+/// Lua's call spellings: `require("hoarder")`, `require "hoarder"`,
+/// `require 'hoarder'`…
+fn requires_hoarder(line: &str) -> bool {
+    let code = line.split("--").next().unwrap_or_default();
+    let squeezed: String = code
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '(' && *c != ')')
+        .collect();
+    squeezed.contains("require\"hoarder\"") || squeezed.contains("require'hoarder'")
+}
+
 pub fn run(wm: Wm, apply: bool, yes: bool) -> Result<(), Fail> {
-    let snippet = wm.snippet();
+    let target = Target::detect(wm);
+    let snippet = target.snippet();
+    let comment = if target.lang == Lang::Lua { "--" } else { "#" };
     if !apply {
         print!("{snippet}");
         println!(
-            "\n# `hoarder setup {} --apply` writes these to {}",
+            "\n{comment} `hoarder setup {} --apply` writes these to {}",
             wm.name(),
-            wm.include_path().display()
+            target.include_path().display()
         );
         return Ok(());
     }
-    let path = wm.include_path();
+    let path = target.include_path();
     let io = |e: std::io::Error| (Exit::Io, format!("cannot write {}: {e}", path.display()));
     let current = match std::fs::read_to_string(&path) {
         Ok(text) => Some(text),
@@ -181,13 +254,13 @@ pub fn run(wm: Wm, apply: bool, yes: bool) -> Result<(), Fail> {
             println!("Wrote {}.", path.display());
         }
     }
-    let main = wm.main_config();
-    let included = std::fs::read_to_string(&main).is_ok_and(|text| wm.includes(&text));
+    let main = target.main_config();
+    let included = std::fs::read_to_string(&main).is_ok_and(|text| target.includes(&text));
     if !included {
         println!(
             "Add this line to {} (Hoarder never edits it):\n    {}",
             main.display(),
-            wm.include_line()
+            target.include_line()
         );
     }
     Ok(())
@@ -257,11 +330,64 @@ mod tests {
         assert_eq!(diff("a\nb\nc\n", "a\nx\nc\nd\n"), " a\n-b\n+x\n c\n+d\n");
     }
 
+    fn native(wm: Wm) -> Target {
+        Target {
+            wm,
+            lang: Lang::Native,
+        }
+    }
+
+    const LUA: Target = Target {
+        wm: Wm::Hyprland,
+        lang: Lang::Lua,
+    };
+
     #[test]
     fn includes_ignores_commented_out_lines() {
-        assert!(!Wm::Hyprland.includes("# source = ~/.config/hypr/hoarder.conf\n"));
-        assert!(Wm::Hyprland.includes("source = ~/.config/hypr/hoarder.conf\n"));
-        assert!(Wm::Niri.includes("include \"hoarder.kdl\"\n"));
-        assert!(!Wm::Niri.includes("// include \"hoarder.kdl\"\n"));
+        let hyprlang = native(Wm::Hyprland);
+        assert!(!hyprlang.includes("# source = ~/.config/hypr/hoarder.conf\n"));
+        assert!(hyprlang.includes("source = ~/.config/hypr/hoarder.conf\n"));
+        assert!(native(Wm::Niri).includes("include \"hoarder.kdl\"\n"));
+        assert!(!native(Wm::Niri).includes("// include \"hoarder.kdl\"\n"));
+    }
+
+    #[test]
+    fn lua_include_is_a_require_of_the_hoarder_module() {
+        for spelling in [
+            "require(\"hoarder\")",
+            "require \"hoarder\"",
+            "require 'hoarder'",
+            "  require( 'hoarder' ) -- clipboard",
+            "local _ = require(\"hoarder\")",
+        ] {
+            assert!(LUA.includes(spelling), "{spelling}");
+        }
+        for other in [
+            "-- require(\"hoarder\")",
+            "require(\"modules.hoarder\")",
+            "require(\"hoarderx\")",
+            "print(\"hoarder\") -- require(\"hoarder\")",
+            "source = ~/.config/hypr/hoarder.conf",
+        ] {
+            assert!(!LUA.includes(other), "{other}");
+        }
+        assert!(!native(Wm::Hyprland).includes("require(\"hoarder\")"));
+    }
+
+    #[test]
+    fn lua_snippet_uses_hyprlands_lua_api() {
+        let lua = LUA.snippet();
+        assert!(lua.starts_with("-- Written by `hoarder setup hyprland --apply`"));
+        assert!(lua.contains(
+            "hl.bind(\"SHIFT + Print\", function() hl.exec_cmd(\"hoarder shot all\") end)\n"
+        ));
+        assert!(lua.contains(
+            "hl.on(\"hyprland.start\", function()\n    hl.exec_cmd(\"systemctl --user \
+             import-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP HYPRLAND_INSTANCE_SIGNATURE \
+             && systemctl --user start hoarder.service\")\nend)\n"
+        ));
+        assert_eq!(LUA.include_line(), "require(\"hoarder\")");
+        assert!(LUA.include_path().ends_with("hypr/hoarder.lua"));
+        assert!(LUA.main_config().ends_with("hypr/hyprland.lua"));
     }
 }
