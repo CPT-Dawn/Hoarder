@@ -136,6 +136,12 @@ pub struct Options {
     pub pick: bool,
 }
 
+/// The Overlay fades in over this long (PLAN.md §4.2): the dimming steps up
+/// to its full strength, one step per frame at least.
+const FADE_IN: Duration = Duration::from_millis(100);
+/// Dimming steps of the fade-in, full strength included.
+const FADE_STEPS: usize = 6;
+
 /// How long to wait for the compositor to present the hidden Overlay before
 /// capturing anyway.
 const HIDE_TIMEOUT: Duration = Duration::from_millis(500);
@@ -253,11 +259,21 @@ fn show(frozen: Option<&Frozen>, started: Instant, options: &Options) -> Result<
     }
 
     for screen in &screens {
-        let dim = match &app.single_pixel {
-            // Premultiplied, full range: black at DIM's alpha.
-            Some(m) => m.create_u32_rgba_buffer(0, 0, 0, DIM[3] as u32 * 0x0101_0101, &qh, ()),
-            None => pixel_buffer(DIM, &app.shm, &qh).map_err(failed)?,
-        };
+        // One black pixel per step of the fade-in, the last at DIM's alpha.
+        let mut fade = (1..=FADE_STEPS)
+            .map(|step| {
+                let alpha = (DIM[3] as usize * step / FADE_STEPS) as u8;
+                match &app.single_pixel {
+                    // Premultiplied, full range.
+                    Some(m) => {
+                        Ok(m.create_u32_rgba_buffer(0, 0, 0, alpha as u32 * 0x0101_0101, &qh, ()))
+                    }
+                    None => pixel_buffer([0, 0, 0, alpha], &app.shm, &qh),
+                }
+            })
+            .collect::<std::io::Result<Vec<_>>>()
+            .map_err(failed)?;
+        let dim = fade.pop().expect("at least one step");
         let view = View::new(
             screen,
             &compositor,
@@ -266,6 +282,7 @@ fn show(frozen: Option<&Frozen>, started: Instant, options: &Options) -> Result<
             &viewporter,
             &app.shm,
             dim,
+            fade,
             Palette::of(&options.theme),
             &qh,
         )
@@ -339,6 +356,11 @@ struct View {
     /// Until there is a selection, the chrome is this one dim pixel stretched
     /// over the output: nothing to paint, nothing to upload.
     dim_buffer: WlBuffer,
+    /// Lighter dim pixels for the fade-in, lightest first.
+    fade: Vec<WlBuffer>,
+    /// When the fade-in started, and the step on screen.
+    fade_start: Option<Instant>,
+    fade_shown: Option<usize>,
     palette: Palette,
     buffers: Vec<ChromeBuffer>,
     drawn: Scene,
@@ -394,6 +416,7 @@ impl View {
         viewporter: &WpViewporter,
         shm: &Shm,
         dim_buffer: WlBuffer,
+        fade: Vec<WlBuffer>,
         palette: Palette,
         qh: &QueueHandle<App>,
     ) -> std::io::Result<View> {
@@ -452,6 +475,9 @@ impl View {
             root_viewport,
             frame,
             dim_buffer,
+            fade,
+            fade_start: None,
+            fade_shown: None,
             palette,
             buffers: Vec::new(),
             drawn: Scene::default(),
@@ -496,15 +522,25 @@ impl View {
         }
         let first = self.buffers.is_empty();
         if first && self.wanted == Scene::default() {
-            if !self.presented {
+            // Fade in: a darker pixel each frame, or as time says.
+            let now = Instant::now();
+            let start = *self.fade_start.get_or_insert(now);
+            let last = self.fade.len();
+            let by_time = (now - start).as_secs_f64() / FADE_IN.as_secs_f64() * (last + 1) as f64;
+            let step = (self.fade_shown.map_or(0, |s| s + 1))
+                .max(by_time as usize)
+                .min(last);
+            if self.fade_shown != Some(step) {
+                let pixel = self.fade.get(step).unwrap_or(&self.dim_buffer);
                 let surface = self.layer.wl_surface();
                 self.root_viewport
                     .set_destination(self.logical.2 as i32, self.logical.3 as i32);
-                surface.attach(Some(&self.dim_buffer), 0, 0);
+                surface.attach(Some(pixel), 0, 0);
                 surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
                 surface.frame(qh, FrameCallbackData(surface.clone()));
                 self.layer.commit();
                 self.frame_pending = true;
+                self.fade_shown = Some(step);
             }
             return Ok(());
         }
@@ -577,6 +613,9 @@ impl Drop for View {
     fn drop(&mut self) {
         self.frame.take();
         self.dim_buffer.destroy();
+        for pixel in self.fade.drain(..) {
+            pixel.destroy();
+        }
         if let Some(b) = self.clear_buffer.take() {
             b.destroy();
         }

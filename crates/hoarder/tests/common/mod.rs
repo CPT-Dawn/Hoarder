@@ -81,7 +81,8 @@ pub struct Overlay {
 
 impl Overlay {
     /// Start `hoarder` with `args` and return once its Overlay has changed
-    /// what every output in `outputs` shows (as seen by grim).
+    /// what every output in `outputs` shows (as seen by grim), and has
+    /// finished fading in.
     pub fn start(session: &Session, args: &[&str], outputs: &[&str]) -> Overlay {
         Self::start_with(session, args, outputs, |_| {})
     }
@@ -115,6 +116,21 @@ impl Overlay {
                     "the Overlay never appeared on {name}"
                 );
                 std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        // The Overlay fades in over 100 ms: wait until the dimming is done,
+        // so what a test looks at next is the Overlay at rest.
+        std::thread::sleep(Duration::from_millis(120));
+        let settle = Instant::now() + Duration::from_secs(1);
+        for name in outputs {
+            let mut last = session.screenshot(name).unwrap();
+            while Instant::now() < settle {
+                std::thread::sleep(Duration::from_millis(40));
+                let now = session.screenshot(name).unwrap();
+                if now == last {
+                    break;
+                }
+                last = now;
             }
         }
         Overlay { child: Some(child) }
