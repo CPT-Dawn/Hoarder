@@ -61,7 +61,7 @@ The native-resolution copy of one output taken before the Overlay appears; the O
 _Avoid_: freeze, snapshot, background
 
 **Refine**:
-The optional step after drawing a Region where it can be resized and confirmed before the Capture is taken.
+The optional step after drawing a Region where it can be resized and confirmed before the Capture is taken. Its toolbar (Capture, Cursor, Cancel) is walked with Tab.
 _Avoid_: edit mode, adjust mode, confirm screen
 
 **Loupe**:

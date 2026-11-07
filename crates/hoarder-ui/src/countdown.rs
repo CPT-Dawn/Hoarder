@@ -12,7 +12,7 @@
 use std::time::{Duration, Instant};
 
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState},
+    compositor::CompositorHandler,
     dispatch2::Dispatch2,
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
@@ -20,15 +20,13 @@ use smithay_client_toolkit::{
     shell::{
         WaylandSurface,
         wlr_layer::{
-            KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
-            LayerSurfaceConfigure,
+            KeyboardInteractivity, Layer, LayerShellHandler, LayerSurface, LayerSurfaceConfigure,
         },
     },
     shm::{Shm, ShmHandler, slot::SlotPool},
 };
 use wayland_client::{
     Connection, QueueHandle,
-    globals::registry_queue_init,
     protocol::{
         wl_callback::{self, WlCallback},
         wl_output::{Transform, WlOutput},
@@ -39,7 +37,8 @@ use wayland_client::{
 
 use crate::chrome::Fonts;
 use crate::geom::Rect;
-use crate::overlay::{Options, OverlayError};
+use crate::overlay::Options;
+use crate::surface::{self, Error, Layered, failed};
 use crate::theme::Theme;
 
 /// The ring's diameter in logical pixels.
@@ -80,22 +79,17 @@ impl RingPalette {
 /// Show the countdown ring for `delay`, then take it off the screen. Returns
 /// once the compositor has presented a frame without it, ready to freeze.
 /// `options` are the Overlay's, for its look.
-pub fn run(delay: Duration, options: &Options) -> Result<(), OverlayError> {
-    let failed = |e: &dyn std::fmt::Display| OverlayError::Failed(e.to_string());
+pub fn run(delay: Duration, options: &Options) -> Result<(), Error> {
     let deadline = Instant::now() + delay;
-    let conn = Connection::connect_to_env().map_err(|e| failed(&e))?;
-    let (globals, mut queue) = registry_queue_init::<Countdown>(&conn).map_err(|e| failed(&e))?;
-    let qh = queue.handle();
-    let missing = |what: &str, e: &dyn std::fmt::Display| {
-        OverlayError::Unsupported(format!(
-            "the compositor does not offer {what}, which the countdown needs: {e}"
-        ))
-    };
-    let compositor =
-        CompositorState::bind(&globals, &qh).map_err(|e| missing("wl_compositor", &e))?;
-    let layer_shell =
-        LayerShell::bind(&globals, &qh).map_err(|e| missing("wlr-layer-shell", &e))?;
-    let shm = Shm::bind(&globals, &qh).map_err(|e| missing("wl_shm", &e))?;
+    let Layered {
+        conn,
+        globals,
+        mut queue,
+        qh,
+        compositor,
+        layer_shell,
+        shm,
+    } = surface::connect::<Countdown>("countdown")?;
 
     let surface = compositor.create_surface(&qh);
     let layer = layer_shell.create_layer_surface(
@@ -128,15 +122,17 @@ pub fn run(delay: Duration, options: &Options) -> Result<(), OverlayError> {
         delay,
         deadline,
     };
-    let ticking = crate::wait::dispatch_until(&mut queue, &mut app, deadline, |_| false);
+    let ticking = hoarder_wayland::wait::dispatch_until(&mut queue, &mut app, deadline, |_| false);
     ticking.map_err(|e| failed(&e))?;
 
     app.clear(&qh).map_err(|e| failed(&e))?;
-    let shown =
-        crate::wait::dispatch_until(&mut queue, &mut app, Instant::now() + CLEAR_TIMEOUT, |a| {
-            a.cleared == Cleared::Shown || !a.configured
-        })
-        .map_err(|e| failed(&e))?;
+    let shown = hoarder_wayland::wait::dispatch_until(
+        &mut queue,
+        &mut app,
+        Instant::now() + CLEAR_TIMEOUT,
+        |a| a.cleared == Cleared::Shown || !a.configured,
+    )
+    .map_err(|e| failed(&e))?;
     if !shown {
         eprintln!("hoarder: the compositor did not confirm the countdown was hidden");
     }

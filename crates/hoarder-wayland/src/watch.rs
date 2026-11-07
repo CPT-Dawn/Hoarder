@@ -12,7 +12,7 @@
 //! sleeping again.
 
 use std::collections::HashMap;
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, OwnedFd};
 
 use wayland_client::backend::{ObjectId, WaylandError};
 use wayland_client::globals::{GlobalList, GlobalListContents, registry_queue_init};
@@ -36,6 +36,9 @@ use wayland_protocols_wlr::data_control::v1::client::{
     zwlr_data_control_offer_v1::{self, ZwlrDataControlOfferV1},
     zwlr_data_control_source_v1::{self, ZwlrDataControlSourceV1},
 };
+
+pub use crate::data_control::DataControl;
+use crate::data_control::{Device, Manager, OfferProxy, Source};
 use wayland_protocols_wlr::foreign_toplevel::v1::client::{
     zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
     zwlr_foreign_toplevel_manager_v1::{self, ZwlrForeignToplevelManagerV1},
@@ -43,29 +46,9 @@ use wayland_protocols_wlr::foreign_toplevel::v1::client::{
 
 use crate::clipboard::{ClipboardError, Selection, hidden_globals};
 
-const EXT_DATA_CONTROL: &str = "ext_data_control_manager_v1";
-const WLR_DATA_CONTROL: &str = "zwlr_data_control_manager_v1";
 const WLR_FOREIGN_TOPLEVEL: &str = "zwlr_foreign_toplevel_manager_v1";
 
 type Result<T> = std::result::Result<T, ClipboardError>;
-
-/// Which data-control protocol a [`Watcher`] ended up with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DataControl {
-    /// `ext-data-control-v1`.
-    Ext,
-    /// `wlr-data-control-unstable-v1`, the fallback.
-    Wlr,
-}
-
-impl DataControl {
-    pub fn name(self) -> &'static str {
-        match self {
-            DataControl::Ext => "ext",
-            DataControl::Wlr => "wlr",
-        }
-    }
-}
 
 /// Something that happened on the Selections.
 #[derive(Debug)]
@@ -122,17 +105,7 @@ impl Watcher {
         let hidden = hidden_globals();
         let available = |name: &str| !hidden.contains(name) && advertises(&globals, name);
 
-        let manager = if available(EXT_DATA_CONTROL) {
-            Manager::Ext(bind(&globals, &qh, 1)?)
-        } else if available(WLR_DATA_CONTROL) {
-            Manager::Wlr(bind(&globals, &qh, 2)?)
-        } else {
-            return Err(ClipboardError::Unsupported(
-                "this compositor offers neither ext-data-control-v1 nor \
-                 wlr-data-control-unstable-v1, which the Daemon needs to watch the clipboard"
-                    .into(),
-            ));
-        };
+        let manager = Manager::bind(&globals, &qh, "the Daemon needs to watch the clipboard")?;
         let seat: WlSeat = bind(&globals, &qh, 2)
             .map_err(|_| ClipboardError::Failed("the compositor has no seat".into()))?;
         if available(WLR_FOREIGN_TOPLEVEL) {
@@ -158,10 +131,7 @@ impl Watcher {
 
     /// The data-control protocol in use.
     pub fn data_control(&self) -> DataControl {
-        match self.manager {
-            Manager::Ext(_) => DataControl::Ext,
-            Manager::Wlr(_) => DataControl::Wlr,
-        }
+        self.manager.kind()
     }
 
     /// A duplicate of the connection's fd, to poll for readability.
@@ -268,123 +238,6 @@ fn advertises(globals: &GlobalList, interface: &str) -> bool {
     globals
         .contents()
         .with_list(|list| list.iter().any(|g| g.interface == interface))
-}
-
-/// The two data-control protocols are the same shape; these enums let the
-/// rest of the module ignore which one is in use.
-#[derive(Debug)]
-enum Manager {
-    Ext(ExtDataControlManagerV1),
-    Wlr(ZwlrDataControlManagerV1),
-}
-
-#[derive(Debug)]
-enum Device {
-    Ext(ExtDataControlDeviceV1),
-    Wlr(ZwlrDataControlDeviceV1),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum OfferProxy {
-    Ext(ExtDataControlOfferV1),
-    Wlr(ZwlrDataControlOfferV1),
-}
-
-#[derive(Debug)]
-enum Source {
-    Ext(ExtDataControlSourceV1),
-    Wlr(ZwlrDataControlSourceV1),
-}
-
-impl Manager {
-    fn get_data_device(&self, seat: &WlSeat, qh: &QueueHandle<State>) -> Device {
-        match self {
-            Manager::Ext(m) => Device::Ext(m.get_data_device(seat, qh, ())),
-            Manager::Wlr(m) => Device::Wlr(m.get_data_device(seat, qh, ())),
-        }
-    }
-
-    fn create_data_source(&self, qh: &QueueHandle<State>, which: Selection) -> Source {
-        match self {
-            Manager::Ext(m) => Source::Ext(m.create_data_source(qh, which)),
-            Manager::Wlr(m) => Source::Wlr(m.create_data_source(qh, which)),
-        }
-    }
-}
-
-impl Device {
-    fn set_selection(&self, which: Selection, source: Option<&Source>) {
-        match (self, which) {
-            (Device::Ext(d), Selection::Clipboard) => d.set_selection(source.map(Source::ext)),
-            (Device::Ext(d), Selection::Primary) => {
-                d.set_primary_selection(source.map(Source::ext))
-            }
-            (Device::Wlr(d), Selection::Clipboard) => d.set_selection(source.map(Source::wlr)),
-            (Device::Wlr(d), Selection::Primary) => {
-                d.set_primary_selection(source.map(Source::wlr))
-            }
-        }
-    }
-}
-
-impl OfferProxy {
-    fn id(&self) -> ObjectId {
-        match self {
-            OfferProxy::Ext(o) => o.id(),
-            OfferProxy::Wlr(o) => o.id(),
-        }
-    }
-
-    fn receive(&self, mime_type: &str, fd: BorrowedFd<'_>) {
-        match self {
-            OfferProxy::Ext(o) => o.receive(mime_type.to_owned(), fd),
-            OfferProxy::Wlr(o) => o.receive(mime_type.to_owned(), fd),
-        }
-    }
-
-    fn destroy(&self) {
-        match self {
-            OfferProxy::Ext(o) => o.destroy(),
-            OfferProxy::Wlr(o) => o.destroy(),
-        }
-    }
-}
-
-impl Source {
-    fn id(&self) -> ObjectId {
-        match self {
-            Source::Ext(s) => s.id(),
-            Source::Wlr(s) => s.id(),
-        }
-    }
-
-    fn offer(&self, mime_type: &str) {
-        match self {
-            Source::Ext(s) => s.offer(mime_type.to_owned()),
-            Source::Wlr(s) => s.offer(mime_type.to_owned()),
-        }
-    }
-
-    fn destroy(&self) {
-        match self {
-            Source::Ext(s) => s.destroy(),
-            Source::Wlr(s) => s.destroy(),
-        }
-    }
-
-    fn ext(&self) -> &ExtDataControlSourceV1 {
-        match self {
-            Source::Ext(s) => s,
-            Source::Wlr(_) => unreachable!("sources match the device's protocol"),
-        }
-    }
-
-    fn wlr(&self) -> &ZwlrDataControlSourceV1 {
-        match self {
-            Source::Wlr(s) => s,
-            Source::Ext(_) => unreachable!("sources match the device's protocol"),
-        }
-    }
 }
 
 /// A toplevel as wlr-foreign-toplevel describes it.

@@ -17,7 +17,7 @@ pub struct Limits {
 
 /// What the policy needs to know about one Clip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Entry {
+pub struct Clip {
     pub id: i64,
     /// Unix time in milliseconds of the latest copy or Restore.
     pub last_used_at: i64,
@@ -30,11 +30,11 @@ pub struct Entry {
 /// first. Clips too large or too old go regardless; then the oldest
 /// unpinned Clips go until the count and total size fit. Pinned Clips stay
 /// even when they alone exceed a limit.
-pub fn evict(clips: &[Entry], limits: &Limits, now: i64) -> Vec<i64> {
-    let mut unpinned: Vec<&Entry> = clips.iter().filter(|c| !c.pinned).collect();
+pub fn evict(clips: &[Clip], limits: &Limits, now: i64) -> Vec<i64> {
+    let mut unpinned: Vec<&Clip> = clips.iter().filter(|c| !c.pinned).collect();
     unpinned.sort_by_key(|c| (c.last_used_at, c.id));
-    let too_big = |c: &Entry| limits.max_clip_bytes.is_some_and(|max| c.size > max);
-    let too_old = |c: &Entry| {
+    let too_big = |c: &Clip| limits.max_clip_bytes.is_some_and(|max| c.size > max);
+    let too_old = |c: &Clip| {
         limits
             .max_age_ms
             .is_some_and(|max| now.saturating_sub(c.last_used_at) > max)
@@ -46,7 +46,7 @@ pub fn evict(clips: &[Entry], limits: &Limits, now: i64) -> Vec<i64> {
             || limits.max_total_bytes.is_some_and(|max| total > max)
     };
     // Too big or too old go first, so the room they free counts below.
-    let (mut evicted, kept): (Vec<&Entry>, Vec<&Entry>) =
+    let (mut evicted, kept): (Vec<&Clip>, Vec<&Clip>) =
         unpinned.into_iter().partition(|c| too_big(c) || too_old(c));
     for clip in &evicted {
         count -= 1;
@@ -72,8 +72,8 @@ mod tests {
     const NOW: i64 = 100 * DAY;
 
     /// A Clip last used `age` ms before [`NOW`].
-    fn clip(id: i64, age: i64, size: u64) -> Entry {
-        Entry {
+    fn clip(id: i64, age: i64, size: u64) -> Clip {
+        Clip {
             id,
             last_used_at: NOW - age,
             pinned: false,
@@ -81,8 +81,8 @@ mod tests {
         }
     }
 
-    fn pinned(id: i64, age: i64, size: u64) -> Entry {
-        Entry {
+    fn pinned(id: i64, age: i64, size: u64) -> Clip {
+        Clip {
             pinned: true,
             ..clip(id, age, size)
         }
@@ -108,7 +108,7 @@ mod tests {
             ..none
         };
         #[rustfmt::skip]
-        let table: Vec<(&str, Vec<Entry>, Limits, Vec<i64>)> = vec![
+        let table: Vec<(&str, Vec<Clip>, Limits, Vec<i64>)> = vec![
             ("no limits keep everything",
              vec![clip(1, 90 * DAY, 1 << 40), clip(2, 0, 1)], none, vec![]),
             ("within max_clips nothing goes",
@@ -143,8 +143,8 @@ mod tests {
             ("equal times go lowest id first",
              vec![clip(2, 1, 1), clip(1, 1, 1)], clips(1), vec![1]),
         ];
-        for (name, entries, limits, expected) in table {
-            assert_eq!(evict(&entries, &limits, NOW), expected, "{name}");
+        for (name, clips, limits, expected) in table {
+            assert_eq!(evict(&clips, &limits, NOW), expected, "{name}");
         }
     }
 }

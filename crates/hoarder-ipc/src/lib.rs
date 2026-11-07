@@ -330,8 +330,8 @@ pub struct EventLine {
 pub struct ClipSummary {
     /// Its id, stable for the Clip's life.
     pub id: i64,
-    /// `text`, `image`, `files` or `other`.
-    pub kind: String,
+    /// What it holds.
+    pub kind: Kind,
     /// A line of text, an image's `W×H`, or the file names.
     pub preview: String,
     /// The app focused when it was copied, if known.
@@ -475,6 +475,42 @@ pub struct SelectionStatus {
     /// otherwise.
     #[serde(default)]
     pub sensitivity: Sensitivity,
+}
+
+/// What a Clip holds, judged from its types: `text`, `image`, `files` or
+/// `other` on the wire. A kind this crate does not know yet reads as
+/// [`Kind::Other`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Kind {
+    /// Text of any kind.
+    Text,
+    /// An image.
+    Image,
+    /// Files, as a `text/uri-list` or `x-special/gnome-copied-files`.
+    Files,
+    /// Anything else.
+    #[default]
+    #[serde(other)]
+    Other,
+}
+
+impl Kind {
+    /// Its name on the wire.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Kind::Text => "text",
+            Kind::Image => "image",
+            Kind::Files => "files",
+            Kind::Other => "other",
+        }
+    }
+}
+
+impl std::fmt::Display for Kind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// How private a Selection change is (ADR-0006).

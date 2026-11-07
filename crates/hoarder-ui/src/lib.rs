@@ -8,7 +8,9 @@
 
 mod chrome;
 pub mod countdown;
+pub mod flash;
 mod geom;
+mod icon;
 mod layers;
 mod loupe;
 pub mod overlay;
@@ -16,8 +18,9 @@ pub mod picker;
 mod select;
 mod snap;
 mod sprite;
+mod surface;
 pub mod theme;
-mod wait;
 
-pub use overlay::{Options, Outcome, OverlayError, Region};
+pub use overlay::{Options, Outcome, Region};
+pub use surface::{Error, TIMINGS_ENV};
 pub use theme::Theme;

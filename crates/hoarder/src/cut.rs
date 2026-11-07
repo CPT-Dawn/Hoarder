@@ -1,10 +1,10 @@
-//! Cutting a Target out of the Frozen Frames under `screenshot.mixed_scale`
-//! and `screenshot.depth` (PLAN.md §4.1 step 5, §4.4).
+//! Cutting a Target out of the Frozen Frames under `capture.mixed_scale`
+//! and `capture.depth` (PLAN.md §4.1 step 5, §4.4).
 //!
 //! The policies only matter where a Target spans outputs at different scales:
 //! a Target on outputs that share one scale is always cut pixel for pixel.
 
-use hoarder_config::{Depth, MixedScale, Screenshot};
+use hoarder_config::{Capture, Depth, MixedScale};
 use hoarder_ui::Region;
 use hoarder_wayland::{FrozenFrame, LogicalRect};
 
@@ -65,12 +65,12 @@ impl Cut {
 
 /// Whether the Overlay must keep a Region on the output where its drag
 /// started: `mixed_scale = "clamp"` on a desktop whose outputs differ in scale.
-pub fn clamps_regions(frames: &[FrozenFrame], settings: &Screenshot) -> bool {
+pub fn clamps_regions(frames: &[FrozenFrame], settings: &Capture) -> bool {
     settings.mixed_scale == MixedScale::Clamp && mixed(frames.iter())
 }
 
 /// Cut `region`, or All Outputs when it is `None`, from `frames`.
-pub fn cut(frames: &[FrozenFrame], region: Option<&Region>, settings: &Screenshot) -> Cut {
+pub fn cut(frames: &[FrozenFrame], region: Option<&Region>, settings: &Capture) -> Cut {
     let mut touched: Vec<&FrozenFrame> = match region {
         Some(r) => frames.iter().filter(|f| overlaps(&f.logical, r)).collect(),
         None => frames.iter().collect(),
@@ -205,7 +205,7 @@ mod tests {
             width: 2.0,
             height: 2.0,
         };
-        let settings = Screenshot::default();
+        let settings = Capture::default();
         assert!(!cut(&frames, Some(&on(1.0)), &settings).badges.hdr);
         assert!(cut(&frames, Some(&on(5.0)), &settings).badges.hdr);
         assert_eq!(

@@ -487,9 +487,10 @@ fn copy_and_paste_exit_3_without_data_control() {
         ("copy", &["-f", "x"]),
     ] {
         let mut cmd = session.command(HOARDER);
-        cmd.arg(tool)
-            .args(args)
-            .env("HOARDER_HIDE_GLOBALS", "ext_data_control_manager_v1");
+        cmd.arg(tool).args(args).env(
+            "HOARDER_HIDE_GLOBALS",
+            "ext_data_control_manager_v1,zwlr_data_control_manager_v1",
+        );
         let out = run(&session, cmd, None);
         assert_eq!(
             out.status.code(),
@@ -498,5 +499,43 @@ fn copy_and_paste_exit_3_without_data_control() {
             out.stderr
         );
         assert!(out.stderr.contains("ext-data-control"), "{}", out.stderr);
+    }
+}
+
+/// Without ext-data-control (Wayfire, older wlroots), `copy` and `paste`
+/// speak wlr-data-control, with no Daemon to lean on.
+#[test]
+fn copy_and_paste_fall_back_to_wlr_data_control() {
+    let session = Session::start_default().unwrap();
+    let wlr_only = |mut cmd: Command| {
+        cmd.env("HOARDER_HIDE_GLOBALS", "ext_data_control_manager_v1");
+        cmd
+    };
+    for primary in [false, true] {
+        let flag: &[&str] = if primary { &["--primary"] } else { &[] };
+        let mut copy = wlr_only(Tool::Hoarder.copy(&session));
+        copy.args(flag).args(["--type", "text/x-hoard", "hello"]);
+        let copied = run(&session, copy, None);
+        assert!(copied.status.success(), "copy: {}", copied.stderr);
+
+        let mut reference = session.command("wl-paste");
+        reference.args(flag).arg("--no-newline");
+        assert_eq!(run(&session, reference, None).stdout, b"hello");
+
+        let mut list = wlr_only(Tool::Hoarder.paste(&session));
+        list.args(flag).arg("--list-types");
+        let types = run(&session, list, None).stdout;
+        assert!(types.starts_with(b"text/x-hoard\n"), "{types:?}");
+        let mut paste = wlr_only(Tool::Hoarder.paste(&session));
+        paste.args(flag).arg("--no-newline");
+        let pasted = run(&session, paste, None);
+        assert_eq!(pasted.stdout, b"hello", "paste: {}", pasted.stderr);
+
+        let mut clear = wlr_only(Tool::Hoarder.copy(&session));
+        clear.args(flag).arg("--clear");
+        assert!(run(&session, clear, None).status.success());
+        let mut gone = session.command("wl-paste");
+        gone.args(flag);
+        assert!(!run(&session, gone, None).status.success(), "cleared");
     }
 }

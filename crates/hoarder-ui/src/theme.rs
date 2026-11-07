@@ -15,9 +15,9 @@
 //! Midnight Bloom, Zenith's default.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use hoarder_config::{Colour, ThemeName};
+use hoarder_config::{Colour, ThemeName, ZenithTheme, zenith_dir};
 
 /// Resolved theme tokens.
 #[derive(Debug, Clone, PartialEq)]
@@ -139,23 +139,18 @@ impl Theme {
 
     /// Zenith's cascade, as described in the module docs.
     fn zenith(dir: &Path) -> Theme {
-        let config = std::fs::read_to_string(dir.join("config.toml"))
-            .ok()
-            .and_then(|t| t.parse::<toml_edit::DocumentMut>().ok());
-        let setting = |key: &str| config.as_ref()?.get("theme")?.get(key).cloned();
-        let base = setting("name")
-            .and_then(|v| v.as_str().and_then(Builtin::from_name))
+        let config = ZenithTheme::read(dir);
+        let base = (config.name.as_deref())
+            .and_then(Builtin::from_name)
             .unwrap_or(Builtin::MidnightBloom);
         let mut vars = Variables::of(&Theme::builtin(base));
-        if let Some(accent) = setting("accent").and_then(|v| v.as_str().map(str::to_owned)) {
-            vars.set("--zb-accent", &accent);
+        if let Some(accent) = &config.accent {
+            vars.set("--zb-accent", accent);
         }
-        if let Some(o) = setting("surface_opacity")
-            .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
-        {
+        if let Some(o) = config.surface_opacity {
             vars.set("--zb-surface-opacity", &o.to_string());
         }
-        if let Some(r) = setting("module_radius").and_then(|v| v.as_integer()) {
+        if let Some(r) = config.module_radius {
             vars.set("--zb-module-radius", &format!("{r}px"));
         }
         if let Ok(css) = std::fs::read_to_string(dir.join("style.css")) {
@@ -165,12 +160,6 @@ impl Theme {
         }
         vars.theme(Theme::builtin(base))
     }
-}
-
-/// `$XDG_CONFIG_HOME/zenith-bar`, where Zenith keeps `config.toml` and
-/// `style.css`.
-pub fn zenith_dir() -> PathBuf {
-    hoarder_config::config_home().join("zenith-bar")
 }
 
 /// CSS custom properties, with `var()` references resolved as they are set.

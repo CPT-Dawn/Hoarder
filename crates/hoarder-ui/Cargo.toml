@@ -11,15 +11,19 @@ authors.workspace = true
 [dependencies]
 cosmic-text.workspace = true
 hoarder-config.workspace = true
+hoarder-ipc.workspace = true
 hoarder-wayland.workspace = true
 nucleo-matcher.workspace = true
+png.workspace = true
 rustix.workspace = true
 smithay-client-toolkit.workspace = true
 tiny-skia.workspace = true
-toml_edit.workspace = true
 wayland-client.workspace = true
 wayland-protocols.workspace = true
 zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

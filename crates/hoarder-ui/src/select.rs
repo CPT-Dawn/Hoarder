@@ -5,7 +5,9 @@
 //! ```text
 //! Idle ──press──► Dragging ──release──► Capture(Region)
 //!  │                 │  Space held: move instead of resize
-//!  │                 └─ Shift+release / confirm ──► Refine ──Enter──► Capture(Region)
+//!  │                 └─ Shift+release / confirm ──► Refine ──Enter──► the toolbar's action
+//!  │                                                  (Tab / Shift+Tab move between Capture,
+//!  │                                                   Cursor and Cancel; Capture first)
 //!  │  O / click ──► Capture(Output under the pointer)
 //!  │  A ──► Capture(All Outputs)
 //!  │  Enter ──► Capture(last Region)
@@ -31,6 +33,22 @@ pub enum Key {
     Right,
     Up,
     Down,
+    /// Next Refine toolbar action (Shift+Tab: the previous one).
+    Tab,
+}
+
+/// The Refine toolbar's actions, left to right (PLAN.md §4.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tool {
+    /// Capture the selection, as Enter always has.
+    Capture,
+    /// Toggle the cursor layer, as `C` does.
+    Cursor,
+    Cancel,
+}
+
+impl Tool {
+    pub const ALL: [Tool; 3] = [Tool::Capture, Tool::Cursor, Tool::Cancel];
 }
 
 /// What the input asks for.
@@ -40,6 +58,8 @@ pub enum Action {
     /// The Output under this point (a click, or `O` at the pointer).
     OutputAt((f64, f64)),
     AllOutputs,
+    /// Toggle the cursor layer (the Refine toolbar's Cursor).
+    ToggleCursor,
     Cancel,
 }
 
@@ -157,6 +177,8 @@ enum State {
         active: Edges,
         /// The handle being dragged, and the pointer's last position.
         grab: Option<(Edges, (f64, f64))>,
+        /// The toolbar action Enter runs, an index into [`Tool::ALL`].
+        tool: usize,
     },
 }
 
@@ -244,6 +266,26 @@ impl Selector {
         matches!(self.state, State::Refine { .. })
     }
 
+    /// In Refine, the toolbar action Enter runs.
+    pub fn tool(&self) -> Option<Tool> {
+        match self.state {
+            State::Refine { tool, .. } => Some(Tool::ALL[tool]),
+            _ => None,
+        }
+    }
+
+    /// Run toolbar action `tool` (a click on it, or Enter on the focused one).
+    pub fn run_tool(&mut self, tool: Tool) -> Option<Action> {
+        let State::Refine { rect, .. } = self.state else {
+            return None;
+        };
+        Some(match tool {
+            Tool::Capture => Action::Region(self.clamped(rect).region()),
+            Tool::Cursor => Action::ToggleCursor,
+            Tool::Cancel => Action::Cancel,
+        })
+    }
+
     pub fn set_shift(&mut self, held: bool) {
         self.shift = held;
     }
@@ -256,7 +298,9 @@ impl Selector {
     /// Left button pressed at `at`.
     pub fn press(&mut self, at: (f64, f64)) {
         match &mut self.state {
-            State::Refine { rect, active, grab } => match rect.grab_at(at) {
+            State::Refine {
+                rect, active, grab, ..
+            } => match rect.grab_at(at) {
                 Some(edges) => {
                     *active = edges;
                     *grab = Some((edges, at));
@@ -300,6 +344,7 @@ impl Selector {
                 rect,
                 active,
                 grab: Some((edges, last)),
+                ..
             } => {
                 rect.shift(edges, (at.0 - last.0, at.1 - last.1));
                 *last = at;
@@ -362,6 +407,7 @@ impl Selector {
             rect,
             active,
             grab: None,
+            tool: 0,
         };
     }
 
@@ -385,10 +431,17 @@ impl Selector {
             Key::AllOutputs => return Some(Action::AllOutputs),
             Key::Output => return None, // resolved by the caller, which knows the pointer
             Key::Cursor => return None,
+            Key::Tab => {
+                if let State::Refine { tool, .. } = &mut self.state {
+                    let n = Tool::ALL.len();
+                    *tool = (*tool + if self.shift { n - 1 } else { 1 }) % n;
+                }
+                return None;
+            }
             Key::Enter => {
                 return match self.state {
                     State::Idle => self.last_region.map(Action::Region),
-                    State::Refine { rect, .. } => Some(Action::Region(self.clamped(rect).region())),
+                    State::Refine { tool, .. } => self.run_tool(Tool::ALL[tool]),
                     State::Dragging { .. } => None,
                 };
             }
@@ -470,6 +523,22 @@ mod tests {
         // The grabbed edge is now the left one, and arrows move it.
         s.key(Key::Left, false, 1.0);
         assert_eq!(s.region(), Some(region(49.0, 100.0, 51.0, 100.0)));
+    }
+
+    #[test]
+    fn tab_walks_the_refine_toolbar_and_enter_runs_the_focused_tool() {
+        let mut s = Selector::new(true, None);
+        assert_eq!(s.tool(), None, "no toolbar outside Refine");
+        s.press((100.0, 100.0));
+        s.release((200.0, 200.0), 1.0);
+        assert_eq!(s.tool(), Some(Tool::Capture));
+        s.key(Key::Tab, false, 1.0);
+        assert_eq!(s.tool(), Some(Tool::Cursor));
+        assert_eq!(s.key(Key::Enter, false, 1.0), Some(Action::ToggleCursor));
+        s.shift = true;
+        s.key(Key::Tab, false, 1.0);
+        s.key(Key::Tab, false, 1.0);
+        assert_eq!(s.tool(), Some(Tool::Cancel), "Shift+Tab wraps backwards");
     }
 
     #[test]

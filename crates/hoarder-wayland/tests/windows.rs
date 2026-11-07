@@ -213,3 +213,20 @@ fn garbage_is_an_error_not_a_panic() {
     assert!(SwayIpc::parse_tree(b"not json").is_err());
     assert!(HyprlandIpc::parse(b"[]", b"{").is_err());
 }
+
+#[test]
+fn sway_and_hyprland_name_the_focused_output() {
+    let sway = br#"[{"name":"HEADLESS-1","focused":false},{"name":"HEADLESS-2","focused":true}]"#;
+    assert_eq!(
+        SwayIpc::parse_focused_output(sway).unwrap().as_deref(),
+        Some("HEADLESS-2")
+    );
+    assert_eq!(SwayIpc::parse_focused_output(b"[]").unwrap(), None);
+    let monitors = include_bytes!("fixtures/hyprland-monitors.json");
+    assert_eq!(
+        HyprlandIpc::parse_focused_output(monitors)
+            .unwrap()
+            .as_deref(),
+        Some("HDMI-A-1")
+    );
+}

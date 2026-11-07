@@ -113,7 +113,7 @@ Idle ──press──► Dragging ──release──► Capture
 | `C` | Toggle the cursor layer |
 | `O`, `A` | Capture the Output / All Outputs |
 | `W` | Cycle through the windows under the pointer |
-| `Tab` (in Refine) | Move between the Refine toolbar actions |
+| `Tab` / `Shift+Tab` (in Refine) | Move between the Refine toolbar actions: Capture (focused first, so Enter still captures), Cursor (toggles the cursor layer) and Cancel; Enter or a click runs one |
 
 **Visual spec.**
 - Outside the selection, the frame is dimmed to 45%.
@@ -189,7 +189,7 @@ selection(null)  ─► the previous Selection was Normal or Concealed, the Daem
   - Built-in patterns: PEM private keys, AWS `AKIA…`, GCP service-account JSON, GitHub `gh[pousr]_…`, Slack `xox[abpr]-`, Stripe `sk_live_`, JWT, and Luhn-valid 13–19-digit card numbers.
 - **Pause** (`hoarder pause [duration]`): nothing is recorded. Persistence and Takeover still work.
 
-**Concealed handling:** buffers are allocated with `memsec` mlock and wrapped in `secrecy`, and zeroized when dropped. They are never written to SQLite. At TTL expiry, if Hoarder still owns the Selection, it clears it.
+**Concealed handling:** bytes are copied into their own pages, locked out of swap with `region::lock`, and zeroized (`zeroize`) when dropped ([ADR-0009](adr/0009-concealed-memory-without-unsafe.md): no `unsafe`, so no `memsec`). They are never written to SQLite. At TTL expiry, if Hoarder still owns the Selection, it clears it.
 
 ### 5.2 `hoarder copy` / `hoarder paste` and the Compat shims
 
@@ -255,6 +255,7 @@ The Zenith module only restores; it never auto-pastes.
   - `Del`: delete.
   - `Ctrl+1–9`: quick restore.
   - `Alt`: reveal Concealed Clips.
+  - `Shift+Arrows`: scroll an image bigger than the preview pane.
   - `Esc`: close.
 - **v1.1 transforms** (`Ctrl+T`): trim, join lines, change case, encode or decode base64/URL/JSON.
 
@@ -299,8 +300,6 @@ confirm = false           # always enter Refine
 freeze = true             # false = --live
 cursor = false
 window_source = "frame"   # frame | toplevel
-mixed_scale = "upscale"   # upscale | clamp | split
-depth = "auto"            # auto | 8
 sound = false
 flash = false
 on_capture = ""           # shell hook
@@ -316,6 +315,10 @@ quality = 92
 quality = 80
 speed = 6
 
+[capture]
+mixed_scale = "upscale"   # upscale | clamp | split
+depth = "auto"            # auto | 8
+
 [pick]
 format = "hex"
 
@@ -324,7 +327,7 @@ persist = true
 deny_types = []
 max_offer_mb = 64
 no_takeover_apps = []     # escape hatch: app_ids whose copies are never taken over
-on_clip = ""
+on_clip = ""              # shell hook per Normal copy, the copy on stdin
 [clipboard.primary]
 persist = false
 history = false

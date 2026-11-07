@@ -86,15 +86,9 @@ fn read_or_template(path: &Path) -> Result<String, (Exit, String)> {
 }
 
 fn write(path: &Path, text: &str) -> Result<(), (Exit, String)> {
-    let io = |e: std::io::Error| (Exit::Io, format!("cannot write {}: {e}", path.display()));
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(io)?;
-    }
-    // Write a sibling and rename it over the file, so a running process never
-    // reads half a file.
-    let tmp = path.with_extension("toml.tmp");
-    std::fs::write(&tmp, text).map_err(io)?;
-    std::fs::rename(&tmp, path).map_err(io)
+    // A running Daemon never reads half a file.
+    hoarder_config::write_atomic(path, text)
+        .map_err(|e| (Exit::Io, format!("cannot write {}: {e}", path.display())))
 }
 
 fn edit_error(path: &Path, e: EditError) -> (Exit, String) {

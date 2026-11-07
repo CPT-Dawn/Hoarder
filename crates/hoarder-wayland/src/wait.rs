@@ -9,7 +9,7 @@ use wayland_client::EventQueue;
 
 /// Dispatch `queue` until `done(state)` holds or `deadline` passes, whichever
 /// comes first. Returns whether `done` held.
-pub(crate) fn dispatch_until<D>(
+pub fn dispatch_until<D>(
     queue: &mut EventQueue<D>,
     state: &mut D,
     deadline: Instant,
@@ -52,7 +52,7 @@ pub(crate) fn dispatch_until<D>(
 
 /// Wait for events from the compositor, or until `deadline` if there is one,
 /// and read them into `queue` (the caller dispatches them).
-pub(crate) fn dispatch_once<D>(
+pub fn dispatch_once<D>(
     queue: &mut EventQueue<D>,
     deadline: Option<Instant>,
 ) -> Result<(), String> {

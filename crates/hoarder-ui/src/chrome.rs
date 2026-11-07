@@ -51,6 +51,8 @@ pub struct Scene {
     pub label: Option<Label>,
     /// Refine's resize handles, filled with the accent colour.
     pub handles: Vec<Rect>,
+    /// Refine's toolbar: one pill per action, the focused one in the accent.
+    pub toolbar: Vec<Label>,
 }
 
 /// A hovered window: tinted, with a border just outside and its title.
@@ -83,6 +85,10 @@ impl Scene {
         if self.handles != next.handles {
             out.extend(&self.handles);
             out.extend(&next.handles);
+        }
+        if self.toolbar != next.toolbar {
+            out.extend(self.toolbar.iter().map(|l| l.rect));
+            out.extend(next.toolbar.iter().map(|l| l.rect));
         }
         out.retain(|r| !r.is_empty());
         out
@@ -118,7 +124,11 @@ impl Scene {
             }
         }
         let window_label = self.window.as_ref().and_then(|w| w.label.as_ref());
-        for label in window_label.into_iter().chain(&self.label) {
+        for label in window_label
+            .into_iter()
+            .chain(&self.label)
+            .chain(&self.toolbar)
+        {
             label.blend_into(canvas, width, area);
         }
     }
@@ -231,6 +241,42 @@ impl Fonts {
     /// radius, at `scale` physical pixels per logical pixel, with its top-left
     /// corner at `(x, y)`.
     pub fn label(&mut self, text: &str, scale: f64, x: i32, y: i32, theme: &Theme) -> Label {
+        self.pill(text, None, scale, x, y, theme)
+    }
+
+    /// [`label`](Self::label) for a window, led by its app's `icon`, or by
+    /// the first letter of `app_id` in an accent square when it has none
+    /// (or only an SVG one).
+    pub(crate) fn window_label(
+        &mut self,
+        text: &str,
+        icon: Option<&tiny_skia::Pixmap>,
+        app_id: &str,
+        scale: f64,
+        theme: &Theme,
+    ) -> Label {
+        let letter = app_id
+            .rsplit('.')
+            .next()
+            .and_then(|s| s.chars().next())
+            .map(|c| c.to_uppercase().to_string());
+        let lead = match (icon, letter) {
+            (Some(icon), _) => Some(Lead::Icon(icon)),
+            (None, Some(letter)) => Some(Lead::Letter(letter)),
+            (None, None) => None,
+        };
+        self.pill(text, lead, scale, 0, 0, theme)
+    }
+
+    fn pill(
+        &mut self,
+        text: &str,
+        lead: Option<Lead<'_>>,
+        scale: f64,
+        x: i32,
+        y: i32,
+        theme: &Theme,
+    ) -> Label {
         let (fonts, cache) = self.get();
         let family = installed_family(fonts, &theme.font);
         let px = |v: f64| (v * scale).round().max(1.0) as f32;
@@ -244,8 +290,11 @@ impl Fonts {
             .map(|r| r.line_w)
             .fold(0.0_f32, f32::max)
             .ceil();
-        let w = (text_w + 2.0 * pad_x) as u32;
-        let h = ((size * 1.3).ceil() + 2.0 * pad_y) as u32;
+        // A square as tall as a line of text, then a gap, before the text.
+        let side = (size * 1.3).ceil();
+        let lead_w = if lead.is_some() { side + pad_x } else { 0.0 };
+        let w = (lead_w + text_w + 2.0 * pad_x) as u32;
+        let h = (side + 2.0 * pad_y) as u32;
         let mut pixmap = tiny_skia::Pixmap::new(w.max(1), h.max(1)).expect("non-empty label");
         let mut paint = tiny_skia::Paint::default();
         let bg = theme.surface;
@@ -260,28 +309,71 @@ impl Fonts {
                 None,
             );
         }
+        match &lead {
+            Some(Lead::Icon(icon)) => {
+                let fit = side / icon.width().max(icon.height()) as f32;
+                pixmap.draw_pixmap(
+                    0,
+                    0,
+                    icon.as_ref(),
+                    &tiny_skia::PixmapPaint {
+                        quality: tiny_skia::FilterQuality::Bicubic,
+                        ..Default::default()
+                    },
+                    tiny_skia::Transform::from_scale(fit, fit).post_translate(pad_x, pad_y),
+                    None,
+                );
+            }
+            Some(Lead::Letter(_)) => {
+                let a = theme.accent;
+                paint.set_color_rgba8(a.r, a.g, a.b, a.a);
+                if let Some(path) = rounded_rect(side, side, side / 4.0) {
+                    let at = tiny_skia::Transform::from_translate(pad_x, pad_y);
+                    pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding, at, None);
+                }
+            }
+            None => {}
+        }
         let (pw, ph) = (pixmap.width() as i32, pixmap.height() as i32);
         let data = pixmap.data_mut();
+        if let Some(Lead::Letter(letter)) = &lead {
+            let mut glyph = Buffer::new(fonts, Metrics::new(size, side));
+            glyph.set_size(None, None);
+            glyph.set_text(
+                letter,
+                &Attrs::new().family(family),
+                Shaping::Advanced,
+                None,
+            );
+            glyph.shape_until_scroll(fonts, false);
+            let glyph_w = glyph
+                .layout_runs()
+                .map(|r| r.line_w)
+                .fold(0.0_f32, f32::max);
+            let left = pad_x as i32 + ((side - glyph_w) / 2.0).round() as i32;
+            let s = theme.surface;
+            glyph.draw(
+                fonts,
+                cache,
+                Color::rgba(s.r, s.g, s.b, 255),
+                |gx, gy, gw, gh, c| {
+                    blend_glyph(data, (pw, ph), (gx + left, gy + pad_y as i32), (gw, gh), c);
+                },
+            );
+        }
+        let text_x = (pad_x + lead_w) as i32;
         buffer.draw(
             fonts,
             cache,
             Color::rgba(theme.text.r, theme.text.g, theme.text.b, theme.text.a),
             |gx, gy, gw, gh, c| {
-                for dy in 0..gh as i32 {
-                    for dx in 0..gw as i32 {
-                        let (x, y) = (gx + dx + pad_x as i32, gy + dy + pad_y as i32);
-                        if x < 0 || y < 0 || x >= pw || y >= ph {
-                            continue;
-                        }
-                        let i = ((y * pw + x) * 4) as usize;
-                        let a = c.a() as u32;
-                        for (k, v) in [c.r(), c.g(), c.b()].into_iter().enumerate() {
-                            let v = v as u32 * a / 255;
-                            data[i + k] = (v + data[i + k] as u32 * (255 - a) / 255) as u8;
-                        }
-                        data[i + 3] = (a + data[i + 3] as u32 * (255 - a) / 255) as u8;
-                    }
-                }
+                blend_glyph(
+                    data,
+                    (pw, ph),
+                    (gx + text_x, gy + pad_y as i32),
+                    (gw, gh),
+                    c,
+                );
             },
         );
         // tiny-skia is RGBA; Argb8888 is BGRA in memory.
@@ -293,6 +385,33 @@ impl Fonts {
             text: text.to_owned(),
             rect: Rect::new(x, y, w as i32, h as i32),
             pixels,
+        }
+    }
+}
+
+/// What leads a window label: the app's icon, or a letter standing in.
+enum Lead<'a> {
+    Icon(&'a tiny_skia::Pixmap),
+    Letter(String),
+}
+
+/// Blend one glyph rectangle of colour `c` (alpha from coverage) into the
+/// premultiplied RGBA `data` of a `size` pixmap, at `at`.
+fn blend_glyph(data: &mut [u8], size: (i32, i32), at: (i32, i32), glyph: (u32, u32), c: Color) {
+    let (pw, ph) = size;
+    for dy in 0..glyph.1 as i32 {
+        for dx in 0..glyph.0 as i32 {
+            let (x, y) = (at.0 + dx, at.1 + dy);
+            if x < 0 || y < 0 || x >= pw || y >= ph {
+                continue;
+            }
+            let i = ((y * pw + x) * 4) as usize;
+            let a = c.a() as u32;
+            for (k, v) in [c.r(), c.g(), c.b()].into_iter().enumerate() {
+                let v = v as u32 * a / 255;
+                data[i + k] = (v + data[i + k] as u32 * (255 - a) / 255) as u8;
+            }
+            data[i + 3] = (a + data[i + 3] as u32 * (255 - a) / 255) as u8;
         }
     }
 }

@@ -1,5 +1,6 @@
-//! The clipboard and primary Selections over `ext-data-control-v1`: read what
-//! is offered, serve our own Offer, clear, and follow changes (PLAN.md §5).
+//! The clipboard and primary Selections over `ext-data-control-v1`, or
+//! `wlr-data-control-unstable-v1` where it is missing: read what is offered,
+//! serve our own Offer, clear, and follow changes (PLAN.md §5).
 //!
 //! Data control needs no focus and no surface, so this works from a terminal,
 //! a script or a background process alike.
@@ -10,7 +11,7 @@ use std::os::fd::{AsFd, OwnedFd};
 use std::sync::Arc;
 
 use wayland_client::backend::ObjectId;
-use wayland_client::globals::{GlobalList, GlobalListContents, registry_queue_init};
+use wayland_client::globals::{GlobalListContents, registry_queue_init};
 use wayland_client::protocol::{
     wl_registry::WlRegistry,
     wl_seat::{self, WlSeat},
@@ -24,10 +25,15 @@ use wayland_protocols::ext::data_control::v1::client::{
     ext_data_control_offer_v1::{self, ExtDataControlOfferV1},
     ext_data_control_source_v1::{self, ExtDataControlSourceV1},
 };
+use wayland_protocols_wlr::data_control::v1::client::{
+    zwlr_data_control_device_v1::{self, ZwlrDataControlDeviceV1},
+    zwlr_data_control_manager_v1::ZwlrDataControlManagerV1,
+    zwlr_data_control_offer_v1::{self, ZwlrDataControlOfferV1},
+    zwlr_data_control_source_v1::{self, ZwlrDataControlSourceV1},
+};
 
 use crate::capture::HIDE_GLOBALS_ENV;
-
-const EXT_DATA_CONTROL: &str = "ext_data_control_manager_v1";
+use crate::data_control::{Device, Manager, OfferProxy};
 
 /// Which Selection to work with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,8 +101,8 @@ pub struct Clipboard {
     conn: Connection,
     queue: EventQueue<State>,
     state: State,
-    manager: ExtDataControlManagerV1,
-    device: ExtDataControlDeviceV1,
+    manager: Manager,
+    device: Device,
 }
 
 impl Clipboard {
@@ -109,16 +115,7 @@ impl Clipboard {
         let qh = queue.handle();
         let mut state = State::default();
 
-        if hidden_globals().contains(EXT_DATA_CONTROL) || !advertises(&globals, EXT_DATA_CONTROL) {
-            return Err(ClipboardError::Unsupported(
-                "this compositor does not offer ext-data-control-v1, \
-                 which Hoarder needs to use the clipboard"
-                    .into(),
-            ));
-        }
-        let manager: ExtDataControlManagerV1 = globals
-            .bind(&qh, 1..=1, ())
-            .map_err(|e| ClipboardError::Unsupported(format!("cannot bind data control: {e}")))?;
+        let manager = Manager::bind(&globals, &qh, "Hoarder needs to use the clipboard")?;
 
         let seats: Vec<(u32, u32)> = globals.contents().with_list(|list| {
             list.iter()
@@ -146,7 +143,7 @@ impl Clipboard {
             })
         })?;
 
-        let device = manager.get_data_device(&wl_seat, &qh, ());
+        let device = manager.get_data_device(&wl_seat, &qh);
         // The device announces the current Selections right away.
         queue.roundtrip(&mut state).map_err(failed)?;
         Ok(Clipboard {
@@ -193,7 +190,7 @@ impl Clipboard {
             .clone();
         let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
             .map_err(std::io::Error::from)?;
-        offer.receive(mime_type.to_owned(), write.as_fd());
+        offer.receive(mime_type, write.as_fd());
         drop(write);
         self.conn
             .flush()
@@ -205,10 +202,7 @@ impl Clipboard {
 
     /// Give up `which`, leaving nothing copied.
     pub fn clear(&mut self, which: Selection) -> Result<()> {
-        match which {
-            Selection::Clipboard => self.device.set_selection(None),
-            Selection::Primary => self.device.set_primary_selection(None),
-        }
+        self.device.set_selection(which, None);
         self.queue.roundtrip(&mut self.state).map_err(failed)?;
         Ok(())
     }
@@ -224,14 +218,11 @@ impl Clipboard {
         ready: impl FnOnce(),
     ) -> Result<()> {
         let qh = self.queue.handle();
-        let source = self.manager.create_data_source(&qh, ());
+        let source = self.manager.create_data_source(&qh, which);
         for r in &representations {
-            source.offer(r.mime_type.clone());
+            source.offer(&r.mime_type);
         }
-        match which {
-            Selection::Clipboard => self.device.set_selection(Some(&source)),
-            Selection::Primary => self.device.set_primary_selection(Some(&source)),
-        }
+        self.device.set_selection(which, Some(&source));
         self.queue.roundtrip(&mut self.state).map_err(failed)?;
         ready();
 
@@ -276,12 +267,6 @@ fn failed(e: impl std::fmt::Display) -> ClipboardError {
     ClipboardError::Failed(format!("lost the compositor: {e}"))
 }
 
-fn advertises(globals: &GlobalList, interface: &str) -> bool {
-    globals
-        .contents()
-        .with_list(|list| list.iter().any(|g| g.interface == interface))
-}
-
 pub(crate) fn hidden_globals() -> HashSet<String> {
     std::env::var(HIDE_GLOBALS_ENV)
         .unwrap_or_default()
@@ -295,8 +280,8 @@ pub(crate) fn hidden_globals() -> HashSet<String> {
 struct State {
     seats: Vec<(WlSeat, Option<String>)>,
     mime_types: HashMap<ObjectId, Vec<String>>,
-    clipboard: Option<ExtDataControlOfferV1>,
-    primary: Option<ExtDataControlOfferV1>,
+    clipboard: Option<OfferProxy>,
+    primary: Option<OfferProxy>,
     /// Bumped on every Selection event, so a watcher sees each change.
     generations: [u64; 2],
     sends: Vec<(String, OwnedFd)>,
@@ -305,7 +290,7 @@ struct State {
 }
 
 impl State {
-    fn current(&self, which: Selection) -> Option<&ExtDataControlOfferV1> {
+    fn current(&self, which: Selection) -> Option<&OfferProxy> {
         match which {
             Selection::Clipboard => self.clipboard.as_ref(),
             Selection::Primary => self.primary.as_ref(),
@@ -316,7 +301,7 @@ impl State {
         self.generations[which as usize]
     }
 
-    fn set(&mut self, which: Selection, offer: Option<ExtDataControlOfferV1>) {
+    fn set(&mut self, which: Selection, offer: Option<OfferProxy>) {
         let slot = match which {
             Selection::Clipboard => &mut self.clipboard,
             Selection::Primary => &mut self.primary,
@@ -372,69 +357,98 @@ impl Dispatch<WlSeat, usize> for State {
 }
 
 delegate_noop!(State: ignore ExtDataControlManagerV1);
+delegate_noop!(State: ignore ZwlrDataControlManagerV1);
 
-impl Dispatch<ExtDataControlDeviceV1, ()> for State {
-    fn event(
-        state: &mut Self,
-        _: &ExtDataControlDeviceV1,
-        event: ext_data_control_device_v1::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-        use ext_data_control_device_v1::Event;
-        match event {
-            Event::DataOffer { id } => {
-                state.mime_types.insert(id.id(), Vec::new());
+/// The device, offer and source handlers, once per data-control protocol.
+macro_rules! data_control {
+    ($variant:ident, $device:ty, $device_mod:ident, $offer:ty, $offer_mod:ident, $source:ty, $source_mod:ident) => {
+        impl Dispatch<$device, ()> for State {
+            fn event(
+                state: &mut Self,
+                _: &$device,
+                event: $device_mod::Event,
+                _: &(),
+                _: &Connection,
+                _: &QueueHandle<Self>,
+            ) {
+                use $device_mod::Event;
+                match event {
+                    Event::DataOffer { id } => {
+                        state.mime_types.insert(id.id(), Vec::new());
+                    }
+                    Event::Selection { id } => {
+                        state.set(Selection::Clipboard, id.map(OfferProxy::$variant))
+                    }
+                    Event::PrimarySelection { id } => {
+                        state.set(Selection::Primary, id.map(OfferProxy::$variant))
+                    }
+                    Event::Finished => state.finished = true,
+                    _ => {}
+                }
             }
-            Event::Selection { id } => state.set(Selection::Clipboard, id),
-            Event::PrimarySelection { id } => state.set(Selection::Primary, id),
-            Event::Finished => state.finished = true,
-            _ => {}
-        }
-    }
 
-    event_created_child!(State, ExtDataControlDeviceV1, [
-        ext_data_control_device_v1::EVT_DATA_OFFER_OPCODE => (ExtDataControlOfferV1, ()),
-    ]);
+            event_created_child!(State, $device, [
+                $device_mod::EVT_DATA_OFFER_OPCODE => ($offer, ()),
+            ]);
+        }
+
+        impl Dispatch<$offer, ()> for State {
+            fn event(
+                state: &mut Self,
+                offer: &$offer,
+                event: $offer_mod::Event,
+                _: &(),
+                _: &Connection,
+                _: &QueueHandle<Self>,
+            ) {
+                if let $offer_mod::Event::Offer { mime_type } = event {
+                    state
+                        .mime_types
+                        .entry(offer.id())
+                        .or_default()
+                        .push(mime_type);
+                }
+            }
+        }
+
+        impl Dispatch<$source, Selection> for State {
+            fn event(
+                state: &mut Self,
+                source: &$source,
+                event: $source_mod::Event,
+                _: &Selection,
+                _: &Connection,
+                _: &QueueHandle<Self>,
+            ) {
+                match event {
+                    $source_mod::Event::Send { mime_type, fd } => {
+                        state.sends.push((mime_type, fd));
+                    }
+                    $source_mod::Event::Cancelled => {
+                        state.cancelled.insert(source.id());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    };
 }
 
-impl Dispatch<ExtDataControlOfferV1, ()> for State {
-    fn event(
-        state: &mut Self,
-        offer: &ExtDataControlOfferV1,
-        event: ext_data_control_offer_v1::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-        if let ext_data_control_offer_v1::Event::Offer { mime_type } = event {
-            state
-                .mime_types
-                .entry(offer.id())
-                .or_default()
-                .push(mime_type);
-        }
-    }
-}
-
-impl Dispatch<ExtDataControlSourceV1, ()> for State {
-    fn event(
-        state: &mut Self,
-        source: &ExtDataControlSourceV1,
-        event: ext_data_control_source_v1::Event,
-        _: &(),
-        _: &Connection,
-        _: &QueueHandle<Self>,
-    ) {
-        match event {
-            ext_data_control_source_v1::Event::Send { mime_type, fd } => {
-                state.sends.push((mime_type, fd));
-            }
-            ext_data_control_source_v1::Event::Cancelled => {
-                state.cancelled.insert(source.id());
-            }
-            _ => {}
-        }
-    }
-}
+data_control!(
+    Ext,
+    ExtDataControlDeviceV1,
+    ext_data_control_device_v1,
+    ExtDataControlOfferV1,
+    ext_data_control_offer_v1,
+    ExtDataControlSourceV1,
+    ext_data_control_source_v1
+);
+data_control!(
+    Wlr,
+    ZwlrDataControlDeviceV1,
+    zwlr_data_control_device_v1,
+    ZwlrDataControlOfferV1,
+    zwlr_data_control_offer_v1,
+    ZwlrDataControlSourceV1,
+    zwlr_data_control_source_v1
+);

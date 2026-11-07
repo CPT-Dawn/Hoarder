@@ -20,7 +20,7 @@ use rustix::io::Errno;
 use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, recvmsg};
 
 use super::history::{Job, to_value};
-use super::{Daemon, Fail};
+use super::{Daemon, Fail, ReplyTo};
 use crate::Exit;
 
 /// A request line longer than this is not a Front end talking.
@@ -32,14 +32,14 @@ const MAX_PENDING: usize = 64 * 1024 * 1024;
 
 /// Connected Front ends, by connection number.
 #[derive(Debug, Default)]
-pub(super) struct Clients {
+pub(super) struct FrontEnds {
     next: u64,
-    open: HashMap<u64, Client>,
+    open: HashMap<u64, FrontEnd>,
 }
 
 /// One connected Front end.
 #[derive(Debug)]
-struct Client {
+struct FrontEnd {
     /// The write half of the connection.
     writer: UnixStream,
     /// Its unfinished input line.
@@ -134,16 +134,16 @@ impl Daemon {
         let Ok(writer) = stream.try_clone() else {
             return;
         };
-        let id = self.clients.next;
-        self.clients.next += 1;
+        let id = self.front_ends.next;
+        self.front_ends.next += 1;
         let inserted = self.handle.insert_source(
             Generic::new(stream, Interest::READ, Mode::Level),
-            move |_, stream, daemon: &mut Daemon| Ok(daemon.on_client(id, stream)),
+            move |_, stream, daemon: &mut Daemon| Ok(daemon.on_front_end(id, stream)),
         );
         if inserted.is_ok() {
-            self.clients.open.insert(
+            self.front_ends.open.insert(
                 id,
-                Client {
+                FrontEnd {
                     writer,
                     buf: Vec::new(),
                     fds: VecDeque::new(),
@@ -156,7 +156,7 @@ impl Daemon {
         }
     }
 
-    fn on_client(&mut self, id: u64, stream: &UnixStream) -> PostAction {
+    fn on_front_end(&mut self, id: u64, stream: &UnixStream) -> PostAction {
         let mut chunk = [0u8; 4096];
         loop {
             let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(4))];
@@ -169,26 +169,26 @@ impl Daemon {
             );
             match received {
                 Ok(msg) => {
-                    let Some(client) = self.clients.open.get_mut(&id) else {
+                    let Some(front_end) = self.front_ends.open.get_mut(&id) else {
                         return PostAction::Remove;
                     };
                     for message in ancillary.drain() {
                         if let RecvAncillaryMessage::ScmRights(fds) = message {
-                            client.fds.extend(fds);
+                            front_end.fds.extend(fds);
                         }
                     }
                     let n = msg.bytes;
-                    client.buf.extend_from_slice(&chunk[..n]);
-                    let flooded = client.buf.len() > MAX_LINE && !client.buf.contains(&b'\n');
-                    if flooded || client.fds.len() > MAX_FDS {
-                        self.clients.open.remove(&id);
+                    front_end.buf.extend_from_slice(&chunk[..n]);
+                    let flooded = front_end.buf.len() > MAX_LINE && !front_end.buf.contains(&b'\n');
+                    if flooded || front_end.fds.len() > MAX_FDS {
+                        self.front_ends.open.remove(&id);
                         return PostAction::Remove;
                     }
                     if n == 0 {
                         // A last line may lack its newline.
-                        client.eof = true;
-                        if !client.buf.is_empty() {
-                            client.buf.push(b'\n');
+                        front_end.eof = true;
+                        if !front_end.buf.is_empty() {
+                            front_end.buf.push(b'\n');
                         }
                         break;
                     }
@@ -196,7 +196,7 @@ impl Daemon {
                 Err(Errno::AGAIN) => break,
                 Err(Errno::INTR) => {}
                 Err(_) => {
-                    self.clients.open.remove(&id);
+                    self.front_ends.open.remove(&id);
                     return PostAction::Remove;
                 }
             }
@@ -204,8 +204,8 @@ impl Daemon {
         while let Some(line) = self.take_line(id) {
             self.request(id, &line);
         }
-        match self.clients.open.get(&id) {
-            Some(client) if !client.eof => PostAction::Continue,
+        match self.front_ends.open.get(&id) {
+            Some(front_end) if !front_end.eof => PostAction::Continue,
             // Nothing more to read; the connection lives on for its answers.
             Some(_) => {
                 self.hang_up_if_done(id);
@@ -215,36 +215,39 @@ impl Daemon {
         }
     }
 
-    /// Drop a client that has stopped sending once it has had every answer
+    /// Drop a Front end that has stopped sending once it has had every answer
     /// it is owed. A subscriber stays until a write to it fails.
     fn hang_up_if_done(&mut self, id: u64) {
-        let done = self.clients.open.get(&id).is_some_and(|c| {
+        let done = self.front_ends.open.get(&id).is_some_and(|c| {
             c.eof && c.buf.is_empty() && c.awaiting == 0 && c.pending.is_empty() && !c.subscribed
         });
         if done {
-            self.clients.open.remove(&id);
+            self.front_ends.open.remove(&id);
         }
     }
 
     fn take_line(&mut self, id: u64) -> Option<String> {
-        let buf = &mut self.clients.open.get_mut(&id)?.buf;
+        let buf = &mut self.front_ends.open.get_mut(&id)?.buf;
         let end = buf.iter().position(|b| *b == b'\n')?;
         let line: Vec<u8> = buf.drain(..=end).collect();
         Some(String::from_utf8_lossy(&line).trim().to_owned())
     }
 
-    fn request(&mut self, client: u64, line: &str) {
+    fn request(&mut self, front_end: u64, line: &str) {
         if line.is_empty() {
             return;
         }
-        if let Some(c) = self.clients.open.get_mut(&client) {
+        if let Some(c) = self.front_ends.open.get_mut(&front_end) {
             c.awaiting += 1;
         }
         let request = match hoarder_ipc::parse_request(line) {
             Ok(r) => r,
-            Err(response) => return self.send_response(client, &response),
+            Err(response) => return self.send_response(front_end, &response),
         };
-        let id = request.id;
+        let to = ReplyTo {
+            front_end,
+            id: request.id,
+        };
         match request.op {
             Op::Hello => {
                 let hello = Hello {
@@ -253,11 +256,11 @@ impl Daemon {
                     daemon: env!("CARGO_PKG_VERSION").into(),
                     pid: std::process::id(),
                 };
-                self.reply(client, id, Ok(to_value(&hello)));
+                self.reply(to, Ok(to_value(&hello)));
             }
             Op::Status => {
                 let status = self.status();
-                self.reply(client, id, Ok(to_value(&status)));
+                self.reply(to, Ok(to_value(&status)));
             }
             Op::Reload => {
                 let result = self
@@ -267,89 +270,68 @@ impl Daemon {
                         code: ErrorCode::Failed,
                         message,
                     });
-                self.reply(client, id, result);
+                self.reply(to, result);
             }
-            Op::Clear { selection } => self.clear(client, id, super::from_ipc(selection)),
+            Op::Clear { selection } => self.clear(to, super::from_ipc(selection)),
             Op::List { limit, concealed } => {
                 let extra = if concealed {
                     self.concealed_summaries()
                 } else {
                     Vec::new()
                 };
-                let job = Job::List {
-                    client,
-                    id,
-                    limit,
-                    extra,
-                };
-                self.ask_history(client, id, job);
+                let job = Job::List { to, limit, extra };
+                self.ask_history(to, job);
             }
             Op::Search { query, limit } => {
-                let job = Job::Search {
-                    client,
-                    id,
-                    query,
-                    limit,
-                };
-                self.ask_history(client, id, job);
+                let job = Job::Search { to, query, limit };
+                self.ask_history(to, job);
             }
             Op::Get { clip, mime } => {
-                let Some(pipe) = self.take_fd(client, id, "get streams into a pipe") else {
+                let Some(pipe) = self.take_fd(to, "get streams into a pipe") else {
                     return;
                 };
                 if let Some(vault_id) = super::concealed::vault_id(clip) {
                     let got = self.get_concealed(vault_id, mime, pipe);
-                    return self.reply(client, id, got);
+                    return self.reply(to, got);
                 }
                 let job = Job::Get {
-                    client,
-                    id,
+                    to,
                     clip,
                     mime,
                     pipe,
                 };
-                self.ask_history(client, id, job);
+                self.ask_history(to, job);
             }
             Op::Thumb { clip } => {
-                let Some(pipe) = self.take_fd(client, id, "thumb streams into a pipe") else {
+                let Some(pipe) = self.take_fd(to, "thumb streams into a pipe") else {
                     return;
                 };
-                let job = Job::Thumb {
-                    client,
-                    id,
-                    clip,
-                    pipe,
-                };
-                self.ask_history(client, id, job);
+                let job = Job::Thumb { to, clip, pipe };
+                self.ask_history(to, job);
             }
             Op::Restore { clip, plain } if clip < 0 => {
-                self.restore_concealed(client, id, clip, plain);
+                self.restore_concealed(to, clip, plain);
             }
             Op::Restore { clip, plain } => {
-                let job = Job::Restore {
-                    client,
-                    id,
-                    clip,
-                    plain,
-                };
-                self.ask_history(client, id, job);
+                let job = Job::Restore { to, clip, plain };
+                self.ask_history(to, job);
             }
             Op::Delete { clip } if clip < 0 => {
                 let result = self.delete_concealed(clip);
-                self.reply(client, id, result);
+                self.reply(to, result);
             }
-            Op::Delete { clip } => self.ask_history(client, id, Job::Delete { client, id, clip }),
+            Op::Delete { clip } => self.ask_history(to, Job::Delete { to, clip }),
             Op::Offer {
                 selection,
                 types,
                 sensitive,
                 once,
             } => {
-                let Some(file) = self.take_fd(client, id, "offer data comes in a memfd") else {
+                let Some(file) = self.take_fd(to, "offer data comes in a memfd") else {
                     return;
                 };
                 if types.is_empty() {
-                    return self.reply(client, id, Err(bad_request("offer needs types")));
+                    return self.reply(to, Err(bad_request("offer needs types")));
                 }
                 match read_payload(file) {
                     Ok(data) => {
@@ -360,13 +342,13 @@ impl Daemon {
                             once,
                             data,
                         };
-                        self.offer(client, id, offer);
+                        self.offer(to, offer);
                     }
-                    Err(failure) => self.reply(client, id, Err(failure)),
+                    Err(failure) => self.reply(to, Err(failure)),
                 }
             }
             Op::Paste { selection, mime } => {
-                let Some(pipe) = self.take_fd(client, id, "paste streams into a pipe") else {
+                let Some(pipe) = self.take_fd(to, "paste streams into a pipe") else {
                     return;
                 };
                 let result = self
@@ -376,13 +358,13 @@ impl Daemon {
                         code: ErrorCode::NotFound,
                         message,
                     });
-                self.reply(client, id, result);
+                self.reply(to, result);
             }
             Op::Subscribe => {
-                if let Some(c) = self.clients.open.get_mut(&client) {
+                if let Some(c) = self.front_ends.open.get_mut(&front_end) {
                     c.subscribed = true;
                 }
-                self.reply(client, id, Ok(Value::Null));
+                self.reply(to, Ok(Value::Null));
                 for which in super::SELECTIONS {
                     let event = hoarder_ipc::Event::Selection {
                         selection: super::to_ipc(which),
@@ -390,40 +372,28 @@ impl Daemon {
                             .as_ref()
                             .map(|o| o.mime_types.clone()),
                     };
-                    self.send_event(client, &event);
+                    self.send_event(front_end, &event);
                 }
                 let state = hoarder_ipc::Event::State(self.recording());
-                self.send_event(client, &state);
+                self.send_event(front_end, &state);
             }
             Op::Pin { clip } | Op::Unpin { clip } => {
                 let pinned = matches!(request.op, Op::Pin { .. });
-                self.ask_history(
-                    client,
-                    id,
-                    Job::Pin {
-                        client,
-                        id,
-                        clip,
-                        pinned,
-                    },
-                );
+                self.ask_history(to, Job::Pin { to, clip, pinned });
             }
-            Op::ClearHistory { pinned } => {
-                self.ask_history(client, id, Job::Clear { client, id, pinned })
-            }
+            Op::ClearHistory { pinned } => self.ask_history(to, Job::Clear { to, pinned }),
             Op::Pause { secs } => {
                 let recording = self.pause(secs);
-                self.reply(client, id, Ok(to_value(&recording)));
+                self.reply(to, Ok(to_value(&recording)));
             }
             Op::Resume => {
                 let recording = self.resume();
-                self.reply(client, id, Ok(to_value(&recording)));
+                self.reply(to, Ok(to_value(&recording)));
             }
             // `parse_request` only yields ops this crate knows, and this
             // Daemon handles them all; a newer hoarder-ipc is caught here.
             _ => self.reply(
-                client,
-                id,
+                to,
                 Err(Failure {
                     code: ErrorCode::UnknownOp,
                     message: "this Daemon does not handle that op yet".into(),
@@ -432,17 +402,17 @@ impl Daemon {
         }
     }
 
-    /// The oldest fd `client` passed and no request has taken yet; without
-    /// one, answers `id` with `needs` and returns `None`.
-    fn take_fd(&mut self, client: u64, id: u64, needs: &str) -> Option<OwnedFd> {
+    /// The oldest fd the Front end behind `to` passed and no request has
+    /// taken yet; without one, answers `to` with `needs` and returns `None`.
+    fn take_fd(&mut self, to: ReplyTo, needs: &str) -> Option<OwnedFd> {
         let fd = self
-            .clients
+            .front_ends
             .open
-            .get_mut(&client)
+            .get_mut(&to.front_end)
             .and_then(|c| c.fds.pop_front());
         if fd.is_none() {
             let why = format!("{needs} passed with the request (SCM_RIGHTS)");
-            self.reply(client, id, Err(bad_request(&why)));
+            self.reply(to, Err(bad_request(&why)));
         }
         fd
     }
@@ -450,57 +420,57 @@ impl Daemon {
     /// Tell every subscribed Front end about `event`.
     pub(super) fn broadcast(&mut self, event: &hoarder_ipc::Event) {
         let subscribed: Vec<u64> = self
-            .clients
+            .front_ends
             .open
             .iter()
             .filter(|(_, c)| c.subscribed)
             .map(|(id, _)| *id)
             .collect();
-        for client in subscribed {
-            self.send_event(client, event);
+        for front_end in subscribed {
+            self.send_event(front_end, event);
         }
     }
 
-    fn send_event(&mut self, client: u64, event: &hoarder_ipc::Event) {
+    fn send_event(&mut self, front_end: u64, event: &hoarder_ipc::Event) {
         let line = hoarder_ipc::encode(&EventLine {
             v: PROTOCOL,
             event: event.clone(),
         });
-        self.send_line(client, &line);
+        self.send_line(front_end, &line);
     }
 
     /// Hand a request to the History thread, which answers it.
-    fn ask_history(&mut self, client: u64, id: u64, job: Job) {
+    fn ask_history(&mut self, to: ReplyTo, job: Job) {
         if let Err(failure) = self.history.send(job) {
-            self.reply(client, id, Err(failure));
+            self.reply(to, Err(failure));
         }
     }
 
-    pub(super) fn reply(&mut self, client: u64, id: u64, result: Result<Value, Failure>) {
+    pub(super) fn reply(&mut self, to: ReplyTo, result: Result<Value, Failure>) {
         let outcome = match result {
             Ok(v) => Outcome::Ok(v),
             Err(f) => Outcome::Err(f),
         };
         let response = Response {
             v: PROTOCOL,
-            id: Some(id),
+            id: Some(to.id),
             outcome,
         };
-        self.send_response(client, &response);
+        self.send_response(to.front_end, &response);
     }
 
-    fn send_response(&mut self, client: u64, response: &Response) {
-        if let Some(c) = self.clients.open.get_mut(&client) {
+    fn send_response(&mut self, front_end: u64, response: &Response) {
+        if let Some(c) = self.front_ends.open.get_mut(&front_end) {
             c.awaiting = c.awaiting.saturating_sub(1);
         }
-        self.send_line(client, &hoarder_ipc::encode(response));
-        self.hang_up_if_done(client);
+        self.send_line(front_end, &hoarder_ipc::encode(response));
+        self.hang_up_if_done(front_end);
     }
 
-    fn send_line(&mut self, client: u64, line: &str) {
-        let Some(Client {
+    fn send_line(&mut self, front_end: u64, line: &str) {
+        let Some(FrontEnd {
             writer, pending, ..
-        }) = self.clients.open.get_mut(&client)
+        }) = self.front_ends.open.get_mut(&front_end)
         else {
             return;
         };
@@ -511,7 +481,7 @@ impl Daemon {
             match write_some(writer, line.as_bytes()) {
                 Ok(n) => &line.as_bytes()[n..],
                 Err(_) => {
-                    self.clients.open.remove(&client);
+                    self.front_ends.open.remove(&front_end);
                     return;
                 }
             }
@@ -521,7 +491,7 @@ impl Daemon {
         }
         if unsent.len() + pending.len() > MAX_PENDING {
             // A Front end that reads nothing is not worth our memory.
-            self.clients.open.remove(&client);
+            self.front_ends.open.remove(&front_end);
             return;
         }
         pending.extend_from_slice(unsent);
@@ -530,35 +500,35 @@ impl Daemon {
         }
         // Finish the reply whenever the Front end makes room for it.
         let Ok(fd) = writer.try_clone() else {
-            self.clients.open.remove(&client);
+            self.front_ends.open.remove(&front_end);
             return;
         };
         let inserted = self.handle.insert_source(
             Generic::new(fd, Interest::WRITE, Mode::Level),
-            move |_, _, daemon: &mut Daemon| Ok(daemon.on_writable(client)),
+            move |_, _, daemon: &mut Daemon| Ok(daemon.on_writable(front_end)),
         );
         if inserted.is_err() {
-            self.clients.open.remove(&client);
+            self.front_ends.open.remove(&front_end);
         }
     }
 
-    /// Send what is pending for `client`; stop watching once all is sent.
-    fn on_writable(&mut self, client: u64) -> PostAction {
-        let Some(c) = self.clients.open.get_mut(&client) else {
+    /// Send what is pending for `front_end`; stop watching once all is sent.
+    fn on_writable(&mut self, front_end: u64) -> PostAction {
+        let Some(c) = self.front_ends.open.get_mut(&front_end) else {
             return PostAction::Remove;
         };
         match write_some(&mut c.writer, &c.pending) {
             Ok(n) => {
                 c.pending.drain(..n);
                 if c.pending.is_empty() {
-                    self.hang_up_if_done(client);
+                    self.hang_up_if_done(front_end);
                     PostAction::Remove
                 } else {
                     PostAction::Continue
                 }
             }
             Err(_) => {
-                self.clients.open.remove(&client);
+                self.front_ends.open.remove(&front_end);
                 PostAction::Remove
             }
         }

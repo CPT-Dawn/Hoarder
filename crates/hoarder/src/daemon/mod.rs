@@ -85,6 +85,27 @@ pub fn run(overrides: &[(String, String)]) -> Result<(), Fail> {
         }
     };
 
+    // The focused app over compositor IPC, beside foreign-toplevel's.
+    let focus = match hoarder_wayland::focus::FocusWatch::connect() {
+        Some(Ok(watch)) => {
+            let fd = std::os::fd::AsFd::as_fd(&watch)
+                .try_clone_to_owned()
+                .map_err(|e| (Exit::Io, e.to_string()))?;
+            handle
+                .insert_source(
+                    Generic::new(fd, Interest::READ, Mode::Level),
+                    |_, _, daemon: &mut Daemon| Ok(daemon.on_focus()),
+                )
+                .map_err(|e| loop_error(e.error))?;
+            Some(watch)
+        }
+        Some(Err(e)) => {
+            eprintln!("hoarder: cannot follow focus over compositor IPC: {e}");
+            None
+        }
+        None => None,
+    };
+
     let history = history::History::start(&handle, config.history.encrypt);
     // Retention runs on every insert, at startup and once an hour.
     let _ = history.send(history::Job::Retain {
@@ -109,9 +130,10 @@ pub fn run(overrides: &[(String, String)]) -> Result<(), Fail> {
         config,
         overrides: overrides.to_vec(),
         config_watch,
+        focus,
         slots: Default::default(),
         current: Default::default(),
-        clients: Default::default(),
+        front_ends: Default::default(),
         syncs: Vec::new(),
         next_token: 0,
         pause: None,
@@ -177,6 +199,15 @@ fn wayland_error(e: ClipboardError) -> Fail {
     (code, e.to_string())
 }
 
+/// Whom to answer: a Front end's connection and its request's id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReplyTo {
+    /// The connection, numbered as the Daemon accepted it.
+    front_end: u64,
+    /// The request's `id`.
+    id: u64,
+}
+
 /// One representation the Daemon holds: a MIME type and its bytes.
 type Representation = (String, Arc<[u8]>);
 
@@ -211,6 +242,70 @@ struct Slot {
     take_over_after_read: bool,
     /// Bumped on every change, so stale read callbacks know to stop.
     generation: u64,
+}
+
+/// What a Selection holds once the Daemon takes it on: everything
+/// [`Slot::hold`] sets.
+#[derive(Debug, Default)]
+struct Held {
+    kept: Vec<Representation>,
+    may_take_over: bool,
+    record: bool,
+    once: bool,
+    sensitivity: Sensitivity,
+    concealed: Option<u64>,
+}
+
+/// What becomes of the Concealed Clip a Selection held when it changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Previous {
+    /// Wiped now: Hoarder itself replaced it (`copy`, Restore, `clear`).
+    Forget,
+    /// Still listed until it expires: an app copied something new.
+    KeepListed,
+}
+
+impl Slot {
+    /// Take on `held`, letting go of what was held before: its bytes are
+    /// wiped, and its Concealed Clip is forgotten as `previous` says
+    /// (unless `held` holds that same Clip).
+    fn hold(&mut self, vault: &mut concealed::Vault, previous: Previous, held: Held) {
+        concealed::scrub(&mut self.kept);
+        if let Some(old) = self.concealed.take()
+            && previous == Previous::Forget
+            && held.concealed != Some(old)
+        {
+            vault.forget(old);
+        }
+        let Held {
+            kept,
+            may_take_over,
+            record,
+            once,
+            sensitivity,
+            concealed,
+        } = held;
+        self.kept = kept;
+        self.may_take_over = may_take_over;
+        self.record = record;
+        self.once = once;
+        self.sensitivity = sensitivity;
+        self.concealed = concealed;
+        self.take_over_after_read = false;
+    }
+
+    /// Hold nothing: wipe what was kept and forget its Concealed Clip.
+    fn release(&mut self, vault: &mut concealed::Vault) {
+        self.hold(vault, Previous::Forget, Held::default());
+    }
+
+    /// Forget the Selection entirely, as if never seen (one the Daemon no
+    /// longer watches). A read in flight must be stopped first.
+    fn reset(&mut self, vault: &mut concealed::Vault) {
+        self.release(vault);
+        self.owner = None;
+        self.offered.clear();
+    }
 }
 
 /// An Offer being read, one type at a time.
@@ -256,6 +351,8 @@ pub(crate) struct Daemon {
     config: Config,
     overrides: Vec<(String, String)>,
     config_watch: Option<hoarder_config::Watcher>,
+    /// The focused app over compositor IPC, if the compositor has one.
+    focus: Option<hoarder_wayland::focus::FocusWatch>,
     slots: [Slot; 2],
     /// The Offer on each Selection right now, watched or not, for `paste`.
     current: [Option<Offer>; 2],
@@ -263,10 +360,10 @@ pub(crate) struct Daemon {
     classifier: classify::Classifier,
     /// Concealed Clips, never written anywhere.
     vault: concealed::Vault,
-    clients: socket::Clients,
-    /// `(sync token, client, request id, answer)` of requests answered once
-    /// the compositor has caught up.
-    syncs: Vec<(u64, u64, u64, hoarder_ipc::Value)>,
+    front_ends: socket::FrontEnds,
+    /// `(sync token, whom to answer, answer)` of requests answered once the
+    /// compositor has caught up.
+    syncs: Vec<(u64, ReplyTo, hoarder_ipc::Value)>,
     next_token: u64,
     /// Set while Paused: nothing is recorded.
     pause: Option<pause::Pause>,
@@ -307,7 +404,8 @@ impl Daemon {
                     // Nothing else tracks an unwatched Selection: let go of
                     // what we served on it.
                     if !self.watched(which) {
-                        self.slots[which as usize] = Slot::default();
+                        self.stop_reading(which);
+                        self.slots[which as usize].reset(&mut self.vault);
                     }
                 }
                 WatchEvent::Synced(token) => self.synced(token),
@@ -344,13 +442,32 @@ impl Daemon {
             }
     }
 
+    /// Focus changed, as compositor IPC tells.
+    fn on_focus(&mut self) -> PostAction {
+        let Some(watch) = &mut self.focus else {
+            return PostAction::Remove;
+        };
+        match watch.read() {
+            Ok(true) => PostAction::Continue,
+            Ok(false) | Err(_) => {
+                // Foreign-toplevel, where there is one, still tells.
+                self.focus = None;
+                PostAction::Remove
+            }
+        }
+    }
+
     fn selection_changed(&mut self, which: Selection, offer: Option<Offer>) {
         if !self.watched(which) {
             return;
         }
-        let Some(offer) = offer else {
+        let Some(mut offer) = offer else {
             return self.selection_emptied(which);
         };
+        // Compositor IPC first (PLAN.md §5.1), then foreign-toplevel.
+        if let Some(app) = self.focus.as_ref().and_then(|f| f.focused_app()) {
+            offer.focused_app = Some(app.to_owned());
+        }
         if offer.own {
             let slot = &mut self.slots[which as usize];
             slot.owner = Some(Owner::Hoarder);
@@ -377,14 +494,14 @@ impl Daemon {
         let slot = &mut self.slots[which as usize];
         slot.owner = Some(Owner::App);
         slot.offered = offer.mime_types.clone();
-        concealed::scrub(&mut slot.kept);
-        slot.may_take_over = may_take_over;
-        slot.record = record;
-        slot.once = false;
-        // Provisional until the read shows whether the text looks private.
-        slot.sensitivity = early.unwrap_or_default();
-        slot.concealed = None;
-        slot.take_over_after_read = false;
+        let held = Held {
+            may_take_over,
+            record,
+            // Provisional until the read shows whether the text looks private.
+            sensitivity: early.unwrap_or_default(),
+            ..Held::default()
+        };
+        slot.hold(&mut self.vault, Previous::KeepListed, held);
         slot.read = Some(ReadState {
             offer,
             queue: plan.into(),
@@ -449,13 +566,9 @@ impl Daemon {
                 let _ = File::from(fd).write_all(&data);
             });
         }
-        if std::mem::take(&mut slot.once) {
+        if slot.once {
             // Pasted once: give it up for good, as `wl-copy -o` exits.
-            concealed::scrub(&mut slot.kept);
-            slot.may_take_over = false;
-            if let Some(id) = slot.concealed.take() {
-                self.vault.forget(id);
-            }
+            slot.release(&mut self.vault);
             self.watcher.clear(which);
         }
     }
@@ -464,7 +577,7 @@ impl Daemon {
     /// asks. `sensitive` makes it Secret: served, never recorded nor
     /// restored. Otherwise the Classifier judges it like any copy: Concealed
     /// text lives in the vault and expires, Normal content is recorded.
-    fn offer(&mut self, client: u64, id: u64, offer: OfferRequest) {
+    fn offer(&mut self, to: ReplyTo, offer: OfferRequest) {
         let OfferRequest {
             which,
             types,
@@ -496,6 +609,9 @@ impl Daemon {
         if sensitive {
             kept.push((PASSWORD_HINT.into(), Arc::from(&b"secret"[..])));
         }
+        if sensitivity == Sensitivity::Normal {
+            self.on_clip(which, &kept, None);
+        }
         if sensitivity == Sensitivity::Normal && self.records(which) && self.pause.is_none() {
             let job = history::Job::Record {
                 reprs: kept.clone(),
@@ -505,26 +621,22 @@ impl Daemon {
             // Without History there is nothing to record into.
             let _ = self.history.send(job);
         }
-        let slot = &mut self.slots[which as usize];
-        concealed::scrub(&mut slot.kept);
-        if let Some(old) = slot.concealed.take() {
-            self.vault.forget(old);
-        }
-        let slot = &mut self.slots[which as usize];
-        slot.kept = kept;
-        // A Secret is never restored (ADR-0006); a one-paste Offer is gone
-        // once pasted.
-        slot.may_take_over = sensitivity != Sensitivity::Secret && !once;
-        slot.record = false;
-        slot.once = once;
-        slot.sensitivity = sensitivity;
-        slot.take_over_after_read = false;
+        let held = Held {
+            kept,
+            // A Secret is never restored (ADR-0006); a one-paste Offer is
+            // gone once pasted.
+            may_take_over: sensitivity != Sensitivity::Secret && !once,
+            once,
+            sensitivity,
+            ..Held::default()
+        };
+        self.slots[which as usize].hold(&mut self.vault, Previous::Forget, held);
         if sensitivity == Sensitivity::Concealed {
             self.conceal(which, None);
         }
         let served = self.held_types(which);
         self.watcher.serve(which, &served);
-        self.reply_when_synced(client, id, hoarder_ipc::Value::Null);
+        self.reply_when_synced(to, hoarder_ipc::Value::Null);
     }
 
     /// `paste`: have the source of `which` write `mime` into `pipe`.
@@ -670,6 +782,12 @@ impl Daemon {
                 self.conceal(which, read.offer.focused_app.clone());
             }
         }
+        if let Some(read) = &read
+            && self.slots[which as usize].sensitivity == Sensitivity::Normal
+        {
+            let kept = self.slots[which as usize].kept.clone();
+            self.on_clip(which, &kept, read.offer.focused_app.as_deref());
+        }
         let slot = &mut self.slots[which as usize];
         if let Some(read) = read
             && std::mem::take(&mut slot.record)
@@ -687,6 +805,25 @@ impl Daemon {
         if std::mem::take(&mut slot.take_over_after_read) {
             self.take_over(which);
         }
+    }
+
+    /// Run `clipboard.on_clip` for a Normal copy to the clipboard of `reprs`
+    /// (copied in `app`, if known). Not while Paused: a Pause means nothing
+    /// is looked at.
+    fn on_clip(&self, which: Selection, reprs: &[Representation], app: Option<&str>) {
+        let hook = &self.config.clipboard.on_clip;
+        if hook.trim().is_empty() || which != Selection::Clipboard || self.pause.is_some() {
+            return;
+        }
+        let Some((mime, data)) = reprs
+            .iter()
+            .find(|(m, _)| is_plain_text(m))
+            .or_else(|| reprs.first())
+        else {
+            return;
+        };
+        let types: Vec<String> = reprs.iter().map(|(m, _)| m.clone()).collect();
+        crate::hook::spawn_on_clip(hook, mime, Arc::clone(data), &types, app);
     }
 
     /// Move what `which` keeps into the vault, to expire after the TTL.
@@ -748,46 +885,34 @@ impl Daemon {
 
     /// `hoarder clear`: forget the clipboard and empty it, so nothing is
     /// restored. The reply waits until the compositor has applied it.
-    fn clear(&mut self, client: u64, id: u64, which: Selection) {
+    fn clear(&mut self, to: ReplyTo, which: Selection) {
         self.stop_reading(which);
-        let slot = &mut self.slots[which as usize];
-        concealed::scrub(&mut slot.kept);
-        slot.once = false;
-        slot.take_over_after_read = false;
-        slot.sensitivity = Sensitivity::Normal;
-        if let Some(id) = slot.concealed.take() {
-            self.vault.forget(id);
-        }
+        self.slots[which as usize].release(&mut self.vault);
         self.watcher.clear(which);
-        self.reply_when_synced(client, id, hoarder_ipc::Value::Null);
+        self.reply_when_synced(to, hoarder_ipc::Value::Null);
     }
 
-    /// Answer `id` with `answer` once the compositor has applied what was
+    /// Answer `to` with `answer` once the compositor has applied what was
     /// just asked of it.
-    fn reply_when_synced(&mut self, client: u64, id: u64, answer: hoarder_ipc::Value) {
+    fn reply_when_synced(&mut self, to: ReplyTo, answer: hoarder_ipc::Value) {
         let token = self.next_token;
         self.next_token += 1;
         self.watcher.sync(token);
-        self.syncs.push((token, client, id, answer));
+        self.syncs.push((token, to, answer));
     }
 
     fn synced(&mut self, token: u64) {
         if let Some(i) = self.syncs.iter().position(|(t, ..)| *t == token) {
-            let (_, client, id, answer) = self.syncs.remove(i);
-            self.reply(client, id, Ok(answer));
+            let (_, to, answer) = self.syncs.remove(i);
+            self.reply(to, Ok(answer));
         }
     }
 
     /// The History thread has finished a job.
     fn history_done(&mut self, done: history::Done) {
         match done {
-            history::Done::Reply { client, id, result } => self.reply(client, id, result),
-            history::Done::Restore {
-                client,
-                id,
-                clip,
-                reprs,
-            } => self.restore(client, id, clip, reprs),
+            history::Done::Reply { to, result } => self.reply(to, result),
+            history::Done::Restore { to, clip, reprs } => self.restore(to, clip, reprs),
             history::Done::Changed(events) => {
                 for event in &events {
                     self.broadcast(event);
@@ -797,28 +922,20 @@ impl Daemon {
     }
 
     /// Restore: own the clipboard with a Clip's representations.
-    fn restore(
-        &mut self,
-        client: u64,
-        id: u64,
-        clip: hoarder_ipc::ClipSummary,
-        reprs: Vec<Representation>,
-    ) {
+    fn restore(&mut self, to: ReplyTo, clip: hoarder_ipc::ClipSummary, reprs: Vec<Representation>) {
         let which = Selection::Clipboard;
         self.stop_reading(which);
-        let slot = &mut self.slots[which as usize];
-        slot.kept = reprs;
-        slot.may_take_over = true;
-        slot.record = false;
-        slot.once = false;
-        slot.sensitivity = Sensitivity::Normal;
-        slot.concealed = None;
-        slot.take_over_after_read = false;
-        let types: Vec<String> = slot.kept.iter().map(|(m, _)| m.clone()).collect();
+        let types: Vec<String> = reprs.iter().map(|(m, _)| m.clone()).collect();
+        let held = Held {
+            kept: reprs,
+            may_take_over: true,
+            ..Held::default()
+        };
+        self.slots[which as usize].hold(&mut self.vault, Previous::Forget, held);
         self.watcher.serve(which, &types);
         let answer = history::to_value(&clip);
         self.broadcast(&hoarder_ipc::Event::ClipAdded { clip });
-        self.reply_when_synced(client, id, answer);
+        self.reply_when_synced(to, answer);
     }
 
     fn status(&self) -> Status {
@@ -893,7 +1010,7 @@ impl Daemon {
         for which in SELECTIONS {
             if !self.watched(which) {
                 self.stop_reading(which);
-                self.slots[which as usize] = Slot::default();
+                self.slots[which as usize].reset(&mut self.vault);
             }
         }
         Ok(())

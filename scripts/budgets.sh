@@ -18,15 +18,15 @@ set -euo pipefail
 measure() {
 	local workspace=$1 out=$2 log status=0
 	log=$(mktemp)
-	# The budget tests print "budget: WHAT: measured X ms, budget ..." and
+	# The budget tests print "budget: WHAT: measured X ms|MB, budget ..." and
 	# fail on their own when over the (scaled) PLAN budget.
 	(
 		cd "$workspace"
 		cargo test --release --locked -p hoarder \
-			--test e2e_shot_clipboard --test e2e_overlay --test e2e_picker \
+			--test e2e_shot_clipboard --test e2e_overlay --test e2e_picker --test e2e_daemon \
 			-- 150_ms budget --nocapture --test-threads=1
 	) 2>&1 | tee "$log" || status=$?
-	sed -n 's/.*budget: \(.*\): measured \([0-9.]*\) ms.*/\1\t\2\tms/p' "$log" >"$out"
+	sed -n 's/.*budget: \(.*\): measured \([0-9.]*\) \(ms\|MB\).*/\1\t\2\t\3/p' "$log" >"$out"
 	rm -f "$log"
 
 	(cd "$workspace" && cargo build --release --locked -p hoarder)

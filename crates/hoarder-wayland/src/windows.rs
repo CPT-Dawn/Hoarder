@@ -98,6 +98,12 @@ pub trait WindowGeometry: std::fmt::Debug + Send {
     fn all_windows(&self) -> Result<Vec<Window>, GeometryError> {
         self.windows()
     }
+
+    /// The name of the output the user is on (`shot output`); `None` if
+    /// the provider cannot tell.
+    fn focused_output(&self) -> Result<Option<String>, GeometryError> {
+        Ok(None)
+    }
 }
 
 /// The provider for the compositor this process runs under, picked from
@@ -137,7 +143,8 @@ pub struct SwayIpc {
     socket: PathBuf,
 }
 
-/// i3-ipc message type `GET_TREE`.
+/// i3-ipc message types `GET_OUTPUTS` and `GET_TREE`.
+const SWAY_GET_OUTPUTS: u32 = 3;
 const SWAY_GET_TREE: u32 = 4;
 const SWAY_MAGIC: &[u8; 6] = b"i3-ipc";
 
@@ -165,6 +172,18 @@ impl SwayIpc {
         let mut all = SwayIpc::parse(json)?;
         all.sort_by_key(|(_, visible)| !visible);
         Ok(all.into_iter().map(|(w, _)| w).collect())
+    }
+
+    /// The focused output's name in a `get_outputs` reply.
+    pub fn parse_focused_output(json: &[u8]) -> Result<Option<String>, GeometryError> {
+        #[derive(Deserialize)]
+        struct Output {
+            name: String,
+            #[serde(default)]
+            focused: bool,
+        }
+        let outputs: Vec<Output> = serde_json::from_slice(json)?;
+        Ok(outputs.into_iter().find(|o| o.focused).map(|o| o.name))
     }
 
     /// Every window, topmost first, and whether it is on screen.
@@ -207,6 +226,16 @@ impl SwayIpc {
             .collect())
     }
 
+    /// Sway's IPC socket.
+    pub(crate) fn socket(&self) -> &std::path::Path {
+        &self.socket
+    }
+
+    /// A `get_tree` reply.
+    pub(crate) fn tree(&self) -> Result<Vec<u8>, GeometryError> {
+        self.request(SWAY_GET_TREE)
+    }
+
     fn request(&self, kind: u32) -> Result<Vec<u8>, GeometryError> {
         let mut stream = connect(&self.socket)?;
         let mut msg = Vec::with_capacity(14);
@@ -238,6 +267,10 @@ impl WindowGeometry for SwayIpc {
     fn all_windows(&self) -> Result<Vec<Window>, GeometryError> {
         SwayIpc::parse_tree_all(&self.request(SWAY_GET_TREE)?)
     }
+
+    fn focused_output(&self) -> Result<Option<String>, GeometryError> {
+        SwayIpc::parse_focused_output(&self.request(SWAY_GET_OUTPUTS)?)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -253,10 +286,20 @@ struct SwayWindowProperties {
     class: Option<String>,
 }
 
+/// What a node of Sway's tree is; only windows matter here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SwayNodeType {
+    Con,
+    FloatingCon,
+    #[serde(other)]
+    Other,
+}
+
 #[derive(Debug, Deserialize)]
 struct SwayNode {
     #[serde(rename = "type")]
-    kind: String,
+    kind: SwayNodeType,
     name: Option<String>,
     app_id: Option<String>,
     window_properties: Option<SwayWindowProperties>,
@@ -277,7 +320,7 @@ impl SwayNode {
     /// The windows in this subtree, in paint order.
     fn leaves<'a>(&'a self, out: &mut Vec<&'a SwayNode>) {
         if self.nodes.is_empty() && self.floating_nodes.is_empty() {
-            if matches!(self.kind.as_str(), "con" | "floating_con") {
+            if matches!(self.kind, SwayNodeType::Con | SwayNodeType::FloatingCon) {
                 out.push(self);
             }
             return;
@@ -413,9 +456,23 @@ impl HyprlandIpc {
             .collect())
     }
 
+    /// The focused monitor's name in `j/monitors`.
+    pub fn parse_focused_output(monitors: &[u8]) -> Result<Option<String>, GeometryError> {
+        let monitors: Vec<HyprMonitor> = serde_json::from_slice(monitors)?;
+        Ok(monitors
+            .into_iter()
+            .find(|m| m.focused && !m.disabled)
+            .and_then(|m| m.name))
+    }
+
+    /// Hyprland's request socket.
+    pub(crate) fn socket(&self) -> &std::path::Path {
+        &self.socket
+    }
+
     /// One request, answered in full. Hyprland serves this socket
     /// synchronously, so the connection is closed straight away.
-    fn request(&self, command: &str) -> Result<Vec<u8>, GeometryError> {
+    pub(crate) fn request(&self, command: &str) -> Result<Vec<u8>, GeometryError> {
         let mut stream = connect(&self.socket)?;
         stream.write_all(command.as_bytes())?;
         let mut reply = Vec::new();
@@ -439,6 +496,10 @@ impl WindowGeometry for HyprlandIpc {
         let monitors = self.request("j/monitors")?;
         let clients = self.request("j/clients")?;
         HyprlandIpc::parse_all(&clients, &monitors)
+    }
+
+    fn focused_output(&self) -> Result<Option<String>, GeometryError> {
+        HyprlandIpc::parse_focused_output(&self.request("j/monitors")?)
     }
 }
 
@@ -504,6 +565,9 @@ impl HyprFullscreen {
 #[serde(rename_all = "camelCase")]
 struct HyprMonitor {
     id: Option<i64>,
+    name: Option<String>,
+    #[serde(default)]
+    focused: bool,
     scale: Option<f64>,
     active_workspace: Option<HyprWorkspace>,
     special_workspace: Option<HyprWorkspace>,

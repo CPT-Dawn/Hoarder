@@ -238,7 +238,7 @@ fn a_split_capture_announces_each_file() {
     hoarder(
         &session,
         None,
-        &["shot", "all", "--set", "screenshot.mixed_scale=split"],
+        &["shot", "all", "--set", "capture.mixed_scale=split"],
     );
 
     let bodies = [bus.notified(1).body, bus.notified(2).body];

@@ -100,8 +100,8 @@ fn set_takes_bare_words_as_strings_and_toml_as_toml() {
     assert_eq!(out, "[screenshot]\nname = \"2024\"\n");
 
     // `depth` takes "auto" or the integer 8.
-    let out = set("", "screenshot.depth", "8").unwrap();
-    assert_eq!(out, "[screenshot]\ndepth = 8\n");
+    let out = set("", "capture.depth", "8").unwrap();
+    assert_eq!(out, "[capture]\ndepth = 8\n");
 }
 
 #[test]

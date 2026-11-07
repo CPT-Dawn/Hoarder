@@ -316,3 +316,37 @@ fn without_a_provider_there_is_no_highlight_and_the_rest_still_works() {
     let png = done.png();
     assert_eq!((png.width, png.height), (640, 480));
 }
+
+/// The window label carries the app's icon (PLAN.md §4.2), found the
+/// freedesktop way: here, a hicolor PNG under `$XDG_DATA_HOME/icons`.
+#[test]
+fn the_hover_label_shows_the_app_icon() {
+    const MAGENTA: Rgb8 = Rgb8(255, 0, 255);
+    let session = Session::start(&[OutputSpec::new(640, 480)]).unwrap();
+    let icons = session
+        .runtime_dir()
+        .join("home/.local/share/icons/hicolor/32x32/apps");
+    std::fs::create_dir_all(&icons).unwrap();
+    let icon = image::RgbaImage::from_pixel(32, 32, image::Rgba([255, 0, 255, 255]));
+    icon.save(icons.join("probe.below.png")).unwrap();
+    let app = session.client().unwrap();
+    let out = session.output("HEADLESS-1");
+    app.paint(out, &Pattern::solid(DESKTOP)).unwrap();
+    two_stacked_windows(&session, &app);
+
+    let overlay = Overlay::start(&session, &["shot", "-o", "-"], &["HEADLESS-1"]);
+    session.input().move_to(out, 120.0, 70.0).unwrap();
+    let seen = screenshot_when(&session, "HEADLESS-1", |s| bbox(s, MAGENTA).is_some());
+    session.input().tap(keys::KEY_ESC).unwrap();
+    overlay.finish();
+
+    let (x, y, w, h) = bbox(&seen, MAGENTA).unwrap();
+    assert!(
+        (100..300).contains(&x) && (60..180).contains(&y),
+        "in the window: {x},{y}"
+    );
+    assert!(
+        (10..=32).contains(&w) && w == h,
+        "a square icon, label-sized: {w}×{h}"
+    );
+}

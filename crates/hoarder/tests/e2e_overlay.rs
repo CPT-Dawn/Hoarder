@@ -317,3 +317,43 @@ fn budget_overlay_visible_on_4k() {
         Duration::from_millis(60),
     );
 }
+
+/// PLAN.md §4.2: the Overlay fades in over 100 ms, so the dimming arrives
+/// in steps rather than all at once.
+#[test]
+fn the_overlay_fades_in() {
+    let session = Session::start(&[OutputSpec::new(320, 240)]).unwrap();
+    let app = session.client().unwrap();
+    app.paint(
+        session.output("HEADLESS-1"),
+        &Pattern::solid(Rgb8(255, 255, 255)),
+    )
+    .unwrap();
+
+    let mut child = session
+        .command(env!("CARGO_BIN_EXE_hoarder"))
+        .args(["shot", "-o", "-"])
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut seen = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let grey = session.screenshot("HEADLESS-1").unwrap().pixel(160, 120).0;
+        if seen.last() != Some(&grey) {
+            seen.push(grey);
+        }
+        // Midnight Bloom's 45% dimming over white.
+        if (138..=142).contains(&grey) || Instant::now() > deadline {
+            break;
+        }
+    }
+    session.input().tap(keys::KEY_ESC).unwrap();
+    let _ = child.wait();
+
+    assert!((138..=142).contains(seen.last().unwrap()), "{seen:?}");
+    assert!(
+        seen.iter().any(|g| (150..=245).contains(g)),
+        "no step between undimmed and dimmed: {seen:?}"
+    );
+}

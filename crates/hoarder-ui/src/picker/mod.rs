@@ -14,7 +14,7 @@ mod paint;
 use std::time::Instant;
 
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState},
+    compositor::CompositorHandler,
     delegate_registry,
     dispatch2::Dispatch2,
     output::{OutputHandler, OutputState},
@@ -27,15 +27,13 @@ use smithay_client_toolkit::{
     shell::{
         WaylandSurface,
         wlr_layer::{
-            KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
-            LayerSurfaceConfigure,
+            KeyboardInteractivity, Layer, LayerShellHandler, LayerSurface, LayerSurfaceConfigure,
         },
     },
     shm::{Shm, ShmHandler, slot::SlotPool},
 };
 use wayland_client::{
     Connection, QueueHandle,
-    globals::registry_queue_init,
     protocol::{
         wl_callback::{self, WlCallback},
         wl_keyboard::WlKeyboard,
@@ -47,16 +45,16 @@ use wayland_client::{
 };
 
 use crate::chrome::Fonts;
-use crate::overlay::{OverlayError, timing};
+use crate::surface::{self, Error, Layered, failed, timing};
 use crate::theme::Theme;
+pub use hoarder_ipc::Kind;
 use model::Model;
 
 /// One Clip as the Picker lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Entry {
+pub struct Clip {
     pub id: i64,
-    /// `text`, `image`, `files` or `other`.
-    pub kind: String,
+    pub kind: Kind,
     /// A line of text, an image's size or the file names; for a
     /// Concealed Clip, only dots.
     pub preview: String,
@@ -73,7 +71,7 @@ pub struct Entry {
 pub trait History {
     /// Every Clip, most recently used first. Called once, when the panel
     /// is about to draw its first frame, so it can be fetched meanwhile.
-    fn clips(&mut self) -> Result<Vec<Entry>, String>;
+    fn clips(&mut self) -> Result<Vec<Clip>, String>;
 
     /// The ids of Clips whose whole text contains `query`, most recently
     /// used first (full-text search, for long text whose match lies past
@@ -90,10 +88,10 @@ pub trait History {
     /// Alt, for the Concealed Clips on screen.
     fn reveal(&mut self, id: i64) -> Option<String>;
 
-    /// What the preview pane shows for `entry`, a Clip that is not
+    /// What the preview pane shows for `clip`, a Clip that is not
     /// Concealed. Called once the first frame is up, as the selection
     /// moves.
-    fn detail(&mut self, entry: &Entry) -> Detail;
+    fn detail(&mut self, clip: &Clip) -> Detail;
 }
 
 /// A Clip in full, for the preview pane.
@@ -135,23 +133,18 @@ pub struct Options {
 
 /// Show the Picker and wait for the user. Returns what they picked, or
 /// `None` if they closed it; either way the panel is off the screen by then.
-pub fn run(history: &mut dyn History, options: &Options) -> Result<Option<Pick>, OverlayError> {
+pub fn run(history: &mut dyn History, options: &Options) -> Result<Option<Pick>, Error> {
     // The fonts take the longest; they load while everything else gets ready.
     let fonts = Fonts::load();
-    let failed = |e: &dyn std::fmt::Display| OverlayError::Failed(e.to_string());
-    let conn = Connection::connect_to_env().map_err(|e| failed(&e))?;
-    let (globals, mut queue) = registry_queue_init::<App>(&conn).map_err(|e| failed(&e))?;
-    let qh = queue.handle();
-    let missing = |what: &str, e: &dyn std::fmt::Display| {
-        OverlayError::Unsupported(format!(
-            "the compositor does not offer {what}, which the Picker needs: {e}"
-        ))
-    };
-    let compositor =
-        CompositorState::bind(&globals, &qh).map_err(|e| missing("wl_compositor", &e))?;
-    let layer_shell =
-        LayerShell::bind(&globals, &qh).map_err(|e| missing("wlr-layer-shell", &e))?;
-    let shm = Shm::bind(&globals, &qh).map_err(|e| missing("wl_shm", &e))?;
+    let Layered {
+        conn,
+        globals,
+        mut queue,
+        qh,
+        compositor,
+        layer_shell,
+        shm,
+    } = surface::connect::<App>("Picker")?;
 
     // No anchors and no output: the compositor centres it on the output
     // the user is on.
@@ -180,6 +173,7 @@ pub fn run(history: &mut dyn History, options: &Options) -> Result<Option<Pick>,
         started: options.started,
         model: None,
         detail: None,
+        scroll: (0, 0),
         keys: Vec::new(),
         mods: Modifiers::default(),
         scale: 1,
@@ -191,7 +185,7 @@ pub fn run(history: &mut dyn History, options: &Options) -> Result<Option<Pick>,
     };
 
     while app.outcome.is_none() {
-        crate::wait::dispatch_once(&mut queue, None).map_err(|e| failed(&e))?;
+        hoarder_wayland::wait::dispatch_once(&mut queue, None).map_err(|e| failed(&e))?;
         queue.dispatch_pending(&mut app).map_err(|e| failed(&e))?;
         if app.configured && app.model.is_none() {
             timing(app.started, "picker_configured");
@@ -237,6 +231,8 @@ struct App {
     model: Option<Model>,
     /// The selected Clip's detail, by its id.
     detail: Option<(i64, Detail)>,
+    /// How far its image is scrolled (Shift+arrows), in its own pixels.
+    scroll: (u32, u32),
     /// Keys pressed and not yet acted on, with the modifiers held. The
     /// main loop acts on them, since it can ask History for full-text hits.
     keys: Vec<(KeyEvent, Modifiers)>,
@@ -308,6 +304,7 @@ impl App {
                 .filter(|(id, _)| Some(*id) == selected)
                 .map(|(_, d)| d),
             now_ms,
+            scroll: self.scroll,
         };
         paint::paint(canvas, scale, model, &extra, &self.theme, &mut self.fonts);
         if !self.shown {
@@ -333,13 +330,14 @@ impl App {
         if !self.shown || self.outcome.is_some() {
             return;
         }
-        let Some(entry) = model.selected().filter(|e| !e.concealed) else {
+        let Some(clip) = model.selected().filter(|e| !e.concealed) else {
             return;
         };
-        if self.detail.as_ref().is_some_and(|(id, _)| *id == entry.id) {
+        if self.detail.as_ref().is_some_and(|(id, _)| *id == clip.id) {
             return;
         }
-        self.detail = Some((entry.id, history.detail(entry)));
+        self.detail = Some((clip.id, history.detail(clip)));
+        self.scroll = (0, 0);
         self.dirty = true;
     }
 
@@ -373,9 +371,9 @@ impl App {
         match event.keysym {
             Keysym::Escape => self.outcome = Some(None),
             Keysym::Return | Keysym::KP_Enter => {
-                if let Some(entry) = model.selected() {
+                if let Some(clip) = model.selected() {
                     self.outcome = Some(Some(Pick {
-                        id: entry.id,
+                        id: clip.id,
                         plain: mods.shift,
                     }));
                 }
@@ -396,12 +394,20 @@ impl App {
             }
             sym if ctrl && quick_row(sym).is_some() => {
                 let n = quick_row(sym).unwrap_or_default();
-                if let Some(entry) = model.row(n, rows as usize) {
+                if let Some(clip) = model.row(n, rows as usize) {
                     self.outcome = Some(Some(Pick {
-                        id: entry.id,
+                        id: clip.id,
                         plain: mods.shift,
                     }));
                 }
+            }
+            Keysym::Left | Keysym::Right | Keysym::Up | Keysym::Down if mods.shift => {
+                scroll_preview(
+                    self.detail.as_ref(),
+                    self.scale,
+                    &mut self.scroll,
+                    event.keysym,
+                );
             }
             Keysym::Up | Keysym::KP_Up => model.move_by(-1),
             Keysym::Down | Keysym::KP_Down => model.move_by(1),
@@ -428,6 +434,29 @@ impl App {
             model.set_query(&query, &found);
         }
         self.dirty = true;
+    }
+}
+
+/// Shift+arrow: scroll an image too big for the preview pane (`detail`,
+/// at `scale`), 40 logical pixels at a time, never past its edges.
+fn scroll_preview(
+    detail: Option<&(i64, Detail)>,
+    scale: i32,
+    scroll: &mut (u32, u32),
+    sym: Keysym,
+) {
+    let Some((_, Detail::Image { width, height, .. })) = detail else {
+        return;
+    };
+    let scale = scale.max(1) as u32;
+    let (room_x, room_y) = paint::scroll_room(*width, *height, scale);
+    let step = 40 * scale;
+    let (x, y) = scroll;
+    match sym {
+        Keysym::Left => *x = x.saturating_sub(step),
+        Keysym::Right => *x = (*x + step).min(room_x),
+        Keysym::Up => *y = y.saturating_sub(step),
+        _ => *y = (*y + step).min(room_y),
     }
 }
 

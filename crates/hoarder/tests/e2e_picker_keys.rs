@@ -576,6 +576,28 @@ fn settled_shot(session: &Session) -> Image {
     }
 }
 
+/// A settled shot once the screen has changed from `before`: what a key
+/// just pressed did, never the frame from before it took effect.
+fn shot_after(session: &Session, before: &Image) -> Image {
+    shot_until(session, |now| now != before)
+}
+
+/// A settled shot that satisfies `wanted`, polled until a deadline.
+fn shot_until(session: &Session, wanted: impl Fn(&Image) -> bool) -> Image {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let now = settled_shot(session);
+        if wanted(&now) {
+            return now;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the screen never changed as expected"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// The Picker's panel in a shot of the 1280×720 output: (280, 120) to
 /// (1000, 600).
 fn panel(shot: &Image) -> Vec<Rgb8> {
@@ -615,10 +637,12 @@ fn concealed_clips_stay_masked_until_alt_is_held() {
     );
 
     // Alt reveals it, and letting go hides it again.
+    let before = settled_shot(&session);
     session.input().key_down(keys::KEY_LEFTALT).unwrap();
-    let revealed = panel(&settled_shot(&session));
+    let revealed_shot = shot_after(&session, &before);
+    let revealed = panel(&revealed_shot);
     session.input().key_up(keys::KEY_LEFTALT).unwrap();
-    let hidden = panel(&settled_shot(&session));
+    let hidden = panel(&shot_after(&session, &revealed_shot));
     session.input().tap(keys::KEY_ESC).unwrap();
     let done = picker.finish();
 
@@ -710,7 +734,7 @@ fn the_preview_pane_shows_an_image_at_its_real_pixel_size() {
     let picker = open_picker(&session);
     let on_text = settled_shot(&session);
     session.input().tap(keys::KEY_DOWN).unwrap();
-    let on_image = settled_shot(&session);
+    let on_image = shot_until(&session, |shot| find(shot, panel, Rgb8(1, 254, 3)).0 > 0);
     session.input().tap(keys::KEY_ESC).unwrap();
     picker.finish();
 
@@ -757,7 +781,7 @@ fn the_preview_pane_shows_the_whole_text_over_many_lines() {
     let picker = open_picker(&session);
     let one = settled_shot(&session);
     session.input().tap(keys::KEY_DOWN).unwrap();
-    let twelve = settled_shot(&session);
+    let twelve = shot_after(&session, &one);
     session.input().tap(keys::KEY_ESC).unwrap();
     picker.finish();
 
@@ -798,7 +822,7 @@ fn the_preview_pane_shows_files_as_chips() {
     let picker = open_picker(&session);
     let on_text = settled_shot(&session);
     session.input().tap(keys::KEY_DOWN).unwrap();
-    let on_files = settled_shot(&session);
+    let on_files = shot_after(&session, &on_text);
     session.input().tap(keys::KEY_ESC).unwrap();
     picker.finish();
 
@@ -830,4 +854,63 @@ fn the_preview_pane_shows_files_as_chips() {
         .max()
         .unwrap();
     assert!(longest_fill >= 100, "no chip: longest fill {longest_fill}");
+}
+
+/// An image of four solid quadrants, `w`×`h`: `colours` top-left,
+/// top-right, bottom-left, bottom-right.
+fn quadrants_png(w: u32, h: u32, colours: [[u8; 3]; 4]) -> Vec<u8> {
+    let image = image::RgbaImage::from_fn(w, h, |x, y| {
+        let c = colours[usize::from(x >= w / 2) + 2 * usize::from(y >= h / 2)];
+        image::Rgba([c[0], c[1], c[2], 255])
+    });
+    let mut out = Vec::new();
+    image
+        .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+        .unwrap();
+    out
+}
+
+#[test]
+fn shift_arrows_scroll_an_image_bigger_than_the_preview_pane() {
+    let (session, _paint) = painted();
+    let (tl, br) = (Rgb8(1, 254, 3), Rgb8(250, 250, 5));
+    let image = quadrants_png(
+        1600,
+        1200,
+        [[1, 254, 3], [250, 2, 4], [3, 4, 251], [250, 250, 5]],
+    );
+    seed(
+        &session,
+        &[Seed {
+            reprs: &[("image/png", &image)],
+            app: None,
+            pinned: false,
+        }],
+    );
+    let _daemon = Daemon::start(&session);
+    // The Picker's panel on the 1280×720 output.
+    let panel = (280, 120, 1000, 600);
+
+    let picker = open_picker(&session);
+    let top_left = shot_until(&session, |shot| find(shot, panel, tl).0 > 0);
+    for _ in 0..20 {
+        session
+            .input()
+            .chord(&[keys::KEY_LEFTSHIFT, keys::KEY_RIGHT])
+            .unwrap();
+        session
+            .input()
+            .chord(&[keys::KEY_LEFTSHIFT, keys::KEY_DOWN])
+            .unwrap();
+    }
+    let bottom_right = shot_until(&session, |shot| find(shot, panel, br).0 > 0);
+    session.input().tap(keys::KEY_ESC).unwrap();
+    picker.finish();
+
+    assert_eq!(find(&top_left, panel, br).0, 0, "starts at the top left");
+    assert_eq!(
+        find(&bottom_right, panel, tl).0,
+        0,
+        "scrolled to the bottom right"
+    );
 }

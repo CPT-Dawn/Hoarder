@@ -1,8 +1,11 @@
-//! The `on_capture` hook (PLAN.md §4.1 step 7).
+//! The `on_capture` hook (PLAN.md §4.1 step 7) and the Daemon's `on_clip`
+//! hook (PLAN.md §9).
 
+use std::io::Write as _;
 use std::os::fd::AsFd as _;
 use std::os::unix::process::CommandExt as _;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 
 use crate::after::Delivered;
 
@@ -41,5 +44,48 @@ pub fn spawn(hook: &str, capture: &Delivered) {
         .spawn();
     if let Err(e) = result {
         eprintln!("hoarder: on_capture hook failed: cannot start sh: {e}");
+    }
+}
+
+/// Like [`WATCHER`], for `on_clip`.
+const CLIP_WATCHER: &str =
+    r#"sh -c "$1"; s=$?; [ "$s" -eq 0 ] || echo "hoarder: on_clip hook failed (exit $s): $1" >&2"#;
+
+/// Run the `on_clip` `hook` for one Normal copy, as `wl-paste --watch CMD`
+/// would: `data` (of type `mime`) on its stdin, `HOARDER_MIME`, every type
+/// offered in `HOARDER_TYPES` (one per line) and the app it was copied in, if
+/// known, in `HOARDER_APP`. Off the caller's thread: a slow hook never holds
+/// up the Daemon, and its exit is reaped there.
+pub fn spawn_on_clip(hook: &str, mime: &str, data: Arc<[u8]>, types: &[String], app: Option<&str>) {
+    if hook.trim().is_empty() {
+        return;
+    }
+    let mut command = Command::new("sh");
+    command
+        .args(["-c", CLIP_WATCHER, "hoarder-on-clip", hook])
+        .env("HOARDER_MIME", mime)
+        .env("HOARDER_TYPES", types.join("\n"))
+        .env("HOARDER_APP", app.unwrap_or_default())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .process_group(0);
+    let spawned = std::thread::Builder::new()
+        .name("on_clip".into())
+        .spawn(move || {
+            let mut child = match command.spawn() {
+                Ok(child) => child,
+                Err(e) => {
+                    eprintln!("hoarder: on_clip hook failed: cannot start sh: {e}");
+                    return;
+                }
+            };
+            if let Some(mut stdin) = child.stdin.take() {
+                // A hook that reads nothing is its own business.
+                let _ = stdin.write_all(&data);
+            }
+            let _ = child.wait();
+        });
+    if let Err(e) = spawned {
+        eprintln!("hoarder: on_clip hook failed: {e}");
     }
 }

@@ -8,7 +8,8 @@ use crate::crypt::{self, Key};
 pub enum Kind {
     Text,
     Image,
-    /// A file list (`text/uri-list`), as file managers copy it.
+    /// A file list (`text/uri-list` or `x-special/gnome-copied-files`), as
+    /// file managers copy it.
     Files,
     Other,
 }
@@ -76,27 +77,31 @@ pub(crate) fn describe_with_text(
     key: Option<&Key>,
 ) -> (Kind, String, [u8; 32], String) {
     let find = |pred: &dyn Fn(&str) -> bool| reprs.iter().find(|(m, _)| pred(m));
-    let (kind, canonical) = if let Some(r) =
-        find(&|m| m == "text/uri-list").filter(|(_, d)| uris(d).next().is_some())
-    {
-        (Kind::Files, r)
-    } else if let Some(r) =
-        find(&|m| m == "image/png").or_else(|| find(&|m| m.starts_with("image/")))
-    {
-        (Kind::Image, r)
-    } else if let Some(r) = TEXT_TYPES
-        .iter()
-        .find_map(|t| find(&|m| m.eq_ignore_ascii_case(t)))
-        .or_else(|| find(&|m| m.starts_with("text/")))
-    {
-        (Kind::Text, r)
-    } else {
-        (Kind::Other, reprs.first().unwrap_or(&EMPTY))
-    };
+    let file_list =
+        |mime: &str| find(&|m| m == mime).filter(|(m, d)| file_uris(m, d).next().is_some());
+    let (kind, canonical) =
+        if let Some(r) = file_list("text/uri-list").or_else(|| file_list(GNOME_FILES)) {
+            (Kind::Files, r)
+        } else if let Some(r) =
+            find(&|m| m == "image/png").or_else(|| find(&|m| m.starts_with("image/")))
+        {
+            (Kind::Image, r)
+        } else if let Some(r) = TEXT_TYPES
+            .iter()
+            .find_map(|t| find(&|m| m.eq_ignore_ascii_case(t)))
+            .or_else(|| find(&|m| m.starts_with("text/")))
+        {
+            (Kind::Text, r)
+        } else {
+            (Kind::Other, reprs.first().unwrap_or(&EMPTY))
+        };
     let (mime, data) = *canonical;
     let preview = match kind {
         Kind::Text => text_preview(data),
-        Kind::Files => uris(data).map(file_name).collect::<Vec<_>>().join(", "),
+        Kind::Files => file_uris(mime, data)
+            .map(file_name)
+            .collect::<Vec<_>>()
+            .join(", "),
         Kind::Image => png_size(data)
             .map(|(w, h)| format!("{w}×{h}"))
             .unwrap_or_else(|| mime.to_owned()),
@@ -133,11 +138,19 @@ fn text_preview(data: &[u8]) -> String {
     preview
 }
 
-/// The URIs of a `text/uri-list` (RFC 2483): one per line, `#` comments.
-fn uris(data: &[u8]) -> impl Iterator<Item = &str> {
+/// What GNOME's file managers (and others after them) copy files as: a
+/// `copy` or `cut` line, then one URI per line.
+pub(crate) const GNOME_FILES: &str = "x-special/gnome-copied-files";
+
+/// The URIs in a file list of type `mime`: a `text/uri-list` (RFC 2483, one
+/// per line, `#` comments) or [`GNOME_FILES`], whose first line is the
+/// action, not a file.
+fn file_uris<'a>(mime: &str, data: &'a [u8]) -> impl Iterator<Item = &'a str> {
+    let skip = usize::from(mime == GNOME_FILES);
     std::str::from_utf8(data)
         .unwrap_or("")
         .lines()
+        .skip(skip)
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
 }

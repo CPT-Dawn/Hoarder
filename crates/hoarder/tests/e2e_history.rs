@@ -295,6 +295,22 @@ fn a_file_list_is_recorded_as_files() {
 }
 
 #[test]
+fn a_gnome_file_copy_is_recorded_as_files() {
+    let session = Session::start_default().unwrap();
+    let _daemon = Daemon::start(&session);
+    let copied = b"copy\nfile:///home/me/a.txt\nfile:///home/me/b%20c.pdf";
+    let _app = copy(
+        &session,
+        &[("x-special/gnome-copied-files", copied.as_slice())],
+    );
+    wait_until("the Clip", || history(&session).len() == 1);
+
+    let clip = &history(&session)[0];
+    assert_eq!(clip["kind"], "files");
+    assert_eq!(clip["preview"], "a.txt, b c.pdf");
+}
+
+#[test]
 fn history_get_json_describes_the_clip() {
     let session = Session::start_default().unwrap();
     let _daemon = Daemon::start(&session);

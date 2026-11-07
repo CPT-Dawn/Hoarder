@@ -48,8 +48,7 @@ use smithay_client_toolkit::{
     subcompositor::SubcompositorState,
 };
 use wayland_client::{
-    Connection, EventQueue, QueueHandle, delegate_noop,
-    globals::registry_queue_init,
+    Connection, QueueHandle, delegate_noop,
     protocol::{
         wl_buffer::WlBuffer, wl_callback::WlCallback, wl_keyboard::WlKeyboard, wl_output::WlOutput,
         wl_pointer::WlPointer, wl_seat::WlSeat, wl_shm, wl_shm_pool::WlShmPool,
@@ -58,6 +57,10 @@ use wayland_client::{
 };
 use wayland_protocols::wp::{
     cursor_shape::v1::client::wp_cursor_shape_device_v1::{Shape, WpCursorShapeDeviceV1},
+    fractional_scale::v1::client::{
+        wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+        wp_fractional_scale_v1::{self, WpFractionalScaleV1},
+    },
     single_pixel_buffer::v1::client::wp_single_pixel_buffer_manager_v1::WpSinglePixelBufferManagerV1,
     viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
 };
@@ -65,12 +68,12 @@ use wayland_protocols::wp::{
 use crate::chrome::{CLEAR, DIM, Fonts, Highlight, Palette, Scene};
 use crate::geom::Rect;
 use crate::layers::{Context, Layers, ViewLayers};
-use crate::select::{Action, Key, Selector};
+use crate::select::{Action, Key, Selector, Tool};
 use crate::snap::Hover;
+use crate::surface::{self, Error, Layered, failed, timing};
 use crate::theme::Theme;
 
-/// Set to print how long the Overlay took to become visible.
-pub const TIMINGS_ENV: &str = "HOARDER_TIMINGS";
+pub use crate::surface::TIMINGS_ENV;
 
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
@@ -124,7 +127,7 @@ pub struct Options {
     /// so after [`run`] it holds the user's final choice.
     pub cursor: Cell<bool>,
     /// A selection cannot leave the output where its drag started
-    /// (`screenshot.mixed_scale = "clamp"`). With `run_live`, only when the
+    /// (`capture.mixed_scale = "clamp"`). With `run_live`, only when the
     /// outputs differ in scale.
     pub clamp_to_output: bool,
     /// The windows hovering highlights and a click captures, topmost first,
@@ -137,39 +140,11 @@ pub struct Options {
     pub pick: bool,
 }
 
-/// Everything that can stop the Overlay.
-#[derive(Debug)]
-pub enum OverlayError {
-    /// The compositor lacks a protocol the Overlay needs.
-    Unsupported(String),
-    /// The Wayland connection failed.
-    Failed(String),
-}
-
-impl std::fmt::Display for OverlayError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            OverlayError::Unsupported(m) => f.write_str(m),
-            OverlayError::Failed(m) => write!(f, "overlay failed: {m}"),
-        }
-    }
-}
-
-impl std::error::Error for OverlayError {}
-
-/// With [`TIMINGS_ENV`] set, print how long `stage` took to reach since `started`.
-pub(crate) fn timing(started: Instant, stage: &str) {
-    if std::env::var_os(TIMINGS_ENV).is_some() {
-        eprintln!(
-            "hoarder: timing {stage}_ms={:.1}",
-            started.elapsed().as_secs_f64() * 1000.0
-        );
-    }
-}
-
-fn failed(e: impl std::fmt::Display) -> OverlayError {
-    OverlayError::Failed(e.to_string())
-}
+/// The Overlay fades in over this long (PLAN.md §4.2): the dimming steps up
+/// to its full strength, one step per frame at least.
+const FADE_IN: Duration = Duration::from_millis(100);
+/// Dimming steps of the fade-in, full strength included.
+const FADE_STEPS: usize = 6;
 
 /// How long to wait for the compositor to present the hidden Overlay before
 /// capturing anyway.
@@ -179,7 +154,7 @@ const HIDE_TIMEOUT: Duration = Duration::from_millis(500);
 /// cancel, drawn in `options.theme`. `started` is when the user asked for the
 /// Capture; with [`TIMINGS_ENV`] set, the time until the Overlay is visible is
 /// printed.
-pub fn run(frozen: &Frozen, started: Instant, options: &Options) -> Result<Outcome, OverlayError> {
+pub fn run(frozen: &Frozen, started: Instant, options: &Options) -> Result<Outcome, Error> {
     timing(started, "frozen");
     show(Some(frozen), started, options)
 }
@@ -187,7 +162,7 @@ pub fn run(frozen: &Frozen, started: Instant, options: &Options) -> Result<Outco
 /// Show the Overlay over the live desktop (`--live`) and wait for the user to
 /// pick a Target or cancel. On return the compositor has presented a frame
 /// without the Overlay, so the desktop can be captured as the user sees it.
-pub fn run_live(started: Instant, options: &Options) -> Result<Outcome, OverlayError> {
+pub fn run_live(started: Instant, options: &Options) -> Result<Outcome, Error> {
     show(None, started, options)
 }
 
@@ -204,31 +179,27 @@ struct Screen<'a> {
     frame: Option<&'a FrozenFrame>,
 }
 
-fn show(
-    frozen: Option<&Frozen>,
-    started: Instant,
-    options: &Options,
-) -> Result<Outcome, OverlayError> {
-    let conn = Connection::connect_to_env().map_err(failed)?;
-    let (globals, mut queue): (_, EventQueue<App>) = registry_queue_init(&conn).map_err(failed)?;
-    let qh = queue.handle();
-    fn missing(what: &'static str) -> impl Fn(wayland_client::globals::BindError) -> OverlayError {
-        move |e| {
-            OverlayError::Unsupported(format!(
-                "the compositor does not offer {what}, which the Overlay needs: {e}"
-            ))
-        }
-    }
-    let compositor = CompositorState::bind(&globals, &qh).map_err(missing("wl_compositor"))?;
+fn show(frozen: Option<&Frozen>, started: Instant, options: &Options) -> Result<Outcome, Error> {
+    let Layered {
+        globals,
+        mut queue,
+        qh,
+        compositor,
+        layer_shell,
+        shm,
+        ..
+    } = surface::connect::<App>("Overlay")?;
+    let missing = |what: &'static str| move |e| surface::missing("Overlay", what, e);
     let subcompositor = SubcompositorState::bind(compositor.wl_compositor().clone(), &globals, &qh)
         .map_err(missing("wl_subcompositor"))?;
-    let layer_shell = LayerShell::bind(&globals, &qh).map_err(missing("wlr-layer-shell"))?;
-    let shm = Shm::bind(&globals, &qh).map_err(missing("wl_shm"))?;
     let viewporter: WpViewporter = globals
         .bind(&qh, 1..=1, ())
         .map_err(missing("wp_viewporter"))?;
     let cursor_shapes = CursorShapeManager::bind(&globals, &qh).ok();
     let single_pixel: Option<WpSinglePixelBufferManagerV1> = globals.bind(&qh, 1..=1, ()).ok();
+    // The scale the compositor prefers for each output, for the chrome's
+    // text and strokes; the buffers are physical size either way.
+    let fractional: Option<WpFractionalScaleManagerV1> = globals.bind(&qh, 1..=1, ()).ok();
 
     let mut app = App {
         registry: RegistryState::new(&globals),
@@ -252,6 +223,7 @@ fn show(
         started,
         visible_reported: false,
         single_pixel,
+        icons: Default::default(),
     };
     if options.pick {
         app.layers.pin_loupe();
@@ -280,7 +252,7 @@ fn show(
                     frame: Some(frame),
                 })
             })
-            .collect::<Result<_, OverlayError>>()?,
+            .collect::<Result<_, Error>>()?,
         None => {
             // xdg-output's logical geometry arrives a roundtrip later.
             queue.roundtrip(&mut app).map_err(failed)?;
@@ -295,11 +267,21 @@ fn show(
     }
 
     for screen in &screens {
-        let dim = match &app.single_pixel {
-            // Premultiplied, full range: black at DIM's alpha.
-            Some(m) => m.create_u32_rgba_buffer(0, 0, 0, DIM[3] as u32 * 0x0101_0101, &qh, ()),
-            None => pixel_buffer(DIM, &app.shm, &qh).map_err(failed)?,
-        };
+        // One black pixel per step of the fade-in, the last at DIM's alpha.
+        let mut fade = (1..=FADE_STEPS)
+            .map(|step| {
+                let alpha = (DIM[3] as usize * step / FADE_STEPS) as u8;
+                match &app.single_pixel {
+                    // Premultiplied, full range.
+                    Some(m) => {
+                        Ok(m.create_u32_rgba_buffer(0, 0, 0, alpha as u32 * 0x0101_0101, &qh, ()))
+                    }
+                    None => pixel_buffer([0, 0, 0, alpha], &app.shm, &qh),
+                }
+            })
+            .collect::<std::io::Result<Vec<_>>>()
+            .map_err(failed)?;
+        let dim = fade.pop().expect("at least one step");
         let view = View::new(
             screen,
             &compositor,
@@ -308,11 +290,17 @@ fn show(
             &viewporter,
             &app.shm,
             dim,
+            fade,
             Palette::of(&options.theme),
             &qh,
         )
         .map_err(failed)?;
+        let index = app.views.len();
         app.views.push(view);
+        if let Some(m) = &fractional {
+            let surface = app.views[index].layer.wl_surface().clone();
+            app.views[index].fractional = Some(m.get_fractional_scale(&surface, &qh, index));
+        }
     }
     // Live, the caller had no Frozen Frames to judge the scales by, so the
     // outputs' own scales decide whether a selection must stay on one.
@@ -337,7 +325,7 @@ fn show(
         }
         // Sleep until the compositor speaks or a layer's timer is due.
         let deadline = app.layers.deadline(now);
-        crate::wait::dispatch_once(&mut queue, deadline).map_err(failed)?;
+        hoarder_wayland::wait::dispatch_once(&mut queue, deadline).map_err(failed)?;
     }
     options.cursor.set(app.layers.cursor);
     for view in &mut app.views {
@@ -348,7 +336,7 @@ fn show(
         // The caller captures the live desktop next: it must not see us.
         app.hide(&qh).map_err(failed)?;
         let deadline = Instant::now() + HIDE_TIMEOUT;
-        let hidden = crate::wait::dispatch_until(&mut queue, &mut app, deadline, |a| {
+        let hidden = hoarder_wayland::wait::dispatch_until(&mut queue, &mut app, deadline, |a| {
             a.views.iter().all(|v| v.hidden == Hidden::Shown)
         })
         .map_err(failed)?;
@@ -381,6 +369,14 @@ struct View {
     /// Until there is a selection, the chrome is this one dim pixel stretched
     /// over the output: nothing to paint, nothing to upload.
     dim_buffer: WlBuffer,
+    /// Lighter dim pixels for the fade-in, lightest first.
+    fade: Vec<WlBuffer>,
+    /// When the fade-in started, and the step on screen.
+    fade_start: Option<Instant>,
+    fade_shown: Option<usize>,
+    /// `wp_fractional_scale_v1` for the chrome, and the scale it prefers.
+    fractional: Option<WpFractionalScaleV1>,
+    preferred_scale: Option<f64>,
     palette: Palette,
     buffers: Vec<ChromeBuffer>,
     drawn: Scene,
@@ -436,6 +432,7 @@ impl View {
         viewporter: &WpViewporter,
         shm: &Shm,
         dim_buffer: WlBuffer,
+        fade: Vec<WlBuffer>,
         palette: Palette,
         qh: &QueueHandle<App>,
     ) -> std::io::Result<View> {
@@ -494,6 +491,11 @@ impl View {
             root_viewport,
             frame,
             dim_buffer,
+            fade,
+            fade_start: None,
+            fade_shown: None,
+            fractional: None,
+            preferred_scale: None,
             palette,
             buffers: Vec::new(),
             drawn: Scene::default(),
@@ -512,6 +514,13 @@ impl View {
             self.size.0 as f64 / self.logical.2.max(1.0),
             self.size.1 as f64 / self.logical.3.max(1.0),
         )
+    }
+
+    /// The scale to size the chrome's text, handles and strokes by: what
+    /// the compositor prefers (`wp_fractional_scale_v1`), or else what the
+    /// buffer's size says.
+    fn ui_scale(&self) -> f64 {
+        self.preferred_scale.unwrap_or(self.scale().0)
     }
 
     /// Whether the global logical point `(x, y)` lies on this output.
@@ -538,15 +547,25 @@ impl View {
         }
         let first = self.buffers.is_empty();
         if first && self.wanted == Scene::default() {
-            if !self.presented {
+            // Fade in: a darker pixel each frame, or as time says.
+            let now = Instant::now();
+            let start = *self.fade_start.get_or_insert(now);
+            let last = self.fade.len();
+            let by_time = (now - start).as_secs_f64() / FADE_IN.as_secs_f64() * (last + 1) as f64;
+            let step = (self.fade_shown.map_or(0, |s| s + 1))
+                .max(by_time as usize)
+                .min(last);
+            if self.fade_shown != Some(step) {
+                let pixel = self.fade.get(step).unwrap_or(&self.dim_buffer);
                 let surface = self.layer.wl_surface();
                 self.root_viewport
                     .set_destination(self.logical.2 as i32, self.logical.3 as i32);
-                surface.attach(Some(&self.dim_buffer), 0, 0);
+                surface.attach(Some(pixel), 0, 0);
                 surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
                 surface.frame(qh, FrameCallbackData(surface.clone()));
                 self.layer.commit();
                 self.frame_pending = true;
+                self.fade_shown = Some(step);
             }
             return Ok(());
         }
@@ -619,6 +638,12 @@ impl Drop for View {
     fn drop(&mut self) {
         self.frame.take();
         self.dim_buffer.destroy();
+        for pixel in self.fade.drain(..) {
+            pixel.destroy();
+        }
+        if let Some(f) = self.fractional.take() {
+            f.destroy();
+        }
         if let Some(b) = self.clear_buffer.take() {
             b.destroy();
         }
@@ -716,6 +741,8 @@ pub(crate) struct App {
     started: Instant,
     visible_reported: bool,
     single_pixel: Option<WpSinglePixelBufferManagerV1>,
+    /// App icons for window labels, by app_id, looked up once each.
+    icons: std::collections::HashMap<String, Option<tiny_skia::Pixmap>>,
 }
 
 impl App {
@@ -728,7 +755,7 @@ impl App {
             let cx = Context {
                 frame: frozen.map(|f| &f.frames[i]),
                 logical: (view.logical.2, view.logical.3),
-                scale: view.size.0 as f64 / view.logical.2.max(1.0),
+                scale: view.ui_scale(),
                 fonts: &mut self.fonts,
                 theme: &self.theme,
                 pool: &mut self.pool,
@@ -797,6 +824,10 @@ impl App {
             Action::Region(region) => Some(Outcome::Region(region)),
             Action::OutputAt(at) => self.view_at(at).map(|v| Outcome::Output(v.output.clone())),
             Action::AllOutputs => Some(Outcome::AllOutputs),
+            Action::ToggleCursor => {
+                self.layers.toggle_cursor();
+                None
+            }
             Action::Cancel => Some(Outcome::Cancelled),
         };
     }
@@ -840,9 +871,11 @@ impl App {
             .selector
             .moving_point()
             .map_or(1.0, |at| self.pixel_at(at));
-        match self.selector.key(key, released, px) {
-            Some(action) => self.act(action),
-            None => self.update(qh),
+        if let Some(action) = self.selector.key(key, released, px) {
+            self.act(action);
+        }
+        if self.outcome.is_none() {
+            self.update(qh);
         }
     }
 
@@ -872,7 +905,7 @@ impl App {
                     match keep {
                         Some(l) => Some(l.clone()),
                         None => {
-                            let (sx, _) = view.scale();
+                            let sx = view.ui_scale();
                             let mut l = self.fonts.label(&text, sx, sel.x, 0, &self.theme);
                             l.rect.y = label_y(sel, l.rect.h, view.size.1);
                             Some(l)
@@ -882,7 +915,14 @@ impl App {
                 _ => None,
             };
             let handles = match selection {
-                Some(sel) if refining => handles(sel, view.scale().0),
+                Some(sel) if refining => handles(sel, view.ui_scale()),
+                _ => Vec::new(),
+            };
+            let toolbar = match (&label, self.selector.tool()) {
+                (Some(size), Some(focused)) => {
+                    let (scale, start) = (view.ui_scale(), size.rect);
+                    self.toolbar(focused, scale, start)
+                }
                 _ => Vec::new(),
             };
             let view = &mut self.views[i];
@@ -891,12 +931,43 @@ impl App {
                 selection,
                 label,
                 handles,
+                toolbar,
             };
             if let Err(e) = view.redraw(&mut self.pool, qh) {
                 self.outcome = Some(Outcome::Cancelled);
                 eprintln!("hoarder: cannot draw the Overlay: {e}");
             }
         }
+    }
+
+    /// Refine's toolbar pills, in [`Tool::ALL`]'s order, on the row of the
+    /// size label `after` and to its right; `focused` in the accent.
+    fn toolbar(&mut self, focused: Tool, scale: f64, after: Rect) -> Vec<crate::chrome::Label> {
+        let gap = (6.0 * scale).round() as i32;
+        let mut x = after.right() + gap;
+        let lit = Theme {
+            surface: self.theme.accent,
+            text: hoarder_config::Colour {
+                a: 255,
+                ..self.theme.surface
+            },
+            ..self.theme.clone()
+        };
+        Tool::ALL
+            .iter()
+            .map(|&tool| {
+                let text = match tool {
+                    Tool::Capture => "Capture",
+                    Tool::Cursor if self.layers.cursor => "Cursor: on",
+                    Tool::Cursor => "Cursor: off",
+                    Tool::Cancel => "Cancel",
+                };
+                let theme = if tool == focused { &lit } else { &self.theme };
+                let pill = self.fonts.label(text, scale, x, after.y, theme);
+                x = pill.rect.right() + gap;
+                pill
+            })
+            .collect()
     }
 
     /// Window `index` as highlighted on output `view`, if it shows there.
@@ -925,11 +996,19 @@ impl App {
         } else {
             &window.title
         };
+        let icon = self
+            .icons
+            .entry(window.app_id.clone())
+            .or_insert_with(|| crate::icon::lookup(&window.app_id));
         let label = (!text.is_empty()).then(|| {
-            let (sx, _) = view.scale();
-            let mut l = self
-                .fonts
-                .label(&ellipsize(text, 80), sx, 0, 0, &self.theme);
+            let sx = view.ui_scale();
+            let mut l = self.fonts.window_label(
+                &ellipsize(text, 80),
+                icon.as_ref(),
+                &window.app_id,
+                sx,
+                &self.theme,
+            );
             // Centred on the part of the window this output shows.
             l.rect.x = shown.x + ((shown.w - l.rect.w) / 2).max(0);
             l.rect.y = shown.y + ((shown.h - l.rect.h) / 2).max(0);
@@ -992,6 +1071,26 @@ impl App {
             PointerEventKind::Press {
                 button: BTN_LEFT, ..
             } => {
+                // A click on a Refine toolbar pill runs its action.
+                let view = &self.views[i];
+                let (sx, sy) = view.scale();
+                let (px, py) = (
+                    (event.position.0 * sx) as i32,
+                    (event.position.1 * sy) as i32,
+                );
+                let hit = view.drawn.toolbar.iter().position(|pill| {
+                    let r = pill.rect;
+                    px >= r.x && px < r.right() && py >= r.y && py < r.bottom()
+                });
+                if let Some(tool) = hit.and_then(|j| Tool::ALL.get(j))
+                    && let Some(action) = self.selector.run_tool(*tool)
+                {
+                    self.act(action);
+                    if self.outcome.is_none() {
+                        self.update(qh);
+                    }
+                    return;
+                }
                 self.selector.press(at);
                 self.update(qh);
             }
@@ -1088,6 +1187,7 @@ fn key_of(keysym: Keysym) -> Option<Key> {
         Keysym::Right | Keysym::KP_Right => Key::Right,
         Keysym::Up | Keysym::KP_Up => Key::Up,
         Keysym::Down | Keysym::KP_Down => Key::Down,
+        Keysym::Tab | Keysym::ISO_Left_Tab => Key::Tab,
         _ => return None,
     })
 }
@@ -1377,5 +1477,23 @@ delegate_noop!(App: WpViewporter);
 delegate_noop!(App: WpViewport);
 delegate_noop!(App: wayland_client::protocol::wl_region::WlRegion);
 delegate_noop!(App: WpSinglePixelBufferManagerV1);
+delegate_noop!(App: WpFractionalScaleManagerV1);
+
+impl wayland_client::Dispatch<WpFractionalScaleV1, usize> for App {
+    fn event(
+        app: &mut Self,
+        _: &WpFractionalScaleV1,
+        event: wp_fractional_scale_v1::Event,
+        &view: &usize,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event
+            && let Some(v) = app.views.get_mut(view)
+        {
+            v.preferred_scale = Some(f64::from(scale) / 120.0);
+        }
+    }
+}
 delegate_noop!(App: WlShmPool);
 delegate_noop!(App: ignore WlBuffer);

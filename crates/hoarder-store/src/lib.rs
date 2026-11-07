@@ -514,11 +514,11 @@ impl Store {
     /// Apply the retention policy at `now` (Unix ms): evict what
     /// [`retention::evict`] picks. Returns the evicted ids.
     pub fn retain(&mut self, limits: &retention::Limits, now: i64) -> Result<Vec<i64>> {
-        let entries: Vec<retention::Entry> = self
+        let entries: Vec<retention::Clip> = self
             .db
             .prepare_cached("SELECT id, last_used_at, pinned, size FROM clips")?
             .query_map([], |r| {
-                Ok(retention::Entry {
+                Ok(retention::Clip {
                     id: r.get(0)?,
                     last_used_at: r.get(1)?,
                     pinned: r.get(2)?,

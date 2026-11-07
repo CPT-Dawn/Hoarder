@@ -7,7 +7,7 @@
 //! there is one, adds where each is and at what scale, and whether its
 //! buffer may be stale.
 
-use hoarder_config::{Depth, MixedScale, Screenshot};
+use hoarder_config::{Capture, Depth, MixedScale};
 use hoarder_wayland::toplevel::{self, Toplevel, ToplevelFrame};
 use hoarder_wayland::{CaptureError, FrozenFrame, LogicalRect, Window};
 
@@ -17,7 +17,7 @@ use crate::image::Image;
 
 /// `hoarder shot window --list`: with no `title`, print the windows and
 /// return `None`; with one, capture the window it names.
-pub fn by_title(title: Option<&str>, settings: &Screenshot) -> Result<Option<Cut>, (Exit, String)> {
+pub fn by_title(title: Option<&str>, settings: &Capture) -> Result<Option<Cut>, (Exit, String)> {
     let toplevels = toplevel::list().map_err(capture_error)?;
     let windows = hoarder_wayland::windows::detect()
         .all_windows()
@@ -38,7 +38,7 @@ pub fn by_title(title: Option<&str>, settings: &Screenshot) -> Result<Option<Cut
 }
 
 /// Shift+click (or `window_source = "toplevel"`): `window`'s own buffer.
-pub fn own_buffer(window: &Window, settings: &Screenshot) -> Result<Cut, CaptureError> {
+pub fn own_buffer(window: &Window, settings: &Capture) -> Result<Cut, CaptureError> {
     let identifier = match &window.toplevel {
         Some(id) => id.clone(),
         None => {
@@ -148,7 +148,7 @@ fn pick<'a, 'w>(
 /// hands over toplevels at a fractional scale at their logical size) is
 /// enlarged by nearest neighbour under `mixed_scale = "upscale"`, with the
 /// badge; `clamp` and `split` keep it as it came.
-fn cut(frame: ToplevelFrame, window: Option<&Window>, settings: &Screenshot) -> Cut {
+fn cut(frame: ToplevelFrame, window: Option<&Window>, settings: &Capture) -> Cut {
     let frozen = FrozenFrame {
         output: String::new(),
         logical: LogicalRect {

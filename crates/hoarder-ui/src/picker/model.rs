@@ -12,14 +12,14 @@ use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use zeroize::Zeroizing;
 
-use super::Entry;
+use super::{Clip, Kind};
 
 /// A query split into its filter prefixes (`img:`, `txt:`, `file:`,
 /// `pin:`, `app:<id>`) and the text to search for.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Filter {
     /// Kinds to keep (any of them); every kind if empty.
-    kinds: Vec<&'static str>,
+    kinds: Vec<Kind>,
     pinned: bool,
     /// Lowercased parts of the source app id to keep (all of them).
     apps: Vec<String>,
@@ -34,9 +34,9 @@ impl Filter {
         let mut words = Vec::new();
         for word in query.split_whitespace() {
             match word {
-                "img:" => filter.kinds.push("image"),
-                "txt:" => filter.kinds.push("text"),
-                "file:" => filter.kinds.push("files"),
+                "img:" => filter.kinds.push(Kind::Image),
+                "txt:" => filter.kinds.push(Kind::Text),
+                "file:" => filter.kinds.push(Kind::Files),
                 "pin:" => filter.pinned = true,
                 _ => match word.strip_prefix("app:") {
                     // `app:` alone is a filter still being typed.
@@ -50,12 +50,11 @@ impl Filter {
         filter
     }
 
-    fn keeps(&self, entry: &Entry) -> bool {
-        (self.kinds.is_empty() || self.kinds.contains(&entry.kind.as_str()))
-            && (!self.pinned || entry.pinned)
+    fn keeps(&self, clip: &Clip) -> bool {
+        (self.kinds.is_empty() || self.kinds.contains(&clip.kind))
+            && (!self.pinned || clip.pinned)
             && self.apps.iter().all(|want| {
-                entry
-                    .app
+                clip.app
                     .as_ref()
                     .is_some_and(|app| app.to_lowercase().contains(want))
             })
@@ -65,11 +64,11 @@ impl Filter {
 #[derive(Debug)]
 pub(crate) struct Model {
     /// Every Clip, most recently used first.
-    entries: Vec<Entry>,
+    clips: Vec<Clip>,
     by_id: HashMap<i64, usize>,
     matcher: Matcher,
     query: String,
-    /// What matches the query, best first: indices into `entries`.
+    /// What matches the query, best first: indices into `clips`.
     shown: Vec<usize>,
     /// An index into `shown`.
     selected: usize,
@@ -84,11 +83,11 @@ pub(crate) struct Model {
 pub(crate) const MASK: &str = "••••••••";
 
 impl Model {
-    pub(crate) fn new(entries: Vec<Entry>) -> Model {
-        let by_id = entries.iter().enumerate().map(|(i, e)| (e.id, i)).collect();
+    pub(crate) fn new(clips: Vec<Clip>) -> Model {
+        let by_id = clips.iter().enumerate().map(|(i, e)| (e.id, i)).collect();
         Model {
-            shown: (0..entries.len()).collect(),
-            entries,
+            shown: (0..clips.len()).collect(),
+            clips,
             by_id,
             matcher: Matcher::new(Config::DEFAULT),
             query: String::new(),
@@ -100,11 +99,11 @@ impl Model {
 
     /// The line a Clip's row shows: its preview, or for a Concealed Clip
     /// the mask, unless it is revealed.
-    pub(crate) fn line<'a>(&'a self, entry: &'a Entry) -> &'a str {
-        if !entry.concealed {
-            return &entry.preview;
+    pub(crate) fn line<'a>(&'a self, clip: &'a Clip) -> &'a str {
+        if !clip.concealed {
+            return &clip.preview;
         }
-        self.revealed.get(&entry.id).map_or(MASK, |t| t.as_str())
+        self.revealed.get(&clip.id).map_or(MASK, |t| t.as_str())
     }
 
     /// A Concealed Clip's text, if it is revealed.
@@ -142,7 +141,7 @@ impl Model {
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.clips.is_empty()
     }
 
     /// Match `query`; `found` are the ids the full-text search found for
@@ -153,17 +152,17 @@ impl Model {
         self.selected = 0;
         self.top = 0;
         let filter = Filter::parse(query);
-        let kept = |e: &Entry| filter.keeps(e);
+        let kept = |e: &Clip| filter.keeps(e);
         if filter.text.is_empty() {
-            self.shown = (0..self.entries.len())
-                .filter(|&i| kept(&self.entries[i]))
+            self.shown = (0..self.clips.len())
+                .filter(|&i| kept(&self.clips[i]))
                 .collect();
             return;
         }
         let pattern = Pattern::parse(&filter.text, CaseMatching::Smart, Normalization::Smart);
         let mut buf = Vec::new();
         let mut scored: Vec<(u32, usize)> = self
-            .entries
+            .clips
             .iter()
             .enumerate()
             // A Concealed Clip's text is never searched.
@@ -175,7 +174,7 @@ impl Model {
             .collect();
         // Best first; among equals the newer (smaller index) first.
         scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        let mut seen = vec![false; self.entries.len()];
+        let mut seen = vec![false; self.clips.len()];
         self.shown = scored.into_iter().map(|(_, i)| i).collect();
         for &i in &self.shown {
             seen[i] = true;
@@ -183,7 +182,7 @@ impl Model {
         let mut extra: Vec<usize> = found
             .iter()
             .filter_map(|id| self.by_id.get(id).copied())
-            .filter(|&i| kept(&self.entries[i]) && !self.entries[i].concealed)
+            .filter(|&i| kept(&self.clips[i]) && !self.clips[i].concealed)
             .filter(|&i| !std::mem::replace(&mut seen[i], true))
             .collect();
         extra.sort_unstable();
@@ -196,8 +195,8 @@ impl Model {
         self.selected = self.selected.saturating_add_signed(delta).min(last);
     }
 
-    pub(crate) fn selected(&self) -> Option<&Entry> {
-        self.shown.get(self.selected).map(|&i| &self.entries[i])
+    pub(crate) fn selected(&self) -> Option<&Clip> {
+        self.shown.get(self.selected).map(|&i| &self.clips[i])
     }
 
     /// Scroll a list `rows` tall so the selection shows.
@@ -212,19 +211,19 @@ impl Model {
 
     /// The Clip on the `n`th row (from 0) of a list `rows` tall, as it is
     /// on screen.
-    pub(crate) fn row(&mut self, n: usize, rows: usize) -> Option<&Entry> {
+    pub(crate) fn row(&mut self, n: usize, rows: usize) -> Option<&Clip> {
         self.scroll(rows);
         if n >= rows {
             return None;
         }
         let i = *self.shown.get(self.top + n)?;
-        Some(&self.entries[i])
+        Some(&self.clips[i])
     }
 
     /// Mark Clip `id` pinned or not.
     pub(crate) fn set_pinned(&mut self, id: i64, pinned: bool) {
         if let Some(&i) = self.by_id.get(&id) {
-            self.entries[i].pinned = pinned;
+            self.clips[i].pinned = pinned;
         }
     }
 
@@ -234,8 +233,8 @@ impl Model {
         let Some(gone) = self.by_id.remove(&id) else {
             return;
         };
-        self.entries.remove(gone);
-        self.by_id = (self.entries.iter().enumerate())
+        self.clips.remove(gone);
+        self.by_id = (self.clips.iter().enumerate())
             .map(|(i, e)| (e.id, i))
             .collect();
         self.shown.retain(|&i| i != gone);
@@ -250,21 +249,21 @@ impl Model {
 
     /// The Clips on screen in a list `rows` tall, scrolled so the selection
     /// shows, with whether each is the selected one.
-    pub(crate) fn visible(&mut self, rows: usize) -> Vec<(&Entry, bool)> {
+    pub(crate) fn visible(&mut self, rows: usize) -> Vec<(&Clip, bool)> {
         self.scroll(rows);
         self.on_screen(rows)
     }
 
     /// The Clips on screen in a list `rows` tall as last scrolled
     /// ([`Model::scroll`]), with whether each is the selected one.
-    pub(crate) fn on_screen(&self, rows: usize) -> Vec<(&Entry, bool)> {
+    pub(crate) fn on_screen(&self, rows: usize) -> Vec<(&Clip, bool)> {
         let rows = rows.max(1);
         self.shown
             .iter()
             .enumerate()
             .skip(self.top)
             .take(rows)
-            .map(|(n, &i)| (&self.entries[i], n == self.selected))
+            .map(|(n, &i)| (&self.clips[i], n == self.selected))
             .collect()
     }
 }
@@ -278,9 +277,9 @@ mod tests {
             previews
                 .iter()
                 .enumerate()
-                .map(|(i, p)| Entry {
+                .map(|(i, p)| Clip {
                     id: 100 + i as i64,
-                    kind: "text".into(),
+                    kind: Kind::Text,
                     preview: (*p).into(),
                     app: None,
                     at_ms: None,
@@ -378,11 +377,11 @@ mod tests {
     #[test]
     fn a_concealed_clip_shows_the_mask_until_revealed() {
         let mut m = model(&["plain", "secret"]);
-        m.entries[1].concealed = true;
-        m.entries[1].preview = MASK.into();
+        m.clips[1].concealed = true;
+        m.clips[1].preview = MASK.into();
 
         assert_eq!(m.unrevealed(10), [101]);
-        let line = |m: &Model| m.line(&m.entries[1]).to_owned();
+        let line = |m: &Model| m.line(&m.clips[1]).to_owned();
         assert_eq!(line(&m), MASK);
         m.reveal(101, "hunter2".into());
         assert_eq!(line(&m), "hunter2");

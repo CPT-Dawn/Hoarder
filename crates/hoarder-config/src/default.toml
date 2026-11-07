@@ -30,8 +30,6 @@ confirm = false           # always enter Refine
 freeze = true             # false = --live
 cursor = false
 window_source = "frame"   # frame | toplevel
-mixed_scale = "upscale"   # upscale | clamp | split
-depth = "auto"            # auto | 8
 sound = false
 flash = false
 on_capture = ""           # shell hook
@@ -47,6 +45,11 @@ quality = 92
 quality = 80
 speed = 6
 
+[capture]
+# A Target across outputs of different scales: upscale | clamp | split
+mixed_scale = "upscale"
+depth = "auto"            # auto | 8
+
 [pick]
 format = "hex"            # hex | rgb | hsl
 
@@ -55,6 +58,8 @@ persist = true
 deny_types = []
 max_offer_mb = 64
 no_takeover_apps = []     # app_ids whose copies are never kept alive after they exit
+# Run for each Normal copy, the copy on stdin (like wl-paste --watch);
+# $HOARDER_MIME, $HOARDER_TYPES and $HOARDER_APP describe it
 on_clip = ""
 [clipboard.primary]
 persist = false
