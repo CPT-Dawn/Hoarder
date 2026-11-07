@@ -107,7 +107,7 @@ History is judged through `hoarder history … --json`, `history get` bytes, `wl
 
 ## Window geometry providers
 
-`hoarder` picks its window-geometry provider from the environment: `HYPRLAND_INSTANCE_SIGNATURE` means Hyprland IPC, `SWAYSOCK` means Sway IPC, and neither means no provider (no hover highlighting). `Session::command` sets `SWAYSOCK`, so the end-to-end tests (`e2e_window.rs`) snap through Sway's `get_tree`; `cmd.env_remove("SWAYSOCK")` gives the no-provider path. Hyprland can't run headless in CI, so its parsing is covered by fixture tests (`crates/hoarder-wayland/tests/windows.rs`) and its live behaviour by the manual release checklist.
+`hoarder` picks its window-geometry provider from the environment: `HYPRLAND_INSTANCE_SIGNATURE` means Hyprland IPC, `SWAYSOCK` means Sway IPC, and neither means no provider (no hover highlighting). `Session::command` sets `SWAYSOCK`, so the end-to-end tests (`e2e_window.rs`) snap through Sway's `get_tree`; `cmd.env_remove("SWAYSOCK")` gives the no-provider path. Hyprland can't run headless in CI, so its parsing is covered by fixture tests (`crates/hoarder-wayland/tests/windows.rs`) and its live behaviour by the manual release checklist. The same sockets give the Daemon the focused app for `privacy.exclude_apps` (Sway `window` focus events, Hyprland `activewindowv2`); `e2e_sensitivity.rs` hides `zwlr_foreign_toplevel_manager_v1` to prove the Sway path on its own, and the event parsing has unit tests in `crates/hoarder-wayland/src/focus.rs`. `shot output` asks the same provider for the focused output.
 
 ## Driving the Overlay
 

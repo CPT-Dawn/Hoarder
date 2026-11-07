@@ -60,7 +60,7 @@ A **ClipSummary** is one Clip in History:
 | Field | Type | |
 |---|---|---|
 | `id` | integer | Stable for the Clip's life |
-| `kind` | string | `text`, `image`, `files` or `other` |
+| `kind` | string | `text`, `image`, `files` (a `text/uri-list` or `x-special/gnome-copied-files`) or `other`; a Front end treats a kind it does not know as `other` (`hoarder_ipc::Kind` does) |
 | `preview` | string | A line of text, an image's `W×H`, or the file names |
 | `app` | string or null | The app focused when it was copied, if known |
 | `at` | time | When it was last copied or restored |
