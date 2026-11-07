@@ -787,8 +787,13 @@ fn an_idle_daemon_never_wakes_up() {
 // ---- `hoarder service` --------------------------------------------------------
 
 /// A `systemctl` stand-in that logs its arguments, so no test touches the
-/// real user manager.
+/// real user manager. It starts nothing.
 fn fake_systemctl(session: &Session) -> (PathBuf, PathBuf) {
+    fake_systemctl_running(session, "")
+}
+
+/// [`fake_systemctl`], running `on_start` (shell) on `enable --now`.
+fn fake_systemctl_running(session: &Session, on_start: &str) -> (PathBuf, PathBuf) {
     use std::os::unix::fs::PermissionsExt as _;
     let bin = session.runtime_dir().join("fakebin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -797,13 +802,41 @@ fn fake_systemctl(session: &Session) -> (PathBuf, PathBuf) {
     std::fs::write(
         &script,
         format!(
-            "#!/bin/sh\necho \"$@\" >> '{}'\ncase \"$*\" in *is-enabled*) echo enabled;; esac\n",
+            "#!/bin/sh\necho \"$@\" >> '{}'\n\
+             case \"$*\" in\n  *is-enabled*) echo enabled;;\n  *'enable --now'*) {on_start};;\nesac\n",
             log.display()
         ),
     )
     .unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     (bin, log)
+}
+
+/// A stand-in for the user manager starting the service: the Daemon comes
+/// up a beat after `systemctl` returns, as it does for real. Its pid lands
+/// in the returned file, for [`DaemonByPid`].
+fn starts_the_daemon_late(session: &Session) -> (String, PathBuf) {
+    let pid = session.runtime_dir().join("service.pid");
+    let log = session.runtime_dir().join("daemon.log");
+    (
+        format!(
+            "(sleep 0.5; exec '{HOARDER}' daemon) </dev/null >'{}' 2>&1 & echo $! > '{}'",
+            log.display(),
+            pid.display()
+        ),
+        pid,
+    )
+}
+
+/// A Daemon started behind the test's back, killed by pid when dropped.
+struct DaemonByPid(PathBuf);
+
+impl Drop for DaemonByPid {
+    fn drop(&mut self) {
+        if let Ok(pid) = std::fs::read_to_string(&self.0) {
+            let _ = Command::new("kill").arg(pid.trim()).status();
+        }
+    }
 }
 
 fn with_path(session: &Session, bin: &std::path::Path) -> Command {
@@ -816,7 +849,9 @@ fn with_path(session: &Session, bin: &std::path::Path) -> Command {
 #[test]
 fn service_enable_installs_and_starts_a_user_unit() {
     let session = Session::start_default().unwrap();
-    let (bin, log) = fake_systemctl(&session);
+    let (on_start, pid) = starts_the_daemon_late(&session);
+    let _daemon = DaemonByPid(pid);
+    let (bin, log) = fake_systemctl_running(&session, &on_start);
 
     let out = with_path(&session, &bin)
         .args(["service", "enable"])
@@ -828,6 +863,21 @@ fn service_enable_installs_and_starts_a_user_unit() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("runs now"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    // Claimed running means running: `status` agrees straight away.
+    let status = with_path(&session, &bin)
+        .args(["service", "status"])
+        .output()
+        .unwrap();
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stderr)
+    );
     let unit = session
         .runtime_dir()
         .join("home/.config/systemd/user/hoarder.service");
@@ -837,9 +887,10 @@ fn service_enable_installs_and_starts_a_user_unit() {
         "{text}"
     );
     assert!(text.contains("WantedBy=graphical-session.target"));
-    assert_eq!(
-        std::fs::read_to_string(&log).unwrap(),
-        "--user daemon-reload\n--user enable --now hoarder.service\n"
+    assert!(
+        std::fs::read_to_string(&log)
+            .unwrap()
+            .starts_with("--user daemon-reload\n--user enable --now hoarder.service\n")
     );
 
     let out = with_path(&session, &bin)
@@ -852,6 +903,33 @@ fn service_enable_installs_and_starts_a_user_unit() {
         std::fs::read_to_string(&log)
             .unwrap()
             .ends_with("--user disable --now hoarder.service\n--user daemon-reload\n")
+    );
+}
+
+#[test]
+fn service_enable_owns_up_when_the_daemon_never_answers() {
+    let session = Session::start_default().unwrap();
+    // The unit is enabled, but the Daemon it starts dies on the spot.
+    let (bin, _) = fake_systemctl(&session);
+
+    let started = Instant::now();
+    let out = with_path(&session, &bin)
+        .args(["service", "enable"])
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{stdout}");
+    assert!(!stdout.contains("runs now"), "{stdout}");
+    assert!(stderr.contains("journalctl --user -u hoarder"), "{stderr}");
+    // A short deadline, not a hang.
+    assert!(started.elapsed() < Duration::from_secs(15));
+    assert!(
+        session
+            .runtime_dir()
+            .join("home/.config/systemd/user/hoarder.service")
+            .is_file()
     );
 }
 
