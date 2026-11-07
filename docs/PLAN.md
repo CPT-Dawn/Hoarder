@@ -314,6 +314,7 @@ format = "hex"
 persist = true
 deny_types = []
 max_offer_mb = 64
+no_takeover_apps = []     # escape hatch: app_ids whose copies are never taken over
 on_clip = ""
 [clipboard.primary]
 persist = false
