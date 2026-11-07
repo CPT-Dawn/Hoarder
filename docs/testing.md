@@ -61,7 +61,7 @@ What it guarantees:
 - **Painting**: a background layer-shell surface per output. The buffer is the output's physical size, mapped 1:1 through `wp_viewporter`, so the pattern lands on physical pixels at any scale or rotation. `paint_as(…, PixelFormat::Xrgb2101010)` paints 10-bit values; `Rgb10` colours with no 8-bit equivalent come back bit-exact from `capture` on a 10-bit output. `Pattern::Ramp` covers every 10-bit value of every channel; `Pattern::Checker { cell: 1 }` shows any resampling. Each call returns after the frame is presented.
 - **Selections**: set over `ext-data-control-v1`, so no focus is needed; payloads of any size are written off-thread. `exit()` (or dropping the client) closes the connection, and the compositor clears the Selection exactly as it does when a real app quits.
 - **Input**: `wlr-virtual-pointer` with absolute motion in output-logical coordinates, and `zwp-virtual-keyboard` with a US keymap. The harness tracks modifiers itself, because the protocol leaves that to the client. Every call returns after the compositor has processed it.
-- **Probe windows**: plain `xdg_toplevel`s that Sway tiles and focuses like any new app. They record `InputEvent`s (enter, motion, buttons, keys, modifiers).
+- **Probe windows**: plain `xdg_toplevel`s that Sway tiles and focuses like any new app, filled with one colour (grey `#808080`, or any `Rgb8` through `open_window_coloured`, so stacked windows can be told apart in a Capture). They record `InputEvent`s (enter, motion, buttons, keys, modifiers). Float and place them with `Session::swaymsg`, e.g. `[app_id=…] floating enable, resize set 200 120, move absolute position 100 60`.
 
 Every helper call times out after 10 s with an error rather than hanging the test.
 
@@ -77,6 +77,10 @@ cmd.env("HOARDER_HIDE_GLOBALS", "ext_image_copy_capture_manager_v1,zwlr_screenco
 ```
 
 It is also handy for bug reports: a user can check whether a capture problem follows one protocol.
+
+## Window geometry providers
+
+`hoarder` picks its window-geometry provider from the environment: `HYPRLAND_INSTANCE_SIGNATURE` means Hyprland IPC, `SWAYSOCK` means Sway IPC, and neither means no provider (no hover highlighting). `Session::command` sets `SWAYSOCK`, so the end-to-end tests (`e2e_window.rs`) snap through Sway's `get_tree`; `cmd.env_remove("SWAYSOCK")` gives the no-provider path. Hyprland can't run headless in CI, so its parsing is covered by fixture tests (`crates/hoarder-wayland/tests/windows.rs`) and its live behaviour by the manual release checklist.
 
 ## Driving the Overlay
 
