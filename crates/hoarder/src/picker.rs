@@ -55,7 +55,10 @@ pub fn run(overrides: &[(String, String)]) -> Result<(), Fail> {
     };
     let mut daemon = history.connection()?;
     match daemon.restore_as(pick.id, pick.plain) {
-        Ok(Ok(_)) => Ok(()),
+        Ok(Ok(_)) => {
+            crate::autopaste::after_restore(&config.picker);
+            Ok(())
+        }
         Ok(Err(failure)) => Err((Exit::Io, failure.message)),
         Err(e) => Err((Exit::Io, format!("lost the Daemon: {e}"))),
     }
