@@ -5,5 +5,6 @@ All Front ends, including Hoarder's own CLI and Picker and the Zenith `clipboard
 ## Consequences
 
 - Zenith gains a native `clipboard` module that is just another Front end; Zenith has no IPC of its own, so the dependency points one way (Zenith → Hoarder socket) and Zenith must tolerate the Daemon being absent.
-- The request/response/event types live in a separate `hoarder-ipc` crate published to crates.io, so Zenith and third parties depend on the contract rather than copying it; breaking changes bump both the protocol `v` and the crate's major version.
+- The request/response/event types live in a separate `hoarder-ipc` crate, so Zenith and third parties depend on the contract rather than copying it; breaking changes bump the protocol `v`.
+- *Amended 2026-11-08:* the crate is not published to crates.io (nothing is; Hoarder ships through the AUR and GitHub releases). Consumers depend on it by git, pinned to a release tag (`tag = "v1.0.0"`).
 - The contract is written down in [docs/ipc.md](../ipc.md) and checked by a conformance suite (`crates/hoarder/tests/e2e_ipc.rs`) that runs its examples.
