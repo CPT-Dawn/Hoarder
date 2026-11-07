@@ -14,7 +14,9 @@ The end-to-end tests need these on `PATH` (Arch: `sway grim wl-clipboard`):
 |---|---|
 | `sway` (1.11+) | The compositor, run with `WLR_BACKENDS=headless` and `WLR_RENDERER=pixman`. No GPU, display or seat needed. |
 | `grim` | Independent oracle for "what the user sees" (`Session::screenshot`). |
-| `wl-paste` | Independent oracle for Selections in the harness's own tests. |
+| `wl-copy`, `wl-paste` | Independent oracle for Selections, and the reference the `hoarder copy`/`paste` parity suite (`crates/hoarder/tests/e2e_clipboard.rs`) runs every case against, in every copier/paster pairing. |
+
+Latency budgets (4K shot-to-clipboard under 150 ms) are `#[ignore]`d in debug builds, since timing unoptimised code proves nothing. Run them with `cargo test --release -p hoarder --test e2e_shot_clipboard`.
 
 Each test starts its own Sway in a private directory under `/tmp`, so tests run in parallel and never touch your real desktop, config or History. Set `HOARDER_E2E_KEEP=1` to keep that directory (it holds a `--debug` `sway.log`) and print its path.
 
@@ -106,7 +108,7 @@ CI runs on pushes to `main`, `integration/**` and `ticket/**`, and on every pull
 | rustfmt | `cargo fmt --all --check` | |
 | clippy | `cargo clippy --workspace --all-targets --locked -- -D warnings` | Any warning fails the build. |
 | MSRV (1.97) | `cargo check --workspace --all-targets --locked` | MSRV is current stable minus two; bump it with `rust-version` in `Cargo.toml`. |
-| tests (headless Sway) | `cargo test --workspace --locked` | Runs in an `archlinux` container, because Ubuntu's Sway predates the protocols Hoarder targets. Runs as a non-root user. |
+| tests (headless Sway) | `cargo test --workspace --locked`, then the timing budgets with `--release` | Runs in an `archlinux` container, because Ubuntu's Sway predates the protocols Hoarder targets. Runs as a non-root user. |
 | cargo-deny | `cargo deny check` | Advisories, licences (allow-list in `deny.toml`), bans and sources. |
 
 To run the same checks locally before pushing:

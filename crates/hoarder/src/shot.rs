@@ -54,6 +54,13 @@ pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(),
             Outcome::Cancelled => return Err((Exit::Cancelled, "cancelled".into())),
         },
     };
+    if config.screenshot.copy {
+        let mut png = Vec::new();
+        image
+            .write_png(&mut png)
+            .map_err(|e| (Exit::Io, format!("cannot encode the Capture: {e}")))?;
+        crate::clipboard::copy_capture(&png)?;
+    }
     match output {
         Some(output) => deliver(&image, output)
             .map_err(|e| (Exit::Io, format!("cannot write {}: {e}", output.display()))),
