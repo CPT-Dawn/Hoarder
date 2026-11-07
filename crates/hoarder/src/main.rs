@@ -170,7 +170,7 @@ fn main() -> ExitCode {
         Some(Command::Service(command)) => daemon::service::run(command),
         Some(Command::Doctor) => doctor::run(),
         Some(Command::Setup { wm, apply, yes }) => setup::run(wm, apply, yes),
-        None => Ok(()),
+        None => doctor::first_run(),
     };
     match result {
         Ok(()) => Exit::Success.into(),

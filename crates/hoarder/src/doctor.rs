@@ -200,6 +200,68 @@ fn export_fix() -> String {
     }
 }
 
+/// The Daemon's status, if it answers on the socket.
+fn daemon_status() -> Option<hoarder_ipc::Status> {
+    hoarder_ipc::Connection::connect()
+        .ok()
+        .and_then(|mut c| c.status().ok())
+        .and_then(Result::ok)
+}
+
+fn describe(status: Option<&hoarder_ipc::Status>) -> String {
+    match status {
+        Some(s) => format!(
+            "running (pid {}, version {}, {}-data-control)",
+            s.pid, s.daemon, s.data_control
+        ),
+        None => "not running".into(),
+    }
+}
+
+/// Bare `hoarder`: a short status, and an offer to enable the service when
+/// the Daemon is not running (asked only on a terminal).
+pub fn first_run() -> Result<(), Fail> {
+    use std::io::{BufRead as _, IsTerminal as _, Write as _};
+
+    let status = daemon_status();
+    let service = crate::daemon::service::enabled_state();
+    println!("Hoarder {} on {}", env!("CARGO_PKG_VERSION"), compositor());
+    println!("daemon:   {}", describe(status.as_ref()));
+    println!(
+        "service:  {}",
+        service.as_deref().unwrap_or("unknown (no systemctl)")
+    );
+    println!();
+    if status.is_some() {
+        println!(
+            "Copies outlive their apps. `hoarder --help` lists every command; `hoarder doctor` checks the setup."
+        );
+        return Ok(());
+    }
+    println!("Without the Daemon, copies vanish with the app they came from and History is off.");
+    if service.is_none() || !std::io::stdin().is_terminal() {
+        println!(
+            "Run `hoarder service enable` to start it now and on every login, or `hoarder doctor` for a full check."
+        );
+        return Ok(());
+    }
+    print!("Enable the service now (`hoarder service enable`)? [Y/n] ");
+    std::io::stdout()
+        .flush()
+        .map_err(|e| (Exit::Io, e.to_string()))?;
+    let mut answer = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut answer)
+        .map_err(|e| (Exit::Io, e.to_string()))?;
+    if matches!(answer.trim(), "" | "y" | "Y" | "yes") {
+        crate::daemon::service::run(crate::daemon::service::ServiceCommand::Enable)
+    } else {
+        println!("Left it off; `hoarder service enable` turns it on later.");
+        Ok(())
+    }
+}
+
 fn service(report: &mut Report) {
     use crate::daemon::service;
 
@@ -208,20 +270,8 @@ fn service(report: &mut Report) {
         "service",
         state.as_deref().unwrap_or("unknown (no systemctl)"),
     );
-    let status = hoarder_ipc::Connection::connect()
-        .ok()
-        .and_then(|mut c| c.status().ok())
-        .and_then(Result::ok);
-    match &status {
-        Some(s) => report.fact(
-            "daemon",
-            format!(
-                "running (pid {}, version {}, {}-data-control)",
-                s.pid, s.daemon, s.data_control
-            ),
-        ),
-        None => report.fact("daemon", "not running"),
-    }
+    let status = daemon_status();
+    report.fact("daemon", describe(status.as_ref()));
 
     let enabled = state.as_deref() == Some("enabled");
     match (enabled, status.is_some(), state.is_some()) {

@@ -247,6 +247,46 @@ fn which(program: &str) -> PathBuf {
         .unwrap_or_else(|| panic!("{program} is not on PATH"))
 }
 
+// ---- bare `hoarder` ----------------------------------------------------------
+
+#[test]
+fn bare_hoarder_shows_status_and_offers_the_service() {
+    let session = Session::start_default().unwrap();
+    let bin = fake_systemctl(&session, "disabled", "");
+
+    let out = hoarder(&session, &bin).output().unwrap();
+
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(fact(&text, "daemon:"), "not running");
+    assert_eq!(fact(&text, "service:"), "disabled");
+    assert!(text.contains("hoarder service enable"), "{text}");
+    // Nobody at a terminal to say yes, so nothing was enabled.
+    assert!(
+        !session
+            .runtime_dir()
+            .join("home/.config/systemd/user/hoarder.service")
+            .exists()
+    );
+}
+
+#[test]
+fn bare_hoarder_with_a_running_daemon_offers_nothing() {
+    let session = Session::start_default().unwrap();
+    let bin = fake_systemctl(&session, "enabled", "");
+    let _daemon = Daemon::start(&session);
+
+    let out = hoarder(&session, &bin).output().unwrap();
+
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        fact(&text, "daemon:").starts_with("running (pid "),
+        "{text}"
+    );
+    assert!(!text.contains("hoarder service enable"), "{text}");
+}
+
 #[test]
 fn doctor_reports_the_compositor_and_the_paths_it_chose() {
     let session = Session::start_default().unwrap();
