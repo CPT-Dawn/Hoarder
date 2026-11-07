@@ -355,8 +355,9 @@ fn the_picker_wears_the_theme_and_sits_centred() {
     picker.finish();
 
     // The 720×480 panel is centred, (280, 120) to (1000, 600). Below its
-    // two rows lies bare panel, in the overridden (opaque) surface colour.
-    assert_eq!(seen.pixel(640, 120 + 400), Rgb8(0x12, 0x34, 0x56));
+    // two rows (left of the preview pane) lies bare panel, in the
+    // overridden (opaque) surface colour.
+    assert_eq!(seen.pixel(600, 120 + 400), Rgb8(0x12, 0x34, 0x56));
     assert_eq!(seen.pixel(285, 300), Rgb8(0x12, 0x34, 0x56));
     // Around it, the desktop shows untouched.
     assert_eq!(seen.pixel(275, 300), Rgb8(255, 0, 0));

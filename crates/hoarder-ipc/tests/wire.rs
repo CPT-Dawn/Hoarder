@@ -3,8 +3,8 @@
 //! promise.
 
 use hoarder_ipc::{
-    ClipSummary, ErrorCode, Event, EventLine, Op, Recording, Request, Selection, State, encode,
-    parse_request,
+    ClipSummary, ErrorCode, Event, EventLine, Op, Recording, Request, Selection, Sensitivity,
+    State, encode, parse_request,
 };
 use serde_json::{Value, json};
 
@@ -26,10 +26,19 @@ fn every_op_has_its_documented_line() {
         (Op::Reload, json!({"op": "reload"})),
         (Op::Subscribe, json!({"op": "subscribe"})),
         (
-            Op::List { limit: Some(10) },
-            json!({"op": "list", "limit": 10}),
+            Op::List {
+                limit: Some(10),
+                concealed: true,
+            },
+            json!({"op": "list", "limit": 10, "concealed": true}),
         ),
-        (Op::List { limit: None }, json!({"op": "list"})),
+        (
+            Op::List {
+                limit: None,
+                concealed: false,
+            },
+            json!({"op": "list"}),
+        ),
         (
             Op::Search {
                 query: "hoard".into(),
@@ -46,8 +55,18 @@ fn every_op_has_its_documented_line() {
         ),
         (Op::Thumb { clip: 412 }, json!({"op": "thumb", "clip": 412})),
         (
-            Op::Restore { clip: 412 },
+            Op::Restore {
+                clip: 412,
+                plain: false,
+            },
             json!({"op": "restore", "clip": 412}),
+        ),
+        (
+            Op::Restore {
+                clip: -3,
+                plain: true,
+            },
+            json!({"op": "restore", "clip": -3, "plain": true}),
         ),
         (
             Op::Delete { clip: 412 },
@@ -154,6 +173,8 @@ fn clip() -> ClipSummary {
         pinned: false,
         size: 8,
         types: vec!["text/plain".into()],
+        sensitivity: Sensitivity::Normal,
+        expires: None,
     }
 }
 
@@ -163,6 +184,33 @@ fn clip_json() -> Value {
         "at": "2026-11-08T12:00:01Z", "created": "2026-11-08T12:00:00Z",
         "pinned": false, "size": 8, "types": ["text/plain"],
     })
+}
+
+#[test]
+fn a_concealed_clip_says_so_and_when_it_goes() {
+    let concealed = ClipSummary {
+        id: -3,
+        preview: "••••••••".into(),
+        sensitivity: Sensitivity::Concealed,
+        expires: Some("2026-11-08T12:01:00Z".into()),
+        ..clip()
+    };
+    let mut expected = clip_json();
+    expected["id"] = json!(-3);
+    expected["preview"] = json!("••••••••");
+    expected["sensitivity"] = json!("concealed");
+    expected["expires"] = json!("2026-11-08T12:01:00Z");
+    assert_eq!(wire(&concealed), expected);
+    assert_eq!(
+        serde_json::from_value::<ClipSummary>(expected).unwrap(),
+        concealed
+    );
+    // A History Clip leaves both out, and older lines without them decode.
+    assert_eq!(wire(&clip()), clip_json());
+    assert_eq!(
+        serde_json::from_value::<ClipSummary>(clip_json()).unwrap(),
+        clip()
+    );
 }
 
 #[test]

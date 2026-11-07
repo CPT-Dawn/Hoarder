@@ -270,7 +270,20 @@ impl Daemon {
                 self.reply(client, id, result);
             }
             Op::Clear { selection } => self.clear(client, id, super::from_ipc(selection)),
-            Op::List { limit } => self.ask_history(client, id, Job::List { client, id, limit }),
+            Op::List { limit, concealed } => {
+                let extra = if concealed {
+                    self.concealed_summaries()
+                } else {
+                    Vec::new()
+                };
+                let job = Job::List {
+                    client,
+                    id,
+                    limit,
+                    extra,
+                };
+                self.ask_history(client, id, job);
+            }
             Op::Search { query, limit } => {
                 let job = Job::Search {
                     client,
@@ -284,6 +297,10 @@ impl Daemon {
                 let Some(pipe) = self.take_fd(client, id, "get streams into a pipe") else {
                     return;
                 };
+                if let Some(vault_id) = super::concealed::vault_id(clip) {
+                    let got = self.get_concealed(vault_id, mime, pipe);
+                    return self.reply(client, id, got);
+                }
                 let job = Job::Get {
                     client,
                     id,
@@ -305,7 +322,22 @@ impl Daemon {
                 };
                 self.ask_history(client, id, job);
             }
-            Op::Restore { clip } => self.ask_history(client, id, Job::Restore { client, id, clip }),
+            Op::Restore { clip, plain } if clip < 0 => {
+                self.restore_concealed(client, id, clip, plain);
+            }
+            Op::Restore { clip, plain } => {
+                let job = Job::Restore {
+                    client,
+                    id,
+                    clip,
+                    plain,
+                };
+                self.ask_history(client, id, job);
+            }
+            Op::Delete { clip } if clip < 0 => {
+                let result = self.delete_concealed(clip);
+                self.reply(client, id, result);
+            }
             Op::Delete { clip } => self.ask_history(client, id, Job::Delete { client, id, clip }),
             Op::Offer {
                 selection,

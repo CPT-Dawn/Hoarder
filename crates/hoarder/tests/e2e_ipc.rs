@@ -473,6 +473,92 @@ fn restore_makes_a_clip_the_clipboard_and_moves_it_up() {
 }
 
 #[test]
+fn restore_plain_drops_the_formatting() {
+    let session = Session::start_default().unwrap();
+    let daemon = Daemon::start(&session, &[]);
+    let mut events = Wire::subscribed(&daemon);
+    let _app = copy(
+        &session,
+        &[
+            ("text/html", b"<b>bold</b>".as_slice()),
+            ("text/plain", b"bold".as_slice()),
+        ],
+    );
+    let clip = events.next("clip_added")["clip"].clone();
+    let (_b, picture) = {
+        let app = copy(&session, &[("image/png", &png(4, 4))]);
+        (app, events.next("clip_added")["clip"].clone())
+    };
+    let mut wire = daemon.connect();
+    let restored = wire.ok(json!({"op": "restore", "clip": clip["id"], "plain": true}));
+    assert_eq!(restored["id"], clip["id"]);
+    let types = session
+        .command("wl-paste")
+        .arg("--list-types")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&types.stdout).trim(), "text/plain");
+    assert_eq!(
+        wire.err(json!({"op": "restore", "clip": picture["id"], "plain": true})),
+        "not_found",
+        "an image has no plain text"
+    );
+}
+
+/// A fake AWS key (AWS's documented example) that the classifier conceals.
+const CONCEALED: &str = concat!("AKIA", "IOSFODNN7EXAMPLE");
+
+#[test]
+fn concealed_clips_are_listed_only_on_request_and_masked() {
+    let session = Session::start_default().unwrap();
+    let daemon = Daemon::start(&session, &[]);
+    let mut events = Wire::subscribed(&daemon);
+    let (_a, normal) = add(&session, &mut events, "out in the open");
+    let _secret = copy(&session, &[("text/plain", CONCEALED.as_bytes())]);
+    let mut wire = daemon.connect();
+    wait_until("the Daemon to conceal the copy", || {
+        let status = wire.ok(json!({"op": "status"}));
+        status["clipboard"]["sensitivity"] == "concealed" && status["clipboard"]["reading"] == false
+    });
+
+    assert_eq!(wire.ok(json!({"op": "list"})), json!([normal]));
+    let both = wire.ok(json!({"op": "list", "concealed": true}));
+    assert_eq!(both.as_array().unwrap().len(), 2, "{both}");
+    let hidden = &both[0];
+    assert_eq!(both[1], normal, "newest first, History's Clip after it");
+    assert_clip(hidden);
+    assert!(hidden["id"].as_i64().unwrap() < 0, "{hidden}");
+    assert_eq!(hidden["sensitivity"], "concealed");
+    assert_rfc3339(&hidden["expires"]);
+    assert!(
+        !hidden["preview"].as_str().unwrap().contains("AKIA"),
+        "masked: {hidden}"
+    );
+    assert!(normal.get("sensitivity").is_none() && normal.get("expires").is_none());
+
+    // Its text comes only through get.
+    let (read, write) = pipe();
+    let got = wire.call_with_fd(json!({"op": "get", "clip": hidden["id"]}), write.as_fd());
+    drop(write);
+    assert_eq!(got["ok"]["size"], CONCEALED.len(), "{got}");
+    assert_eq!(read_all(read), CONCEALED.as_bytes());
+
+    assert_eq!(
+        wire.ok(json!({"op": "delete", "clip": hidden["id"]})),
+        Value::Null
+    );
+    assert_eq!(
+        wire.ok(json!({"op": "list", "concealed": true})),
+        json!([normal])
+    );
+    assert_eq!(
+        wire.err(json!({"op": "delete", "clip": hidden["id"]})),
+        "not_found"
+    );
+}
+
+#[test]
 fn delete_removes_a_clip_and_says_so() {
     let session = Session::start_default().unwrap();
     let daemon = Daemon::start(&session, &[]);

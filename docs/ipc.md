@@ -68,6 +68,10 @@ A **ClipSummary** is one Clip in History:
 | `pinned` | bool | Exempt from expiry and eviction |
 | `size` | integer | Bytes in all its representations |
 | `types` | [string] | Its MIME types, in the source's order |
+| `sensitivity` | string | `concealed` for a Concealed Clip; absent (meaning `normal`) for a Clip in History |
+| `expires` | time | When a Concealed Clip is forgotten; absent otherwise |
+
+**Concealed Clips** (copies that look private, ADR-0006) live in locked memory only, never in History, and expire after `privacy.concealed_ttl_secs`. They have negative ids and a masked `preview`, and appear only in a `list` that asks for them with `"concealed": true`. Their content comes only through `get`, so a Front end keeps them masked until the user asks. `get`, `restore` and `delete` take their ids; `thumb`, `pin`, `unpin` and `search` do not see them, and no event announces them.
 
 A **Recording** is `{"state": "active"|"paused", "until": time}`; `until` is there only during a timed Pause.
 
@@ -108,12 +112,20 @@ echo '{"v":1,"id":1,"op":"status"}' \
 
 ### `list`
 
-History, most recently used first, as ClipSummaries. `limit` (optional) caps how many.
+History, most recently used first, as ClipSummaries. `limit` (optional) caps how many. With `"concealed": true`, the live Concealed Clips are listed too, in their place by time.
+
+There is no server-side filter by kind, app or pin: filter the list yourself (the Picker's `img:`, `pin:` and similar prefixes do), and use `search` for text.
 
 ```sh
 echo '{"v":1,"id":1,"op":"list","limit":5}' \
   | socat - "UNIX-CONNECT:$XDG_RUNTIME_DIR/hoarder/hoarder.sock" \
   | jq -r '.ok[] | "\(.id)\t\(.kind)\t\(.preview)"'
+```
+
+```sh
+echo '{"v":1,"id":1,"op":"list","concealed":true}' \
+  | socat - "UNIX-CONNECT:$XDG_RUNTIME_DIR/hoarder/hoarder.sock" \
+  | jq -c '[.ok[] | select(.sensitivity == "concealed") | {id, preview, expires}]'
 ```
 
 ### `search`
@@ -139,7 +151,7 @@ echo "{\"v\":1,\"id\":3,\"op\":\"unpin\",\"clip\":$id}" | socat - "UNIX-CONNECT:
 
 ### `restore`
 
-`{"op":"restore","clip":ID}` makes a Clip the clipboard again and moves it to the top of History. Answered with its ClipSummary once the compositor has applied it, so a paste right after gets it.
+`{"op":"restore","clip":ID}` makes a Clip the clipboard again and moves it to the top of History. Answered with its ClipSummary once the compositor has applied it, so a paste right after gets it. With `"plain": true` only its plain text is served (`text/plain…`, `UTF8_STRING`, `STRING`, `TEXT`), dropping formatting; a Clip without any fails with `not_found`. A Concealed Clip can be restored too, but stays out of History.
 
 ```sh
 SOCK="$XDG_RUNTIME_DIR/hoarder/hoarder.sock"
@@ -150,7 +162,7 @@ wl-paste --no-newline
 
 ### `delete`
 
-`{"op":"delete","clip":ID}` removes a Clip from History. Answered with `null`, or `not_found`.
+`{"op":"delete","clip":ID}` removes a Clip from History, or wipes a Concealed Clip now. Answered with `null`, or `not_found`.
 
 ### `clear_history`
 
@@ -250,4 +262,4 @@ Only subscribed connections get events. Each is a line `{"v":1,"event":NAME,…}
 ← {"v":1,"event":"state","state":"paused","until":"2026-11-08T13:00:00Z"}
 ```
 
-Concealed and Secret copies (ADR-0006) produce a `selection` event but never `clip_added`. History events are sent before the response to the request that caused them, if that request was on the same connection. A Front end that reads nothing for long enough (64 MB of unread lines) is disconnected.
+Concealed and Secret copies (ADR-0006) produce a `selection` event but never `clip_added`, and a Concealed Clip's expiry or deletion sends no `clip_removed`: a Front end that lists them uses `expires`, or lists again. History events are sent before the response to the request that caused them, if that request was on the same connection. A Front end that reads nothing for long enough (64 MB of unread lines) is disconnected.
