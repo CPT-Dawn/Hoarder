@@ -8,6 +8,7 @@
 //! Store on one thread and send it work.
 
 mod clip;
+pub mod retention;
 
 use std::fs::{DirBuilder, OpenOptions, Permissions};
 use std::io::Write as _;
@@ -303,14 +304,70 @@ impl Store {
     /// Delete a Clip, and any blob no other Clip uses. `false` if there is
     /// no such Clip.
     pub fn delete(&mut self, id: i64) -> Result<bool> {
-        let tx = self.db.transaction()?;
-        let blobs: Vec<Vec<u8>> = tx
-            .prepare(
-                "SELECT DISTINCT blob_hash FROM reprs WHERE clip_id = ?1 AND blob_hash IS NOT NULL",
-            )?
-            .query_map([id], |r| r.get(0))?
+        Ok(self.delete_all(&[id])? > 0)
+    }
+
+    /// Pin or unpin a Clip. `false` if there is no such Clip.
+    pub fn pin(&mut self, id: i64, pinned: bool) -> Result<bool> {
+        let n = self.db.execute(
+            "UPDATE clips SET pinned = ?1 WHERE id = ?2",
+            params![pinned, id],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Delete every unpinned Clip, and the pinned ones too if `pinned`.
+    /// Returns how many went.
+    pub fn clear(&mut self, pinned: bool) -> Result<usize> {
+        let ids: Vec<i64> = self
+            .db
+            .prepare("SELECT id FROM clips WHERE ?1 OR NOT pinned")?
+            .query_map([pinned], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        let n = tx.execute("DELETE FROM clips WHERE id = ?1", [id])?;
+        self.delete_all(&ids)
+    }
+
+    /// Apply the retention policy at `now` (Unix ms): evict what
+    /// [`retention::evict`] picks. Returns the evicted ids.
+    pub fn retain(&mut self, limits: &retention::Limits, now: i64) -> Result<Vec<i64>> {
+        let entries: Vec<retention::Entry> = self
+            .db
+            .prepare_cached("SELECT id, last_used_at, pinned, size FROM clips")?
+            .query_map([], |r| {
+                Ok(retention::Entry {
+                    id: r.get(0)?,
+                    last_used_at: r.get(1)?,
+                    pinned: r.get(2)?,
+                    size: r.get::<_, i64>(3)? as u64,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let evicted = retention::evict(&entries, limits, now);
+        self.delete_all(&evicted)?;
+        Ok(evicted)
+    }
+
+    /// Delete Clips in one transaction, then the blobs no Clip uses any
+    /// more. Returns how many Clips there were to delete.
+    fn delete_all(&mut self, ids: &[i64]) -> Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let tx = self.db.transaction()?;
+        let mut blobs: Vec<Vec<u8>> = Vec::new();
+        let mut deleted = 0;
+        for id in ids {
+            blobs.extend(
+                tx.prepare_cached(
+                    "SELECT DISTINCT blob_hash FROM reprs WHERE clip_id = ?1 AND blob_hash IS NOT NULL",
+                )?
+                .query_map([id], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<Vec<u8>>>>()?,
+            );
+            deleted += tx.execute("DELETE FROM clips WHERE id = ?1", [id])?;
+        }
+        blobs.sort();
+        blobs.dedup();
         let mut orphans = Vec::new();
         for hash in blobs {
             let users: i64 = tx.query_row(
@@ -330,7 +387,7 @@ impl Store {
                 Err(e) => return Err(e.into()),
             }
         }
-        Ok(n > 0)
+        Ok(deleted)
     }
 
     fn blob_path(&self, hash: &[u8]) -> PathBuf {

@@ -5,6 +5,7 @@
 //! timers run while idle.
 
 mod history;
+mod pause;
 mod reader;
 pub mod service;
 mod socket;
@@ -14,7 +15,7 @@ use std::fs::File;
 use std::io::{ErrorKind, Read as _, Write as _};
 use std::os::fd::OwnedFd;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use calloop::generic::Generic;
 use calloop::timer::{TimeoutAction, Timer};
@@ -28,6 +29,9 @@ use crate::Exit;
 use crate::clipboard::PASSWORD_HINT;
 
 type Fail = (Exit, String);
+
+/// How often retention runs besides on every insert.
+const RETENTION_EVERY: Duration = Duration::from_secs(60 * 60);
 
 const SELECTIONS: [Selection; 2] = [Selection::Clipboard, Selection::Primary];
 
@@ -78,6 +82,19 @@ pub fn run(overrides: &[(String, String)]) -> Result<(), Fail> {
     };
 
     let history = history::History::start(&handle);
+    // Retention runs on every insert, at startup and once an hour.
+    let _ = history.send(history::Job::Retain {
+        limits: history::limits(&config.history),
+    });
+    handle
+        .insert_source(
+            Timer::from_duration(RETENTION_EVERY),
+            |_, _, daemon: &mut Daemon| {
+                daemon.retain();
+                TimeoutAction::ToDuration(RETENTION_EVERY)
+            },
+        )
+        .map_err(|e| loop_error(e.error))?;
     let mut daemon = Daemon {
         handle,
         history,
@@ -89,6 +106,7 @@ pub fn run(overrides: &[(String, String)]) -> Result<(), Fail> {
         clients: Default::default(),
         syncs: Vec::new(),
         next_token: 0,
+        pause: None,
         fatal: None,
     };
     // The Selections as they were at startup.
@@ -186,6 +204,8 @@ pub(crate) struct Daemon {
     /// the compositor has caught up.
     syncs: Vec<(u64, u64, u64, hoarder_ipc::Value)>,
     next_token: u64,
+    /// Set while Paused: nothing is recorded.
+    pause: Option<pause::Pause>,
     fatal: Option<Fail>,
 }
 
@@ -267,7 +287,7 @@ impl Daemon {
             .as_ref()
             .is_some_and(|app| self.config.clipboard.no_takeover_apps.contains(app));
         let may_take_over = self.persists(which) && !secret && !excluded;
-        let record = !secret && self.records(which);
+        let record = !secret && self.records(which) && self.pause.is_none();
         let plan = if secret {
             // Secret: never touched (ADR-0006).
             Vec::new()
@@ -456,6 +476,7 @@ impl Daemon {
             let job = history::Job::Record {
                 reprs: slot.kept.clone(),
                 app: read.offer.focused_app,
+                limits: history::limits(&self.config.history),
             };
             // Without History there is nothing to record into.
             let _ = self.history.send(job);
@@ -554,11 +575,19 @@ impl Daemon {
             pid: std::process::id(),
             data_control: self.watcher.data_control().name().into(),
             persist: self.config.clipboard.persist,
+            recording: self.recording(),
             clipboard: selection(Selection::Clipboard),
             primary: self
                 .watched(Selection::Primary)
                 .then(|| selection(Selection::Primary)),
         }
+    }
+
+    /// Apply the retention limits now.
+    fn retain(&mut self) {
+        let limits = history::limits(&self.config.history);
+        // Without History there is nothing to retain.
+        let _ = self.history.send(history::Job::Retain { limits });
     }
 
     /// Re-read `config.toml`. A broken file keeps the config in force.
@@ -588,6 +617,7 @@ impl Daemon {
         match hoarder_config::with_overrides(&text, &self.overrides) {
             Ok(config) => {
                 self.config = config;
+                self.retain();
                 for which in SELECTIONS {
                     if !self.watched(which) {
                         self.stop_reading(which);

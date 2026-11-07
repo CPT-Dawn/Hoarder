@@ -376,7 +376,7 @@ One JSON object per line, sent over `$XDG_RUNTIME_DIR/hoarder/hoarder.sock`. The
 ← {"v":1,"event":"state","state":"paused","until":"…"}
 ```
 
-**Ops:** `hello` (version negotiation), `status`, `list`, `get` (the representation is streamed over a passed fd), `thumb`, `restore`, `offer` (Capture or `copy` data; fd passing), `delete`, `pin`, `unpin`, `clear`, `pause`, `resume`, `subscribe`, `reload`.
+**Ops:** `hello` (version negotiation), `status`, `list`, `get` (the representation is streamed over a passed fd), `thumb`, `restore`, `offer` (Capture or `copy` data; fd passing), `delete`, `pin`, `unpin`, `clear` (the clipboard), `clear_history`, `pause`, `resume`, `subscribe`, `reload`.
 
 **Compatibility:** additive changes keep `v:1`; breaking changes bump `v` and the `hoarder-ipc` major version.
 
