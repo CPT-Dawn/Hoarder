@@ -1,6 +1,7 @@
 //! Pixels after the freeze: Frozen Frames turned upright without resampling,
 //! laid out as one image, and encoded (PLAN.md §4.1 steps 3, 5 and 7).
 
+use hoarder_config::PngLevel;
 use hoarder_ui::Region;
 use hoarder_wayland::{FrozenFrame, Transform};
 
@@ -22,7 +23,7 @@ pub struct Image {
 }
 
 impl Image {
-    fn new(width: u32, height: u32, depth: Depth) -> Self {
+    pub(crate) fn new(width: u32, height: u32, depth: Depth) -> Self {
         Image {
             width,
             height,
@@ -155,11 +156,29 @@ impl Image {
         out
     }
 
-    /// Encode as an RGB PNG: 8-bit, or 16-bit for 10-bit sources.
+    /// Encode as an RGB PNG: 8-bit, or 16-bit for 10-bit sources, with the
+    /// fast compression the clipboard wants.
     pub fn write_png(&self, out: impl std::io::Write) -> Result<(), png::EncodingError> {
+        self.write_png_with(out, PngLevel::Fast)
+    }
+
+    /// [`Image::write_png`] at a chosen `screenshot.png.level`.
+    pub fn write_png_with(
+        &self,
+        out: impl std::io::Write,
+        level: PngLevel,
+    ) -> Result<(), png::EncodingError> {
         let mut encoder = png::Encoder::new(out, self.width, self.height);
         encoder.set_color(png::ColorType::Rgb);
-        encoder.set_compression(png::Compression::Fast);
+        match level {
+            PngLevel::Fast => encoder.set_compression(png::Compression::Fast),
+            PngLevel::Best => encoder.set_compression(png::Compression::High),
+            PngLevel::Level(0) => encoder.set_compression(png::Compression::NoCompression),
+            PngLevel::Level(n) => {
+                encoder.set_compression(png::Compression::Balanced);
+                encoder.set_deflate_compression(png::DeflateCompression::Level(n));
+            }
+        }
         let bytes: Vec<u8> = match self.depth {
             Depth::Eight => {
                 encoder.set_depth(png::BitDepth::Eight);
@@ -173,6 +192,14 @@ impl Image {
         let mut writer = encoder.write_header()?;
         writer.write_image_data(&bytes)?;
         writer.finish()
+    }
+
+    /// Packed 8-bit RGB; 16-bit samples keep their top 8 bits.
+    pub fn rgb8(&self) -> Vec<u8> {
+        match self.depth {
+            Depth::Eight => self.samples.iter().map(|&v| v as u8).collect(),
+            Depth::Sixteen => self.samples.iter().map(|&v| (v >> 8) as u8).collect(),
+        }
     }
 }
 

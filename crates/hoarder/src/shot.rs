@@ -2,15 +2,16 @@
 
 use std::io::Write as _;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
 
 use clap::ValueEnum;
-use hoarder_config::Config;
-use hoarder_config::{State, StoredRegion};
+use hoarder_config::{Config, Screenshot, State, StoredRegion};
 use hoarder_ui::{Options, Outcome, OverlayError, Region, overlay};
 use hoarder_wayland::CaptureError;
 
 use crate::Exit;
+use crate::after::Delivered;
 use crate::image::Image;
 
 /// What a Capture covers.
@@ -46,6 +47,13 @@ pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(),
         Target::All => (Image::all_outputs(&frozen.frames), target.name()),
         Target::Region => from_overlay(&frozen, started, config)?,
     };
+    let image = Arc::new(image);
+    // The file is encoded on a worker thread, started before the clipboard
+    // copy, so a slow format (AVIF takes seconds at 4K) never delays it.
+    let saving = (output.is_none() && config.screenshot.save)
+        .then(|| crate::save::spawn(image.clone(), name, None, config.screenshot.clone()));
+    // Only now the Target is chosen: never over the Overlay, never in the Capture.
+    let _flash = crate::after::flash(&config.screenshot);
     if config.screenshot.copy {
         let mut png = Vec::new();
         image
@@ -53,16 +61,27 @@ pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(),
             .map_err(|e| (Exit::Io, format!("cannot encode the Capture: {e}")))?;
         crate::clipboard::copy_capture(&png)?;
     }
-    match output {
-        Some(output) => deliver(&image, output)
-            .map_err(|e| (Exit::Io, format!("cannot write {}: {e}", output.display()))),
-        None if config.screenshot.save => {
-            let path = crate::save::save(&image, name, None, &config.screenshot)?;
-            println!("{}", path.display());
-            Ok(())
+    let path = match (output, saving) {
+        (Some(output), _) => {
+            deliver(&image, output, &config.screenshot)
+                .map_err(|e| (Exit::Io, format!("cannot write {}: {e}", output.display())))?;
+            (output != Path::new("-")).then(|| output.to_owned())
         }
-        None => Ok(()),
-    }
+        (None, Some(saving)) => {
+            let path = saving.wait()?;
+            println!("{}", path.display());
+            Some(path)
+        }
+        (None, None) => None,
+    };
+    let delivered = Delivered {
+        path,
+        width: image.width,
+        height: image.height,
+        target: name,
+    };
+    crate::after::run(&delivered, &config.screenshot);
+    Ok(())
 }
 
 /// Show the Overlay and cut out the Target picked there; returns the image
@@ -118,9 +137,10 @@ fn from_overlay(
     })
 }
 
-fn deliver(image: &Image, output: &Path) -> std::io::Result<()> {
+fn deliver(image: &Image, output: &Path, settings: &Screenshot) -> std::io::Result<()> {
     let mut buf = Vec::new();
-    image.write_png(&mut buf).map_err(std::io::Error::other)?;
+    crate::encode::encode(image, settings.format, settings, &mut buf)
+        .map_err(std::io::Error::other)?;
     if output == Path::new("-") {
         let mut stdout = std::io::stdout().lock();
         stdout.write_all(&buf)?;
