@@ -16,7 +16,7 @@ The end-to-end tests need these on `PATH` (Arch: `sway grim wl-clipboard`):
 | `grim` | Independent oracle for "what the user sees" (`Session::screenshot`). |
 | `wl-copy`, `wl-paste` | Independent oracle for Selections, and the reference the `hoarder copy`/`paste` parity suite (`crates/hoarder/tests/e2e_clipboard.rs`) runs every case against, in every copier/paster pairing. |
 
-Latency budgets (4K shot-to-clipboard under 150 ms) are `#[ignore]`d in debug builds, since timing unoptimised code proves nothing. Run them with `cargo test --release -p hoarder --test e2e_shot_clipboard`.
+Latency budgets (4K shot-to-clipboard under 150 ms) are `#[ignore]`d in debug builds, since timing unoptimised code proves nothing. Run them with `cargo test --release -p hoarder --test e2e_shot_clipboard`; see [Timings and budgets](#timings-and-budgets) for scaling them with `HOARDER_BUDGET_SCALE`.
 
 Each test starts its own Sway in a private directory under `/tmp`, so tests run in parallel and never touch your real desktop, config or History. Set `HOARDER_E2E_KEEP=1` to keep that directory (it holds a `--debug` `sway.log`) and print its path.
 
@@ -99,6 +99,14 @@ Recorded results (headless Sway 1.12, pixman, one 3840×2160 output, release bui
 
 This is within budget, so ADR-0007 stands. The next easy win is giving the freeze's memfd to the Overlay instead of copying the 33 MB frame (about 8 ms).
 
+### Scaling budgets on slow machines
+
+Every budget test checks through one helper, `hoarder_e2e::budget::assert_within`, which prints the measurement next to the budget (`budget: …: measured 41.2 ms, budget 60.0 ms (PLAN 60.0 ms x 1)`) and fails if it is over. The budgets in the tests are PLAN's numbers. `HOARDER_BUDGET_SCALE` multiplies all of them (default `1.0`, so local runs enforce PLAN as written). CI sets it to `3`, because shared GitHub runners take 187–245 ms for the 150 ms shot-to-clipboard path that a desktop does well under budget. Read the printed measurements in the CI log to spot a regression that 3× would hide. New budget tests must use the helper, not their own `assert!`.
+
+```sh
+HOARDER_BUDGET_SCALE=3 cargo test --release -p hoarder --test e2e_shot_clipboard --test e2e_overlay -- 150_ms budget --nocapture
+```
+
 ## CI (`.github/workflows/ci.yml`)
 
 CI runs on pushes to `main`, `integration/**` and `ticket/**`, and on every pull request.
@@ -108,7 +116,7 @@ CI runs on pushes to `main`, `integration/**` and `ticket/**`, and on every pull
 | rustfmt | `cargo fmt --all --check` | |
 | clippy | `cargo clippy --workspace --all-targets --locked -- -D warnings` | Any warning fails the build. |
 | MSRV (1.97) | `cargo check --workspace --all-targets --locked` | MSRV is current stable minus two; bump it with `rust-version` in `Cargo.toml`. |
-| tests (headless Sway) | `cargo test --workspace --locked`, then the timing budgets with `--release` | Runs in an `archlinux` container, because Ubuntu's Sway predates the protocols Hoarder targets. Runs as a non-root user. |
+| tests (headless Sway) | `cargo test --workspace --locked`, then the timing budgets with `--release` and `HOARDER_BUDGET_SCALE=3` | Runs in an `archlinux` container, because Ubuntu's Sway predates the protocols Hoarder targets. Runs as a non-root user. |
 | cargo-deny | `cargo deny check` | Advisories, licences (allow-list in `deny.toml`), bans and sources. |
 
 To run the same checks locally before pushing:

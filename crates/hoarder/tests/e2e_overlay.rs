@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use hoarder_e2e::{
     BitDepth, Image, OutputSpec, Pattern, PixelFormat, Rgb8, Rgb10, Selection, Session, Transform,
-    keys,
+    budget, keys,
 };
 
 /// Asserts the `w`×`h` PNG is exactly `pattern` as painted on an 8-bit output
@@ -309,8 +309,10 @@ fn budget_overlay_visible_on_4k() {
     }
     samples.sort_by(f64::total_cmp);
     let median = samples[samples.len() / 2];
-    eprintln!("key press -> Overlay visible on 4K: median {median:.1} ms of {samples:?}");
-    if !cfg!(debug_assertions) {
-        assert!(median < 60.0, "over the 60 ms budget: {samples:?}");
-    }
+    eprintln!("key press -> Overlay visible on 4K, samples (ms): {samples:?}");
+    budget::assert_within(
+        "key press -> Overlay visible on 4K, median of 5",
+        Duration::from_secs_f64(median / 1000.0),
+        Duration::from_millis(60),
+    );
 }
