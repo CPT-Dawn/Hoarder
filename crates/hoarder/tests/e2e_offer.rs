@@ -214,3 +214,90 @@ fn a_capture_is_an_image_clip_with_a_thumbnail_as_soon_as_shot_exits() {
     );
     assert_eq!(png_info(&thumb.stdout), (256, 160));
 }
+
+/// Start `paste --watch` as `program` (plus `args`), logging one line per
+/// run of its command to `name.log`: `$CLIPBOARD_STATE` and the bytes it
+/// got. The command's parent pid goes to `name.ppid`.
+fn start_watcher(session: &Session, name: &str, mut cmd: Command) -> (Child, std::path::PathBuf) {
+    let log = session.runtime_dir().join(format!("{name}.log"));
+    let ppid = session.runtime_dir().join(format!("{name}.ppid"));
+    let script = format!(
+        "echo $PPID >> {1}; printf '%s ' \"$CLIPBOARD_STATE\" >> {0}; \
+         od -An -c | tr -s ' \\n' ' ' >> {0}; echo >> {0}",
+        log.display(),
+        ppid.display()
+    );
+    let child = cmd
+        .args(["--watch", "sh", "-c", &script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn watcher");
+    (child, log)
+}
+
+fn lines(path: &std::path::Path) -> usize {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .matches('\n')
+        .count()
+}
+
+#[test]
+fn paste_watch_runs_off_the_daemons_event_stream() {
+    let session = Session::start_default().unwrap();
+    let _daemon = Daemon::start(&session);
+
+    let (mut reference, reference_log) =
+        start_watcher(&session, "wl-paste", session.command("wl-paste"));
+    let mut ours = session.command(HOARDER);
+    // Without data control of its own, only the Daemon can tell it anything.
+    ours.arg("paste").env(
+        "HOARDER_HIDE_GLOBALS",
+        "ext_data_control_manager_v1,zwlr_data_control_manager_v1",
+    );
+    let (mut watcher, log) = start_watcher(&session, "hoarder", ours);
+    wait_until("the first runs", || {
+        lines(&reference_log) >= 1 && lines(&log) >= 1
+    });
+
+    let changes: [&[&str]; 4] = [
+        &["one"],
+        &["-t", "image/png", "img"],
+        &["-c"],
+        &["--sensitive", "pw"],
+    ];
+    for args in changes {
+        let before = lines(&reference_log);
+        // Not `output()`: wl-copy's fork would hold the pipes open.
+        let status = session
+            .command("wl-copy")
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        wait_until("wl-paste to see the change", || {
+            lines(&reference_log) > before
+        });
+    }
+    // Let a Takeover after the clear settle, then compare.
+    std::thread::sleep(Duration::from_millis(300));
+    let expected = std::fs::read_to_string(&reference_log).unwrap();
+    wait_until("hoarder to see what wl-paste saw", || {
+        std::fs::read_to_string(&log).unwrap_or_default() == expected
+    });
+
+    // Every run of the command is a child of the watcher itself.
+    let ppids = std::fs::read_to_string(session.runtime_dir().join("hoarder.ppid")).unwrap();
+    for ppid in ppids.lines() {
+        assert_eq!(ppid, watcher.id().to_string(), "{ppids}");
+    }
+    for child in [&mut watcher, &mut reference] {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}

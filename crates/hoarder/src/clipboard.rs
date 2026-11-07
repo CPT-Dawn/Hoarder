@@ -444,10 +444,10 @@ fn choose_type<'a>(offered: &'a [String], wanted: Option<&str>) -> Option<&'a st
 
 pub fn paste(args: PasteArgs) -> Result<(), (Exit, String)> {
     let which = which(args.primary);
-    let mut clipboard = Clipboard::connect(args.seat.as_deref()).map_err(clipboard_error)?;
     if let Some(command) = &args.watch {
-        return watch(&mut clipboard, which, &args, command);
+        return watch(which, &args, command);
     }
+    let mut clipboard = Clipboard::connect(args.seat.as_deref()).map_err(clipboard_error)?;
     let Some(offered) = clipboard.offered(which).map(<[String]>::to_vec) else {
         return Err((Exit::Cancelled, "Nothing is copied".into()));
     };
@@ -477,16 +477,76 @@ pub fn paste(args: PasteArgs) -> Result<(), (Exit, String)> {
     stdout.flush().map_err(io)
 }
 
+/// Where `paste --watch` hears of changes and reads them from.
+enum Changes {
+    /// The Daemon's event stream (`subscribe`); reads go through it too.
+    Daemon(hoarder_ipc::Connection),
+    /// A data-control connection of our own, when no Daemon runs.
+    Own { clipboard: Clipboard, started: bool },
+}
+
+impl Changes {
+    /// The Daemon's event stream if it runs (and the default seat is
+    /// wanted), else a connection of our own.
+    fn open(seat: Option<&str>) -> Result<Changes, (Exit, String)> {
+        if seat.is_none()
+            && let Ok(mut daemon) = hoarder_ipc::Connection::connect()
+            && let Ok(Ok(())) = daemon.subscribe()
+        {
+            return Ok(Changes::Daemon(daemon));
+        }
+        let clipboard = Clipboard::connect(seat).map_err(clipboard_error)?;
+        Ok(Changes::Own {
+            clipboard,
+            started: false,
+        })
+    }
+
+    /// The types `which` offers: as it is now the first time, then after
+    /// each change (`None` while it is empty).
+    fn next(&mut self, which: Selection) -> Result<Option<Vec<String>>, (Exit, String)> {
+        match self {
+            Changes::Daemon(daemon) => loop {
+                let event = daemon.next_event().map_err(lost_daemon)?;
+                if let hoarder_ipc::Event::Selection { selection, types } = event
+                    && selection == crate::daemon::to_ipc(which)
+                {
+                    return Ok(types);
+                }
+            },
+            Changes::Own { clipboard, started } if !*started => {
+                *started = true;
+                Ok(clipboard.offered(which).map(<[String]>::to_vec))
+            }
+            Changes::Own { clipboard, .. } => clipboard.next_change(which).map_err(clipboard_error),
+        }
+    }
+
+    fn read(&mut self, which: Selection, mime: &str) -> Result<Vec<u8>, (Exit, String)> {
+        match self {
+            Changes::Daemon(daemon) => {
+                let which = crate::daemon::to_ipc(which);
+                let mut data = Vec::new();
+                // Gone again before we asked: nothing to hand on.
+                if let Ok(mut pipe) = daemon.paste(which, mime.into()).map_err(lost_daemon)? {
+                    pipe.read_to_end(&mut data).map_err(lost_daemon)?;
+                }
+                Ok(data)
+            }
+            Changes::Own { clipboard, .. } => clipboard.read(which, mime).map_err(clipboard_error),
+        }
+    }
+}
+
+fn lost_daemon(e: std::io::Error) -> (Exit, String) {
+    (Exit::Io, format!("lost the Daemon: {e}"))
+}
+
 /// `paste --watch`: run `command` for the current selection and every change.
-fn watch(
-    clipboard: &mut Clipboard,
-    which: Selection,
-    args: &PasteArgs,
-    command: &[String],
-) -> Result<(), (Exit, String)> {
-    let mut offered = clipboard.offered(which).map(<[String]>::to_vec);
+fn watch(which: Selection, args: &PasteArgs, command: &[String]) -> Result<(), (Exit, String)> {
+    let mut changes = Changes::open(args.seat.as_deref())?;
     loop {
-        let (state, data) = match &offered {
+        let (state, data) = match changes.next(which)? {
             None => ("nil", Vec::new()),
             Some(types) => {
                 let state = if types.iter().any(|m| m == PASSWORD_HINT) {
@@ -494,14 +554,13 @@ fn watch(
                 } else {
                     "data"
                 };
-                match choose_type(types, args.mime_type.as_deref()) {
-                    Some(mime) => (state, clipboard.read(which, mime).map_err(clipboard_error)?),
+                match choose_type(&types, args.mime_type.as_deref()) {
+                    Some(mime) => (state, changes.read(which, mime)?),
                     None => (state, Vec::new()),
                 }
             }
         };
         run_watcher(command, state, &data)?;
-        offered = clipboard.next_change(which).map_err(clipboard_error)?;
     }
 }
 
