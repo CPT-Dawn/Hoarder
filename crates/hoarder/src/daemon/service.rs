@@ -123,6 +123,10 @@ const START_DEADLINE: Duration = Duration::from_secs(5);
 /// Whether the Daemon answers `hello` on its socket before `deadline` runs
 /// out, asking every 50 ms.
 fn answers_within(deadline: Duration) -> bool {
+    // Without XDG_RUNTIME_DIR the Daemon has nowhere to listen.
+    if hoarder_ipc::socket_path().is_none() {
+        return false;
+    }
     let until = Instant::now() + deadline;
     loop {
         let hello = hoarder_ipc::Connection::connect()
