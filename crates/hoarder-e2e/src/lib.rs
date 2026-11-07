@@ -11,10 +11,11 @@
 mod client;
 mod frame;
 mod image;
+pub mod keys;
 mod pattern;
 mod session;
 
-pub use client::{Client, Selection};
+pub use client::{Client, Input, InputEvent, Selection};
 pub use frame::{FrameFormat, RawFrame};
 pub use image::Image;
 pub use pattern::{Pattern, PixelFormat, Rgb8, Rgb10};

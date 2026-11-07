@@ -42,6 +42,10 @@ use wayland_protocols::ext::data_control::v1::client::{
     ext_data_control_source_v1::{self, ExtDataControlSourceV1},
 };
 
+mod input;
+
+pub use input::{Input, InputEvent};
+
 use crate::frame::{FrameFormat, RawFrame};
 use crate::{Error, Output, Pattern, PixelFormat, Result, Session};
 
@@ -214,6 +218,7 @@ pub(crate) struct State {
     copies: HashMap<ObjectId, Copy>,
     /// What each live data source offers, by MIME type.
     sources: HashMap<ObjectId, Offer>,
+    input: input::InputState,
 }
 
 /// Progress of one screencopy.
@@ -238,6 +243,9 @@ pub(crate) struct Worker {
     outputs: Vec<WlOutput>,
     painted: HashMap<String, Painted>,
     data_device: Option<ExtDataControlDeviceV1>,
+    seat: WlSeat,
+    windows: Vec<input::Window>,
+    devices: Option<input::Devices>,
 }
 
 impl Worker {
@@ -256,6 +264,7 @@ impl Worker {
                 .collect()
         });
         let shm: WlShm = Self::bind_from(&globals, &qh, 1)?;
+        let seat: WlSeat = Self::bind_from(&globals, &qh, 7)?;
         let mut worker = Worker {
             conn,
             queue,
@@ -266,7 +275,13 @@ impl Worker {
             outputs,
             painted: HashMap::new(),
             data_device: None,
+            seat,
+            windows: Vec::new(),
+            devices: None,
         };
+        // First roundtrip: output names, shm formats, seat capabilities.
+        // Second: the compositor has seen our wl_pointer / wl_keyboard.
+        worker.roundtrip()?;
         worker.roundtrip()?;
         Ok(worker)
     }
@@ -411,8 +426,7 @@ impl Worker {
     fn set_selection(&mut self, selection: Selection, offer: Offer) -> Result<()> {
         let manager: ExtDataControlManagerV1 = self.bind(1)?;
         if self.data_device.is_none() {
-            let seat: WlSeat = self.bind(1)?;
-            self.data_device = Some(manager.get_data_device(&seat, &self.qh, ()));
+            self.data_device = Some(manager.get_data_device(&self.seat, &self.qh, ()));
         }
         let source = manager.create_data_source(&self.qh, ());
         for (mime, _) in &offer {
@@ -722,7 +736,6 @@ impl Dispatch<ExtDataControlDeviceV1, ()> for State {
 
 delegate_noop!(State: ignore ExtDataControlOfferV1);
 delegate_noop!(State: ignore ExtDataControlManagerV1);
-delegate_noop!(State: ignore WlSeat);
 delegate_noop!(State: ignore ZwlrScreencopyManagerV1);
 delegate_noop!(State: ignore WlCompositor);
 delegate_noop!(State: ignore WlSurface);

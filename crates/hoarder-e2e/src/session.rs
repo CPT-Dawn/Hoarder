@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use crate::{Error, Result};
+use crate::{Error, Input, Result};
 
 /// How long to wait for Sway to come up before giving up.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -138,6 +138,7 @@ pub struct Session {
     wayland_display: String,
     swaysock: PathBuf,
     outputs: Vec<Output>,
+    input: Option<Input>,
 }
 
 impl Session {
@@ -187,6 +188,7 @@ impl Session {
 
         let log = std::fs::File::create(dir.path().join("sway.log"))?;
         let sway = Command::new("sway")
+            .args(std::env::var_os("HOARDER_E2E_KEEP").map(|_| "--debug"))
             .arg("--config")
             .arg(&config_path)
             .env_clear()
@@ -209,8 +211,12 @@ impl Session {
             wayland_display: String::new(),
             swaysock: PathBuf::new(),
             outputs,
+            input: None,
         };
         session.wait_until_ready()?;
+        // Created up front so every client connected later already sees a
+        // pointer and keyboard on the seat; no capability races in tests.
+        session.input = Some(Input::new(session.client()?, &session.outputs)?);
         Ok(session)
     }
 
@@ -283,6 +289,11 @@ impl Session {
             .unwrap_or_else(|| panic!("no output named {name}"))
     }
 
+    /// The session's virtual pointer and keyboard.
+    pub fn input(&self) -> &Input {
+        self.input.as_ref().expect("created in Session::start")
+    }
+
     /// `XDG_RUNTIME_DIR` of the session (also where its sockets live).
     pub fn runtime_dir(&self) -> &Path {
         self.dir.path()
@@ -333,7 +344,15 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
+        drop(self.input.take());
         let _ = self.sway.kill();
         let _ = self.sway.wait();
+        if std::env::var_os("HOARDER_E2E_KEEP").is_some() {
+            self.dir.disable_cleanup(true);
+            eprintln!(
+                "hoarder-e2e: kept session directory {}",
+                self.dir.path().display()
+            );
+        }
     }
 }
