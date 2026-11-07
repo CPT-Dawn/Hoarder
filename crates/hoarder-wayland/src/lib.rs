@@ -6,10 +6,12 @@
 //! the Daemon's non-blocking view of the Selections (PLAN.md §5.1).
 //! [`flash::flash`] is the optional camera flash. [`windows::detect`] finds
 //! the window-geometry provider the Overlay snaps to (PLAN.md §4.2).
+//! [`probe::globals`] lists what the compositor offers, for `hoarder doctor`.
 
 pub mod capture;
 pub mod clipboard;
 pub mod flash;
+pub mod probe;
 pub mod watch;
 pub mod windows;
 

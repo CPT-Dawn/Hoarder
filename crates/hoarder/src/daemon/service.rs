@@ -111,17 +111,36 @@ fn disable() -> Result<(), (Exit, String)> {
     Ok(())
 }
 
-fn status() -> Result<(), (Exit, String)> {
+/// `systemctl --user is-enabled` for the unit ("enabled", "disabled", …),
+/// "not installed" when systemd does not know it, `None` without systemctl.
+pub fn enabled_state() -> Option<String> {
     // `is-enabled` exits non-zero for "disabled", so read stdout either way.
-    let enabled = Command::new("systemctl")
+    let out = Command::new("systemctl")
         .args(["--user", "is-enabled", UNIT])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown".into());
+        .ok()?;
+    let state = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    Some(if state.is_empty() {
+        "not installed".into()
+    } else {
+        state
+    })
+}
+
+/// The user manager's `WAYLAND_DISPLAY`, which the service inherits:
+/// `Err` when the manager cannot be asked, `Ok(None)` when it is unset.
+pub fn manager_wayland_display() -> Result<Option<String>, (Exit, String)> {
+    let env = systemctl(&["show-environment"])?;
+    Ok(env
+        .lines()
+        .find_map(|l| l.strip_prefix("WAYLAND_DISPLAY="))
+        .map(str::to_owned))
+}
+
+fn status() -> Result<(), (Exit, String)> {
+    let enabled = enabled_state().unwrap_or_else(|| "unknown".into());
     println!("service: {enabled}");
     let status = hoarder_ipc::Connection::connect()
         .ok()
