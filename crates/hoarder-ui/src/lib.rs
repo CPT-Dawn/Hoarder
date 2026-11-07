@@ -8,4 +8,4 @@ mod chrome;
 mod geom;
 pub mod overlay;
 
-pub use overlay::{Outcome, OverlayError, Region};
+pub use overlay::{Options, Outcome, OverlayError, Region};

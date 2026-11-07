@@ -1,5 +1,6 @@
 mod clipboard;
 mod config;
+mod cut;
 mod encode;
 mod image;
 mod save;

@@ -117,10 +117,18 @@ fn failed(e: impl std::fmt::Display) -> OverlayError {
     OverlayError::Failed(e.to_string())
 }
 
+/// How the Overlay behaves for one Capture.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Options {
+    /// The Region cannot leave the output where the drag started
+    /// (`screenshot.mixed_scale = "clamp"`).
+    pub clamp_to_output: bool,
+}
+
 /// Show the Overlay over `frozen` and wait for the user to pick a Region or
 /// cancel. `started` is when the user asked for the Capture; with
 /// [`TIMINGS_ENV`] set, the time until the Overlay is visible is printed.
-pub fn run(frozen: &Frozen, started: Instant) -> Result<Outcome, OverlayError> {
+pub fn run(frozen: &Frozen, started: Instant, options: Options) -> Result<Outcome, OverlayError> {
     timing(started, "frozen");
     let conn = Connection::connect_to_env().map_err(failed)?;
     let (globals, mut queue): (_, EventQueue<App>) = registry_queue_init(&conn).map_err(failed)?;
@@ -156,6 +164,7 @@ pub fn run(frozen: &Frozen, started: Instant) -> Result<Outcome, OverlayError> {
         views: Vec::new(),
         fonts: Fonts::load(),
         drag: None,
+        options,
         outcome: None,
         started,
         visible_reported: false,
@@ -205,9 +214,18 @@ pub fn run(frozen: &Frozen, started: Instant) -> Result<Outcome, OverlayError> {
 struct Drag {
     anchor: (f64, f64),
     cursor: (f64, f64),
+    /// The cursor is held inside this `(x, y, width, height)`, if set.
+    bounds: Option<(f64, f64, f64, f64)>,
 }
 
 impl Drag {
+    fn move_to(&mut self, (x, y): (f64, f64)) {
+        self.cursor = match self.bounds {
+            Some((bx, by, bw, bh)) => (x.clamp(bx, bx + bw), y.clamp(by, by + bh)),
+            None => (x, y),
+        };
+    }
+
     fn region(&self) -> Region {
         let (x0, x1) = min_max(self.anchor.0, self.cursor.0);
         let (y0, y1) = min_max(self.anchor.1, self.cursor.1);
@@ -504,6 +522,7 @@ struct App {
     views: Vec<View>,
     fonts: Fonts,
     drag: Option<Drag>,
+    options: Options,
     outcome: Option<Outcome>,
     started: Instant,
     visible_reported: bool,
@@ -571,12 +590,16 @@ impl App {
                 self.drag = Some(Drag {
                     anchor: at,
                     cursor: at,
+                    bounds: self
+                        .options
+                        .clamp_to_output
+                        .then_some(self.views[i].logical),
                 });
                 self.update(qh);
             }
             PointerEventKind::Motion { .. } => {
                 if let Some(drag) = &mut self.drag {
-                    drag.cursor = at;
+                    drag.move_to(at);
                     self.update(qh);
                 }
             }
@@ -584,7 +607,7 @@ impl App {
                 button: BTN_LEFT, ..
             } => {
                 if let Some(mut drag) = self.drag.take() {
-                    drag.cursor = at;
+                    drag.move_to(at);
                     let region = drag.region();
                     let (sx, sy) = self.views[i].scale();
                     if (region.width * sx).round() >= 1.0 && (region.height * sy).round() >= 1.0 {

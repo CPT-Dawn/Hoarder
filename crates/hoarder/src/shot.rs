@@ -1,16 +1,17 @@
 //! `hoarder shot`: freeze, cut the Target, deliver (PLAN.md §4.1).
 
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
 use clap::ValueEnum;
 use hoarder_config::{Config, Screenshot};
-use hoarder_ui::{Outcome, OverlayError, overlay};
+use hoarder_ui::{Options, Outcome, OverlayError, overlay};
 use hoarder_wayland::CaptureError;
 
 use crate::Exit;
+use crate::cut;
 use crate::image::Image;
 
 /// What a Capture covers.
@@ -42,44 +43,102 @@ pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(),
         };
         (code, e.to_string())
     })?;
-    let image = Arc::new(match target {
-        Target::All => Image::all_outputs(&frozen.frames),
-        Target::Region => match overlay::run(&frozen, started).map_err(|e| {
-            let code = match e {
-                OverlayError::Unsupported(_) => Exit::Unsupported,
-                OverlayError::Failed(_) => Exit::Io,
+    let cut = match target {
+        Target::All => cut::cut(&frozen.frames, None, &config.screenshot),
+        Target::Region => {
+            let options = Options {
+                clamp_to_output: cut::clamps_regions(&frozen.frames, &config.screenshot),
             };
-            (code, e.to_string())
-        })? {
-            Outcome::Region(region) => Image::region(&frozen.frames, &region),
-            Outcome::Cancelled => return Err((Exit::Cancelled, "cancelled".into())),
-        },
-    });
-    // The file is encoded on a worker thread, started before the clipboard
+            match overlay::run(&frozen, started, options).map_err(|e| {
+                let code = match e {
+                    OverlayError::Unsupported(_) => Exit::Unsupported,
+                    OverlayError::Failed(_) => Exit::Io,
+                };
+                (code, e.to_string())
+            })? {
+                Outcome::Region(region) => {
+                    cut::cut(&frozen.frames, Some(&region), &config.screenshot)
+                }
+                Outcome::Cancelled => return Err((Exit::Cancelled, "cancelled".into())),
+            }
+        }
+    };
+    // Until notifications (#68) carry them, the badges go to stderr.
+    for badge in cut.badges.labels() {
+        eprintln!("hoarder: {badge}: {}", explain(badge));
+    }
+    let main = Arc::new(cut.main_part().image.clone());
+    let parts: Vec<(Option<String>, Arc<Image>)> = cut
+        .parts
+        .into_iter()
+        .map(|p| (p.output, Arc::new(p.image)))
+        .collect();
+    // The files are encoded on worker threads, started before the clipboard
     // copy, so a slow format (AVIF takes seconds at 4K) never delays it.
-    let saving = (output.is_none() && config.screenshot.save).then(|| {
-        crate::save::spawn(
-            image.clone(),
-            target.name(),
-            None,
-            config.screenshot.clone(),
-        )
-    });
+    let savings: Vec<_> = if output.is_none() && config.screenshot.save {
+        parts
+            .iter()
+            .map(|(name, image)| {
+                crate::save::spawn(
+                    image.clone(),
+                    target.name(),
+                    None,
+                    name.clone(),
+                    config.screenshot.clone(),
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     if config.screenshot.copy {
         let mut png = Vec::new();
-        image
-            .write_png(&mut png)
+        main.write_png(&mut png)
             .map_err(|e| (Exit::Io, format!("cannot encode the Capture: {e}")))?;
         crate::clipboard::copy_capture(&png)?;
     }
     if let Some(output) = output {
-        return deliver(&image, output, &config.screenshot)
-            .map_err(|e| (Exit::Io, format!("cannot write {}: {e}", output.display())));
+        let write = |image: &Image, path: &Path| {
+            deliver(image, path, &config.screenshot)
+                .map_err(|e| (Exit::Io, format!("cannot write {}: {e}", path.display())))
+        };
+        return match parts.as_slice() {
+            [(_, image)] => write(image, output),
+            _ if output == Path::new("-") => {
+                eprintln!(
+                    "hoarder: stdout takes one image; writing the largest of the {} split parts",
+                    parts.len()
+                );
+                write(&main, output)
+            }
+            _ => parts.iter().try_for_each(|(name, image)| {
+                write(image, &beside(output, name.as_deref().unwrap_or_default()))
+            }),
+        };
     }
-    if let Some(saving) = saving {
+    for saving in savings {
         println!("{}", saving.wait()?.display());
     }
     Ok(())
+}
+
+/// What a badge means, for the stderr note.
+fn explain(badge: &str) -> &'static str {
+    match badge {
+        "mixed scale" => "lower-scale outputs were enlarged by nearest neighbour",
+        "HDR" => "taken from an HDR output without tone mapping",
+        _ => "",
+    }
+}
+
+/// `path` with `_SUFFIX` added to its file stem: `a/shot.png` → `a/shot_DP-1.png`.
+fn beside(path: &Path, suffix: &str) -> PathBuf {
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let name = match path.extension() {
+        Some(ext) => format!("{stem}_{suffix}.{}", ext.to_string_lossy()),
+        None => format!("{stem}_{suffix}"),
+    };
+    path.with_file_name(name)
 }
 
 fn deliver(image: &Image, output: &Path, settings: &Screenshot) -> std::io::Result<()> {
