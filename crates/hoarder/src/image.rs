@@ -62,20 +62,18 @@ impl Image {
         image
     }
 
-    /// All Outputs as one image, each output at its place in the layout.
+    /// `frames` as one image, each output at its place in the layout.
     ///
-    /// Outputs at the highest scale are copied pixel for pixel. Outputs at a
-    /// lower scale are enlarged by nearest neighbour (`capture.mixed_scale =
-    /// "upscale"`, PLAN.md §4.4), so no pixel is ever blended.
-    pub fn all_outputs(frames: &[FrozenFrame]) -> Image {
+    /// Outputs at the highest scale among `frames` are copied pixel for pixel.
+    /// Outputs at a lower scale are enlarged by nearest neighbour
+    /// (`screenshot.mixed_scale = "upscale"`, PLAN.md §4.4), so no pixel is
+    /// ever blended.
+    pub fn all_outputs(frames: &[&FrozenFrame]) -> Image {
         let parts: Vec<(Image, &FrozenFrame)> =
-            frames.iter().map(|f| (Image::upright(f), f)).collect();
+            frames.iter().map(|&f| (Image::upright(f), f)).collect();
         if let [(image, _)] = parts.as_slice() {
             return image.clone();
         }
-        let scale_of = |image: &Image, frame: &FrozenFrame| {
-            image.width as f64 / frame.logical.width.max(1) as f64
-        };
         let Layout {
             scale,
             min_x,
@@ -87,48 +85,49 @@ impl Image {
             Depth::Eight
         };
 
-        let placed: Vec<(&Image, u32, u32, u32, u32)> = parts
-            .iter()
+        let placed: Vec<(Image, u32, u32)> = parts
+            .into_iter()
             .map(|(image, frame)| {
                 let x = ((frame.logical.x - min_x) as f64 * scale).round() as u32;
                 let y = ((frame.logical.y - min_y) as f64 * scale).round() as u32;
-                let (w, h) = if (scale_of(image, frame) - scale).abs() < 1e-9 {
-                    (image.width, image.height)
+                let image = if (scale_of(frame) - scale).abs() < 1e-9 {
+                    image
                 } else {
-                    (
+                    image.upscaled(
                         (frame.logical.width as f64 * scale).round() as u32,
                         (frame.logical.height as f64 * scale).round() as u32,
                     )
                 };
-                (image, x, y, w, h)
+                (image, x, y)
             })
             .collect();
-        let width = placed.iter().map(|p| p.1 + p.3).max().unwrap_or(0);
-        let height = placed.iter().map(|p| p.2 + p.4).max().unwrap_or(0);
+        let width = placed.iter().map(|p| p.1 + p.0.width).max().unwrap_or(0);
+        let height = placed.iter().map(|p| p.2 + p.0.height).max().unwrap_or(0);
 
         let mut canvas = Image::new(width, height, depth);
-        for (image, x0, y0, w, h) in placed {
+        for (image, x0, y0) in placed {
             let widen = image.depth == Depth::Eight && depth == Depth::Sixteen;
-            for y in 0..h {
-                let sy = (y as u64 * image.height as u64 / h as u64) as u32;
-                for x in 0..w {
-                    let sx = (x as u64 * image.width as u64 / w as u64) as u32;
-                    let s = image.index(sx, sy);
-                    let mut rgb = [image.samples[s], image.samples[s + 1], image.samples[s + 2]];
-                    if widen {
-                        rgb = rgb.map(|v| (v << 8) | v);
+            for y in 0..image.height {
+                let s = image.index(0, y);
+                let d = canvas.index(x0, y0 + y);
+                let row = &image.samples[s..s + image.width as usize * 3];
+                let dest = &mut canvas.samples[d..d + row.len()];
+                if widen {
+                    for (d, &v) in dest.iter_mut().zip(row) {
+                        *d = (v << 8) | v;
                     }
-                    let d = canvas.index(x0 + x, y0 + y);
-                    canvas.samples[d..d + 3].copy_from_slice(&rgb);
+                } else {
+                    dest.copy_from_slice(row);
                 }
             }
         }
         canvas
     }
 
-    /// The Region cut from All Outputs: every pixel exactly as frozen (see
-    /// [`all_outputs`](Self::all_outputs) for outputs at a lower scale).
-    pub fn region(frames: &[FrozenFrame], region: &Region) -> Image {
+    /// The Region cut from `frames` laid out as by
+    /// [`all_outputs`](Self::all_outputs): every pixel exactly as frozen,
+    /// at the highest scale among `frames`.
+    pub fn region(frames: &[&FrozenFrame], region: &Region) -> Image {
         let all = Image::all_outputs(frames);
         let Layout {
             scale,
@@ -143,6 +142,37 @@ impl Image {
         let x1 = to_px(region.x + region.width, min_x, all.width);
         let y1 = to_px(region.y + region.height, min_y, all.height);
         all.crop(x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0))
+    }
+
+    /// Enlarged to `width`×`height` by nearest neighbour: every pixel is a
+    /// copy of a source pixel, none is blended. Also for buffers that come
+    /// at a lower scale than their output, such as a toplevel on Sway at a
+    /// fractional scale.
+    pub fn upscaled(&self, width: u32, height: u32) -> Image {
+        let mut out = Image::new(width, height, self.depth);
+        for y in 0..height {
+            let sy = (y as u64 * self.height as u64 / height.max(1) as u64) as u32;
+            for x in 0..width {
+                let sx = (x as u64 * self.width as u64 / width.max(1) as u64) as u32;
+                let s = self.index(sx, sy);
+                let d = out.index(x, y);
+                out.samples[d..d + 3].copy_from_slice(&self.samples[s..s + 3]);
+            }
+        }
+        out
+    }
+
+    /// The same image at 8 bits per channel, each sample rounded to the
+    /// nearest 8-bit value (`screenshot.depth = 8`).
+    pub fn into_eight_bit(self) -> Image {
+        match self.depth {
+            Depth::Eight => self,
+            Depth::Sixteen => Image {
+                depth: Depth::Eight,
+                samples: self.samples.iter().map(|&v| narrow(v)).collect(),
+                ..self
+            },
+        }
     }
 
     fn crop(&self, x0: u32, y0: u32, width: u32, height: u32) -> Image {
@@ -194,13 +224,23 @@ impl Image {
         writer.finish()
     }
 
-    /// Packed 8-bit RGB; 16-bit samples keep their top 8 bits.
+    /// Packed 8-bit RGB; 16-bit samples are rounded to the nearest 8-bit value.
     pub fn rgb8(&self) -> Vec<u8> {
         match self.depth {
             Depth::Eight => self.samples.iter().map(|&v| v as u8).collect(),
-            Depth::Sixteen => self.samples.iter().map(|&v| (v >> 8) as u8).collect(),
+            Depth::Sixteen => self.samples.iter().map(|&v| narrow(v) as u8).collect(),
         }
     }
+}
+
+/// A 16-bit sample rounded to the nearest 8-bit value.
+fn narrow(v: u16) -> u16 {
+    ((v as u32 * 255 + 32767) / 65535) as u16
+}
+
+/// Physical pixels per logical pixel of `frame`'s output.
+pub fn scale_of(frame: &FrozenFrame) -> f64 {
+    frame.upright_size().0 as f64 / frame.logical.width.max(1) as f64
 }
 
 /// Where buffer pixel `(bx, by)` of a `w`×`h` buffer lands once upright:
@@ -234,11 +274,8 @@ struct Layout {
 }
 
 impl Layout {
-    fn of(frames: &[FrozenFrame]) -> Layout {
-        let scale = frames
-            .iter()
-            .map(|f| f.upright_size().0 as f64 / f.logical.width.max(1) as f64)
-            .fold(0.0_f64, f64::max);
+    fn of(frames: &[&FrozenFrame]) -> Layout {
+        let scale = frames.iter().map(|f| scale_of(f)).fold(0.0_f64, f64::max);
         Layout {
             scale,
             min_x: frames.iter().map(|f| f.logical.x).min().unwrap_or(0),

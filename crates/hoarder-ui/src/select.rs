@@ -167,6 +167,11 @@ pub struct Selector {
     last_region: Option<Region>,
     shift: bool,
     space: bool,
+    /// With clamping on, the outputs' rectangles; a selection stays on the
+    /// one its drag started on.
+    outputs: Option<Vec<Rect>>,
+    /// The output the current selection is held to.
+    home: Option<Rect>,
 }
 
 impl Selector {
@@ -177,6 +182,41 @@ impl Selector {
             last_region,
             shift: false,
             space: false,
+            outputs: None,
+            home: None,
+        }
+    }
+
+    /// Keep every selection on the output, out of `outputs` (`(x, y,
+    /// width, height)`), where its drag started.
+    pub fn clamp_to(&mut self, outputs: Vec<(f64, f64, f64, f64)>) {
+        self.outputs = Some(
+            outputs
+                .into_iter()
+                .map(|(x, y, w, h)| Rect {
+                    x0: x,
+                    y0: y,
+                    x1: x + w,
+                    y1: y + h,
+                })
+                .collect(),
+        );
+    }
+
+    /// `rect` cut down to the home output, if selections are held to one.
+    fn clamped(&self, rect: Rect) -> Rect {
+        match self.home {
+            Some(home) => {
+                let x0 = rect.x0.clamp(home.x0, home.x1);
+                let y0 = rect.y0.clamp(home.y0, home.y1);
+                Rect {
+                    x0,
+                    y0,
+                    x1: rect.x1.clamp(x0, home.x1),
+                    y1: rect.y1.clamp(y0, home.y1),
+                }
+            }
+            None => rect,
         }
     }
 
@@ -189,8 +229,11 @@ impl Selector {
                 pointer,
                 nudge,
                 ..
-            } => Some(Rect::spanning(anchor, plus(pointer, nudge)).region()),
-            State::Refine { rect, .. } => Some(rect.region()),
+            } => Some(
+                self.clamped(Rect::spanning(anchor, plus(pointer, nudge)))
+                    .region(),
+            ),
+            State::Refine { rect, .. } => Some(self.clamped(rect).region()),
         }
     }
 
@@ -221,6 +264,12 @@ impl Selector {
     }
 
     fn start_drag(&mut self, at: (f64, f64), previous: Option<Rect>) {
+        self.home = self.outputs.as_ref().and_then(|outputs| {
+            outputs
+                .iter()
+                .find(|o| at.0 >= o.x0 && at.0 < o.x1 && at.1 >= o.y0 && at.1 < o.y1)
+                .copied()
+        });
         self.state = State::Dragging {
             anchor: at,
             pointer: at,
@@ -265,7 +314,7 @@ impl Selector {
                 previous,
             } => {
                 let cursor = plus(pointer, nudge);
-                let rect = Rect::spanning(anchor, cursor);
+                let rect = self.clamped(Rect::spanning(anchor, cursor));
                 let tiny = (rect.x1 - rect.x0) / px < 0.5 || (rect.y1 - rect.y0) / px < 0.5;
                 if tiny {
                     return match previous {
@@ -331,7 +380,7 @@ impl Selector {
             Key::Enter => {
                 return match self.state {
                     State::Idle => self.last_region.map(Action::Region),
-                    State::Refine { rect, .. } => Some(Action::Region(rect.region())),
+                    State::Refine { rect, .. } => Some(Action::Region(self.clamped(rect).region())),
                     State::Dragging { .. } => None,
                 };
             }
@@ -413,5 +462,27 @@ mod tests {
         // The grabbed edge is now the left one, and arrows move it.
         s.key(Key::Left, false, 1.0);
         assert_eq!(s.region(), Some(region(49.0, 100.0, 51.0, 100.0)));
+    }
+
+    #[test]
+    fn a_clamped_selection_stays_on_its_output_through_drags_and_nudges() {
+        let mut s = Selector::new(false, None);
+        s.clamp_to(vec![(0.0, 0.0, 320.0, 240.0), (320.0, 0.0, 320.0, 240.0)]);
+        s.press((300.0, 100.0));
+        s.motion((400.0, 300.0));
+        assert_eq!(s.region(), Some(region(300.0, 100.0, 20.0, 140.0)));
+        s.shift = true;
+        s.key(Key::Right, false, 1.0);
+        s.shift = false;
+        assert_eq!(
+            s.release((330.0, 120.0), 1.0),
+            Some(Action::Region(region(300.0, 100.0, 20.0, 20.0)))
+        );
+        // The next drag, on the other output, is held there instead.
+        s.press((330.0, 100.0));
+        assert_eq!(
+            s.release((10.0, 120.0), 1.0),
+            Some(Action::Region(region(320.0, 100.0, 10.0, 20.0)))
+        );
     }
 }

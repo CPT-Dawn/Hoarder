@@ -8,6 +8,8 @@ use std::process::{Command, Stdio};
 
 use hoarder_config::Screenshot;
 
+use crate::cut::Badges;
+
 /// A Capture that has reached the clipboard and/or disk.
 #[derive(Debug)]
 pub struct Delivered {
@@ -17,15 +19,20 @@ pub struct Delivered {
     pub height: u32,
     /// `all`, `region`, `window` or `output`.
     pub target: &'static str,
+    pub badges: Badges,
 }
 
-pub fn run(capture: &Delivered, settings: &Screenshot) {
+/// Follow up the images of one Capture: one, or one per output when split.
+/// The shutter sounds once; each image gets its hook run and notification.
+pub fn run(captures: &[Delivered], settings: &Screenshot) {
     if settings.sound {
         play_shutter();
     }
-    crate::hook::spawn(&settings.on_capture, capture);
-    if settings.notify {
-        crate::notify::spawn(capture);
+    for capture in captures {
+        crate::hook::spawn(&settings.on_capture, capture);
+        if settings.notify {
+            crate::notify::spawn(capture);
+        }
     }
 }
 

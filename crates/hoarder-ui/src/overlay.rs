@@ -106,6 +106,10 @@ pub struct Options {
     pub last_region: Option<Region>,
     /// What the chrome and labels are drawn in (Midnight Bloom by default).
     pub theme: Theme,
+    /// A selection cannot leave the output where its drag started
+    /// (`screenshot.mixed_scale = "clamp"`). With `run_live`, only when the
+    /// outputs differ in scale.
+    pub clamp_to_output: bool,
 }
 
 /// Everything that can stop the Overlay.
@@ -278,6 +282,17 @@ fn show(
         )
         .map_err(failed)?;
         app.views.push(view);
+    }
+    // Live, the caller had no Frozen Frames to judge the scales by, so the
+    // outputs' own scales decide whether a selection must stay on one.
+    let mixed = || {
+        app.views
+            .windows(2)
+            .any(|w| w[0].scale().0 != w[1].scale().0)
+    };
+    if options.clamp_to_output && (frozen.is_some() || mixed()) {
+        app.selector
+            .clamp_to(app.views.iter().map(|v| v.logical).collect());
     }
     timing(started, "surfaces_created");
 

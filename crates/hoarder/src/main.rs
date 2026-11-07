@@ -1,6 +1,7 @@
 mod after;
 mod clipboard;
 mod config;
+mod cut;
 mod daemon;
 mod encode;
 mod hook;
