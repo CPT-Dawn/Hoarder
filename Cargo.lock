@@ -852,6 +852,7 @@ dependencies = [
  "serde_json",
  "wayland-client",
  "wayland-protocols",
+ "wayland-protocols-misc",
  "wayland-protocols-wlr",
  "wayland-scanner",
 ]
