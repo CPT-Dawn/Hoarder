@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::ValueEnum;
-use hoarder_config::{Config, Screenshot};
-use hoarder_ui::{Outcome, OverlayError, Region, countdown, overlay};
+use hoarder_config::{Config, Screenshot, State, StoredRegion};
+use hoarder_ui::{Options, Outcome, OverlayError, Region, countdown, overlay};
 use hoarder_wayland::{CaptureError, Frozen};
 
 use crate::Exit;
@@ -63,28 +63,15 @@ pub fn run(
         countdown::run(delay).map_err(overlay_error)?;
     }
     let started = Instant::now();
-    let image = Arc::new(match target {
-        Target::All => Image::all_outputs(&freeze()?.frames),
-        Target::Region if when.live => {
-            let region = picked(overlay::run_live(started))?;
-            Image::region(&freeze()?.frames, &region)
-        }
-        Target::Region => {
-            let frozen = freeze()?;
-            let region = picked(overlay::run(&frozen, started))?;
-            Image::region(&frozen.frames, &region)
-        }
-    });
+    let (image, name) = match target {
+        Target::All => (Image::all_outputs(&freeze()?.frames), target.name()),
+        Target::Region => from_overlay(when.live, started, config)?,
+    };
+    let image = Arc::new(image);
     // The file is encoded on a worker thread, started before the clipboard
     // copy, so a slow format (AVIF takes seconds at 4K) never delays it.
-    let saving = (output.is_none() && config.screenshot.save).then(|| {
-        crate::save::spawn(
-            image.clone(),
-            target.name(),
-            None,
-            config.screenshot.clone(),
-        )
-    });
+    let saving = (output.is_none() && config.screenshot.save)
+        .then(|| crate::save::spawn(image.clone(), name, None, config.screenshot.clone()));
     // Only now the Target is chosen: never over the Overlay, never in the Capture.
     let _flash = crate::after::flash(&config.screenshot);
     if config.screenshot.copy {
@@ -111,7 +98,7 @@ pub fn run(
         path,
         width: image.width,
         height: image.height,
-        target: target.name(),
+        target: name,
     };
     crate::after::run(&delivered, &config.screenshot);
     Ok(())
@@ -127,21 +114,70 @@ fn freeze() -> Result<Frozen, (Exit, String)> {
     })
 }
 
-/// The Region the user picked on the Overlay, or why there is none.
-fn picked(outcome: Result<Outcome, OverlayError>) -> Result<Region, (Exit, String)> {
-    match outcome {
-        Ok(Outcome::Region(region)) => Ok(region),
-        Ok(Outcome::Cancelled) => Err((Exit::Cancelled, "cancelled".into())),
-        Err(e) => Err(overlay_error(e)),
-    }
-}
-
 fn overlay_error(e: OverlayError) -> (Exit, String) {
     let code = match e {
         OverlayError::Unsupported(_) => Exit::Unsupported,
         OverlayError::Failed(_) => Exit::Io,
     };
     (code, e.to_string())
+}
+
+/// Show the Overlay and cut out the Target picked there; returns the image
+/// and the Target's name for file names. With `live`, the Overlay goes over
+/// the live desktop and the freeze comes after it, Overlay already hidden.
+fn from_overlay(
+    live: bool,
+    started: Instant,
+    config: &Config,
+) -> Result<(Image, &'static str), (Exit, String)> {
+    let mut state = State::load();
+    let options = Options {
+        confirm: config.screenshot.confirm,
+        last_region: state.last_region().map(|r| Region {
+            x: r.x,
+            y: r.y,
+            width: r.width,
+            height: r.height,
+        }),
+    };
+    let (frozen, outcome) = if live {
+        let outcome = overlay::run_live(started, &options).map_err(overlay_error)?;
+        if outcome == Outcome::Cancelled {
+            return Err((Exit::Cancelled, "cancelled".into()));
+        }
+        (freeze()?, outcome)
+    } else {
+        let frozen = freeze()?;
+        let outcome = overlay::run(&frozen, started, &options).map_err(overlay_error)?;
+        (frozen, outcome)
+    };
+    Ok(match outcome {
+        Outcome::Region(r) => {
+            state.set_last_region(StoredRegion {
+                x: r.x,
+                y: r.y,
+                width: r.width,
+                height: r.height,
+            });
+            if let Err(e) = state.save() {
+                eprintln!(
+                    "hoarder: cannot remember the Region in {}: {e}",
+                    hoarder_config::state_path().display()
+                );
+            }
+            (Image::region(&frozen.frames, &r), "region")
+        }
+        Outcome::Output(name) => {
+            let frame = frozen
+                .frames
+                .iter()
+                .find(|f| f.output == name)
+                .ok_or_else(|| (Exit::Io, format!("output {name} went away")))?;
+            (Image::upright(frame), "output")
+        }
+        Outcome::AllOutputs => (Image::all_outputs(&frozen.frames), "all"),
+        Outcome::Cancelled => return Err((Exit::Cancelled, "cancelled".into())),
+    })
 }
 
 fn deliver(image: &Image, output: &Path, settings: &Screenshot) -> std::io::Result<()> {

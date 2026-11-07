@@ -54,7 +54,6 @@ fn live_captures_what_the_desktop_shows_at_release_without_overlay_pixels() {
     let white = Pattern::solid(Rgb8(255, 255, 255));
     app.paint(out, &white).unwrap();
 
-    // To a file: the PNG is too big for a pipe nobody reads until exit.
     let file = session.runtime_dir().join("live.png");
     let overlay = Overlay::start(
         &session,

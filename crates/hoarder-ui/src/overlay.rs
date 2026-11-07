@@ -63,6 +63,7 @@ use wayland_protocols::wp::{
 
 use crate::chrome::{CLEAR, DIM, Fonts, Scene};
 use crate::geom::Rect;
+use crate::select::{Action, Key, Selector};
 
 /// Set to print how long the Overlay took to become visible.
 pub const TIMINGS_ENV: &str = "HOARDER_TIMINGS";
@@ -81,12 +82,27 @@ pub struct Region {
 }
 
 /// How the user left the Overlay.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
-    /// A Region was dragged out and released.
+    /// A Region: dragged out and released, confirmed in Refine, or the last
+    /// Region (Enter with no selection).
     Region(Region),
+    /// The Output with this name (`O`, or a click on empty desktop).
+    Output(String),
+    /// `A`.
+    AllOutputs,
     /// Esc or right-click.
     Cancelled,
+}
+
+/// How the Overlay behaves for one run.
+#[derive(Debug, Clone, Default)]
+pub struct Options {
+    /// Enter Refine after every drag, not only after Shift+release
+    /// (`screenshot.confirm`).
+    pub confirm: bool,
+    /// What Enter with no selection captures.
+    pub last_region: Option<Region>,
 }
 
 /// Everything that can stop the Overlay.
@@ -127,24 +143,26 @@ fn failed(e: impl std::fmt::Display) -> OverlayError {
 /// capturing anyway.
 const HIDE_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// Show the Overlay over `frozen` and wait for the user to pick a Region or
+/// Show the Overlay over `frozen` and wait for the user to pick a Target or
 /// cancel. `started` is when the user asked for the Capture; with
 /// [`TIMINGS_ENV`] set, the time until the Overlay is visible is printed.
-pub fn run(frozen: &Frozen, started: Instant) -> Result<Outcome, OverlayError> {
+pub fn run(frozen: &Frozen, started: Instant, options: &Options) -> Result<Outcome, OverlayError> {
     timing(started, "frozen");
-    show(Some(frozen), started)
+    show(Some(frozen), started, options)
 }
 
 /// Show the Overlay over the live desktop (`--live`) and wait for the user to
-/// pick a Region or cancel. On return the compositor has presented a frame
+/// pick a Target or cancel. On return the compositor has presented a frame
 /// without the Overlay, so the desktop can be captured as the user sees it.
-pub fn run_live(started: Instant) -> Result<Outcome, OverlayError> {
-    show(None, started)
+pub fn run_live(started: Instant, options: &Options) -> Result<Outcome, OverlayError> {
+    show(None, started, options)
 }
 
 /// What one output's Overlay shows and where.
 struct Screen<'a> {
     output: WlOutput,
+    /// The output's name, e.g. `DP-1`.
+    name: String,
     /// Layout position and size of the output (logical).
     logical: (f64, f64, f64, f64),
     /// Physical size of the output, upright.
@@ -153,7 +171,11 @@ struct Screen<'a> {
     frame: Option<&'a FrozenFrame>,
 }
 
-fn show(frozen: Option<&Frozen>, started: Instant) -> Result<Outcome, OverlayError> {
+fn show(
+    frozen: Option<&Frozen>,
+    started: Instant,
+    options: &Options,
+) -> Result<Outcome, OverlayError> {
     let conn = Connection::connect_to_env().map_err(failed)?;
     let (globals, mut queue): (_, EventQueue<App>) = registry_queue_init(&conn).map_err(failed)?;
     let qh = queue.handle();
@@ -187,7 +209,8 @@ fn show(frozen: Option<&Frozen>, started: Instant) -> Result<Outcome, OverlayErr
         keyboard: None,
         views: Vec::new(),
         fonts: Fonts::load(),
-        drag: None,
+        selector: Selector::new(options.confirm, options.last_region),
+        pointer_at: None,
         outcome: None,
         started,
         visible_reported: false,
@@ -211,6 +234,7 @@ fn show(frozen: Option<&Frozen>, started: Instant) -> Result<Outcome, OverlayErr
                 let l = frame.logical;
                 Ok(Screen {
                     output,
+                    name: frame.output.clone(),
                     logical: (l.x as f64, l.y as f64, l.width as f64, l.height as f64),
                     size: frame.upright_size(),
                     frame: Some(frame),
@@ -274,32 +298,10 @@ fn show(frozen: Option<&Frozen>, started: Instant) -> Result<Outcome, OverlayErr
     Ok(outcome)
 }
 
-/// A drag in progress, in global logical coordinates.
-#[derive(Debug, Clone, Copy)]
-struct Drag {
-    anchor: (f64, f64),
-    cursor: (f64, f64),
-}
-
-impl Drag {
-    fn region(&self) -> Region {
-        let (x0, x1) = min_max(self.anchor.0, self.cursor.0);
-        let (y0, y1) = min_max(self.anchor.1, self.cursor.1);
-        Region {
-            x: x0,
-            y: y0,
-            width: x1 - x0,
-            height: y1 - y0,
-        }
-    }
-}
-
-fn min_max(a: f64, b: f64) -> (f64, f64) {
-    if a <= b { (a, b) } else { (b, a) }
-}
-
 /// One output's Overlay surfaces.
 struct View {
+    /// The output's name, e.g. `DP-1`.
+    output: String,
     /// Layout position and size of the output (logical).
     logical: (f64, f64, f64, f64),
     /// Physical size of the chrome buffer: the upright Frozen Frame size.
@@ -406,6 +408,7 @@ impl View {
         layer.commit();
 
         Ok(View {
+            output: screen.name.clone(),
             logical: screen.logical,
             size: screen.size,
             layer,
@@ -429,6 +432,12 @@ impl View {
             self.size.0 as f64 / self.logical.2.max(1.0),
             self.size.1 as f64 / self.logical.3.max(1.0),
         )
+    }
+
+    /// Whether the global logical point `(x, y)` lies on this output.
+    fn contains(&self, (x, y): (f64, f64)) -> bool {
+        let (ox, oy, w, h) = self.logical;
+        x >= ox && x < ox + w && y >= oy && y < oy + h
     }
 
     /// A global logical rectangle in this output's physical pixels.
@@ -614,7 +623,9 @@ struct App {
     keyboard: Option<WlKeyboard>,
     views: Vec<View>,
     fonts: Fonts,
-    drag: Option<Drag>,
+    selector: Selector,
+    /// Where the pointer last was, in global logical coordinates.
+    pointer_at: Option<(f64, f64)>,
     outcome: Option<Outcome>,
     started: Instant,
     visible_reported: bool,
@@ -649,9 +660,66 @@ impl App {
             .position(|v| v.layer.wl_surface() == surface)
     }
 
-    /// Recompute every output's scene from the drag and draw what changed.
+    /// The output under the global logical point `at`, or the nearest one.
+    fn view_at(&self, at: (f64, f64)) -> Option<&View> {
+        self.views.iter().find(|v| v.contains(at)).or_else(|| {
+            let distance = |v: &View| {
+                let (ox, oy, w, h) = v.logical;
+                let dx = (ox - at.0).max(at.0 - (ox + w)).max(0.0);
+                let dy = (oy - at.1).max(at.1 - (oy + h)).max(0.0);
+                dx * dx + dy * dy
+            };
+            self.views
+                .iter()
+                .min_by(|a, b| distance(a).total_cmp(&distance(b)))
+        })
+    }
+
+    /// The size of one physical pixel at `at`, in logical pixels.
+    fn pixel_at(&self, at: (f64, f64)) -> f64 {
+        self.view_at(at).map_or(1.0, |v| 1.0 / v.scale().0)
+    }
+
+    /// Act on what the selection asked for.
+    fn act(&mut self, action: Action) {
+        self.outcome = match action {
+            Action::Region(region) => Some(Outcome::Region(region)),
+            Action::OutputAt(at) => self.view_at(at).map(|v| Outcome::Output(v.output.clone())),
+            Action::AllOutputs => Some(Outcome::AllOutputs),
+            Action::Cancel => Some(Outcome::Cancelled),
+        };
+    }
+
+    /// A key went down (or up, for `released`).
+    fn key_event(&mut self, keysym: Keysym, released: bool, qh: &QueueHandle<App>) {
+        let Some(key) = key_of(keysym) else {
+            return;
+        };
+        if key == Key::Output {
+            if !released {
+                let at = self.pointer_at.unwrap_or_else(|| {
+                    self.views
+                        .first()
+                        .map_or((0.0, 0.0), |v| (v.logical.0, v.logical.1))
+                });
+                self.act(Action::OutputAt(at));
+            }
+            return;
+        }
+        let px = self
+            .selector
+            .moving_point()
+            .map_or(1.0, |at| self.pixel_at(at));
+        match self.selector.key(key, released, px) {
+            Some(action) => self.act(action),
+            None => self.update(qh),
+        }
+    }
+
+    /// Recompute every output's scene from the selection and draw what changed.
     fn update(&mut self, qh: &QueueHandle<App>) {
-        let region = self.drag.map(|d| d.region());
+        let region = self.selector.region();
+        let refining = self.selector.refining();
         for i in 0..self.views.len() {
             let view = &self.views[i];
             let selection = region
@@ -677,8 +745,16 @@ impl App {
                 }
                 _ => None,
             };
+            let handles = match selection {
+                Some(sel) if refining => handles(sel, view.scale().0),
+                _ => Vec::new(),
+            };
             let view = &mut self.views[i];
-            view.wanted = Scene { selection, label };
+            view.wanted = Scene {
+                selection,
+                label,
+                handles,
+            };
             if let Err(e) = view.redraw(&mut self.pool, qh) {
                 self.outcome = Some(Outcome::Cancelled);
                 eprintln!("hoarder: cannot draw the Overlay: {e}");
@@ -692,6 +768,7 @@ impl App {
         };
         let (ox, oy, _, _) = self.views[i].logical;
         let at = (ox + event.position.0, oy + event.position.1);
+        self.pointer_at = Some(at);
         match event.kind {
             PointerEventKind::Enter { serial } => {
                 if let Some(device) = &self.cursor_device {
@@ -701,32 +778,19 @@ impl App {
             PointerEventKind::Press {
                 button: BTN_LEFT, ..
             } => {
-                self.drag = Some(Drag {
-                    anchor: at,
-                    cursor: at,
-                });
+                self.selector.press(at);
                 self.update(qh);
             }
             PointerEventKind::Motion { .. } => {
-                if let Some(drag) = &mut self.drag {
-                    drag.cursor = at;
-                    self.update(qh);
-                }
+                self.selector.motion(at);
+                self.update(qh);
             }
             PointerEventKind::Release {
                 button: BTN_LEFT, ..
-            } => {
-                if let Some(mut drag) = self.drag.take() {
-                    drag.cursor = at;
-                    let region = drag.region();
-                    let (sx, sy) = self.views[i].scale();
-                    if (region.width * sx).round() >= 1.0 && (region.height * sy).round() >= 1.0 {
-                        self.outcome = Some(Outcome::Region(region));
-                    } else {
-                        self.update(qh);
-                    }
-                }
-            }
+            } => match self.selector.release(at, self.pixel_at(at)) {
+                Some(action) => self.act(action),
+                None => self.update(qh),
+            },
             PointerEventKind::Press {
                 button: BTN_RIGHT, ..
             } => self.outcome = Some(Outcome::Cancelled),
@@ -770,10 +834,45 @@ fn live_screen(output: WlOutput, outputs: &OutputState) -> Option<Screen<'static
         .unwrap_or((size.0 as i32 / scale, size.1 as i32 / scale));
     Some(Screen {
         output,
+        name: info.name.clone().unwrap_or_default(),
         logical: (x as f64, y as f64, lw as f64, lh as f64),
         size,
         frame: None,
     })
+}
+
+/// The key a keysym stands for in the Overlay, if any.
+fn key_of(keysym: Keysym) -> Option<Key> {
+    Some(match keysym {
+        Keysym::Escape => Key::Escape,
+        Keysym::Return | Keysym::KP_Enter => Key::Enter,
+        Keysym::space => Key::Space,
+        Keysym::o | Keysym::O => Key::Output,
+        Keysym::a | Keysym::A => Key::AllOutputs,
+        Keysym::Left | Keysym::KP_Left => Key::Left,
+        Keysym::Right | Keysym::KP_Right => Key::Right,
+        Keysym::Up | Keysym::KP_Up => Key::Up,
+        Keysym::Down | Keysym::KP_Down => Key::Down,
+        _ => return None,
+    })
+}
+
+/// Refine's eight resize handles around `sel` (physical pixels): squares
+/// centred on the border's corners and the middle of each side.
+fn handles(sel: Rect, scale: f64) -> Vec<Rect> {
+    let size = ((7.0 * scale).round() as i32) | 1;
+    let ring = sel.inflate(1);
+    let xs = [ring.x, (ring.x + ring.right() - 1) / 2, ring.right() - 1];
+    let ys = [ring.y, (ring.y + ring.bottom() - 1) / 2, ring.bottom() - 1];
+    let mut out = Vec::with_capacity(8);
+    for (j, &y) in ys.iter().enumerate() {
+        for (i, &x) in xs.iter().enumerate() {
+            if i != 1 || j != 1 {
+                out.push(Rect::new(x - size / 2, y - size / 2, size, size));
+            }
+        }
+    }
+    out
 }
 
 /// Where the size label goes: just below the selection, or above it when
@@ -967,14 +1066,12 @@ impl KeyboardHandler for App {
     fn press_key(
         &mut self,
         _: &Connection,
-        _: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
         _: &WlKeyboard,
         _: u32,
         event: KeyEvent,
     ) {
-        if event.keysym == Keysym::Escape {
-            self.outcome = Some(Outcome::Cancelled);
-        }
+        self.key_event(event.keysym, false, qh);
     }
 
     fn repeat_key(
@@ -990,11 +1087,12 @@ impl KeyboardHandler for App {
     fn release_key(
         &mut self,
         _: &Connection,
-        _: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
         _: &WlKeyboard,
         _: u32,
-        _: KeyEvent,
+        event: KeyEvent,
     ) {
+        self.key_event(event.keysym, true, qh);
     }
 
     fn update_modifiers(
@@ -1003,10 +1101,11 @@ impl KeyboardHandler for App {
         _: &QueueHandle<Self>,
         _: &WlKeyboard,
         _: u32,
-        _: Modifiers,
+        modifiers: Modifiers,
         _: RawModifiers,
         _: u32,
     ) {
+        self.selector.set_shift(modifiers.shift);
     }
 }
 

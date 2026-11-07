@@ -19,6 +19,8 @@ pub struct Scene {
     /// The selected pixels: shown undimmed with a border just outside.
     pub selection: Option<Rect>,
     pub label: Option<Label>,
+    /// Refine's resize handles, filled with the accent colour.
+    pub handles: Vec<Rect>,
 }
 
 impl Scene {
@@ -39,6 +41,10 @@ impl Scene {
         if self.label != next.label {
             out.extend(self.label.as_ref().map(|l| l.rect));
             out.extend(next.label.as_ref().map(|l| l.rect));
+        }
+        if self.handles != next.handles {
+            out.extend(&self.handles);
+            out.extend(&next.handles);
         }
         out.retain(|r| !r.is_empty());
         out
@@ -61,6 +67,16 @@ impl Scene {
                         .0
                         .fill(colour);
                 }
+            }
+        }
+        for handle in &self.handles {
+            let r = handle.intersect(&area);
+            for y in r.y..r.bottom() {
+                let row = &mut canvas[y as usize * stride..(y as usize + 1) * stride];
+                row[r.x as usize * 4..r.right() as usize * 4]
+                    .as_chunks_mut::<4>()
+                    .0
+                    .fill(ACCENT);
             }
         }
         if let Some(label) = &self.label {
