@@ -33,13 +33,21 @@ for pkg in "$@"; do
 	cp -r "$rendered/$pkg/." "$build/"
 	lint "$build/PKGBUILD"
 	flags=(--cleanbuild --force --noconfirm)
-	# The shims' only dependency is a hoarder package, which is never
-	# installed here.
-	[ "$pkg" = hoarder-wl-compat ] && flags+=(--nodeps)
+	rules=()
+	# The shims need a hoarder package only to run, not to build. namcap
+	# checks their symlinks against the installed system, so without one
+	# installed (CI installs hoarder-bin first) that rule is skipped.
+	if [ "$pkg" = hoarder-wl-compat ]; then
+		flags+=(--nodeps)
+		if ! pacman -T hoarder >/dev/null; then
+			echo "(no hoarder installed: not checking where the shims point)"
+			rules=(-e symlink)
+		fi
+	fi
 	(cd "$build" && SRCDEST="$artifacts" PKGDEST="$pkgdest" makepkg "${flags[@]}")
-	for file in "$pkgdest/$pkg"-[0-9]*.pkg.tar.*; do
+	for file in "$pkgdest/$pkg"-[0-9]*.pkg.tar*; do
 		echo "--> $(basename "$file")"
-		lint "$file"
+		lint "${rules[@]}" "$file"
 		bsdtar -tf "$file" | grep -v '^\.' | sort
 	done
 	rm -rf "$build"

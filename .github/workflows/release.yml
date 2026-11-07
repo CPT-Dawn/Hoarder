@@ -167,7 +167,17 @@ jobs:
       - name: Build and lint
         run: >-
           runuser -u builder -- packaging/aur/check.sh aur artifacts packages
-          hoarder hoarder-bin hoarder-wl-compat
+          hoarder hoarder-bin
+      # With hoarder-bin installed, namcap can follow the shims' symlinks; and
+      # the shims must actually be wl-copy and wl-paste.
+      - name: Build and lint the Compat shims against an installed hoarder
+        run: |
+          pacman -U --noconfirm packages/hoarder-bin-*.pkg.tar*
+          runuser -u builder -- packaging/aur/check.sh aur artifacts packages hoarder-wl-compat
+          pacman -U --noconfirm packages/hoarder-wl-compat-*.pkg.tar*
+          wl-copy --version
+          wl-paste --help | grep -q -- --watch
+          hoarder --version | grep -qx "hoarder $VERSION"
       - name: Bundle the AUR repositories
         run: tar -C aur -czf "hoarder-$VERSION-aur.tar.gz" .
       - uses: actions/upload-artifact@v4

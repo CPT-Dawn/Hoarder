@@ -10,12 +10,14 @@ pkgdesc='Pixel-exact screenshots and a clipboard that outlives the app that set 
 arch=('x86_64' 'aarch64')
 url='https://github.com/CPT-Dawn/Hoarder'
 license=('MIT')
-depends=('gcc-libs' 'glibc' 'libxkbcommon')
+depends=('glibc' 'libgcc' 'libxkbcommon')
 makedepends=('cargo')
 optdepends=('xdg-utils: open a Capture from its notification'
             'hoarder-wl-compat: wl-copy and wl-paste served by Hoarder')
-# The dist profile already strips the binary.
-options=('!debug')
+# The dist profile already strips the binary and does its own LTO; makepkg's
+# -flto would turn the bundled C (SQLite, libwebp) into GCC bitcode that
+# Rust's linker cannot read.
+options=('!debug' '!lto')
 source=("$url/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz")
 sha256sums=('SKIP')
 

@@ -11,7 +11,7 @@ pkgdesc='Pixel-exact screenshots and a clipboard that outlives the app that set 
 arch=('x86_64' 'aarch64')
 url='https://github.com/CPT-Dawn/Hoarder'
 license=('MIT')
-depends=('gcc-libs' 'glibc' 'libxkbcommon')
+depends=('glibc' 'libgcc' 'libxkbcommon')
 optdepends=('xdg-utils: open a Capture from its notification'
             'hoarder-wl-compat: wl-copy and wl-paste served by Hoarder')
 provides=("$_pkgname=$pkgver")
