@@ -285,14 +285,14 @@ impl super::Daemon {
         }
         let which = Selection::Clipboard;
         self.stop_reading(which);
+        let held = super::Held {
+            may_take_over: true,
+            sensitivity: Sensitivity::Concealed,
+            concealed: Some(listed.id),
+            ..Default::default()
+        };
         let slot = &mut self.slots[which as usize];
-        scrub(&mut slot.kept);
-        slot.may_take_over = true;
-        slot.record = false;
-        slot.once = false;
-        slot.sensitivity = Sensitivity::Concealed;
-        slot.concealed = Some(listed.id);
-        slot.take_over_after_read = false;
+        slot.hold(&mut self.vault, super::Previous::Forget, held);
         self.watcher.serve(which, &types);
         self.reply_when_synced(client, id, to_value(&summary(listed)));
     }

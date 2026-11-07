@@ -61,6 +61,23 @@ impl Daemon {
         serde_json::from_str::<Value>(&line).unwrap()["ok"].clone()
     }
 
+    /// The live Concealed Clips, as `list` with `concealed` shows them.
+    fn concealed(&self) -> Vec<Value> {
+        let mut stream = UnixStream::connect(&self.socket).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let list = json!({"v": 1, "id": 1, "op": "list", "concealed": true});
+        writeln!(stream, "{list}").unwrap();
+        let mut line = String::new();
+        BufReader::new(stream).read_line(&mut line).unwrap();
+        let clips = serde_json::from_str::<Value>(&line).unwrap()["ok"].clone();
+        (clips.as_array().unwrap().iter())
+            .filter(|c| c["sensitivity"] == "concealed")
+            .cloned()
+            .collect()
+    }
+
     /// Wait until the Daemon has seen an app's Offer and finished with it,
     /// and return the clipboard's status.
     fn settled(&self) -> Value {
@@ -304,4 +321,35 @@ fn an_expiring_concealed_clip_leaves_a_newer_copy_alone() {
     std::thread::sleep(Duration::from_millis(1800));
     assert!(newer.owns_selection(Selection::Clipboard).unwrap());
     assert_eq!(paste(&session).as_deref(), Some(b"newer".as_slice()));
+}
+
+#[test]
+fn restoring_a_clip_over_a_concealed_selection_forgets_it() {
+    let session = Session::start_default().unwrap();
+    let daemon = Daemon::start(&session, &[]);
+    let earlier = copy_normal_and_wait(&session, b"plain old text");
+    drop(earlier);
+    let app = session.client().unwrap();
+    app.set_selection(Selection::Clipboard, &[("text/plain", TOKEN)])
+        .unwrap();
+    daemon.settled();
+    app.exit();
+    wait_until("Takeover", || paste(&session).as_deref() == Some(TOKEN));
+    assert_eq!(daemon.concealed().len(), 1);
+
+    let id = history(&session)[0]["id"].to_string();
+    let out = session
+        .command(HOARDER)
+        .args(["history", "restore", &id])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    assert_eq!(
+        paste(&session).as_deref(),
+        Some(b"plain old text".as_slice())
+    );
+    assert_eq!(daemon.concealed(), Vec::<Value>::new());
+    assert_eq!(daemon.status()["clipboard"]["sensitivity"], "normal");
 }
