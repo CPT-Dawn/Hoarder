@@ -1,0 +1,14 @@
+[package]
+name = "hoarder-store"
+description = "SQLite-backed History store for Hoarder: schema, blobs, dedup, retention and search."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
