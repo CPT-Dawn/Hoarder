@@ -1,5 +1,7 @@
+mod after;
 mod clipboard;
 mod config;
+mod hook;
 mod image;
 mod save;
 mod shot;

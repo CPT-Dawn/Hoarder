@@ -8,6 +8,7 @@ use hoarder_config::Config;
 use hoarder_wayland::CaptureError;
 
 use crate::Exit;
+use crate::after::Delivered;
 use crate::image::Image;
 
 /// What a Capture covers. Region, Window and Output need the Overlay (#61).
@@ -36,16 +37,27 @@ pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(),
             .map_err(|e| (Exit::Io, format!("cannot encode the Capture: {e}")))?;
         crate::clipboard::copy_capture(&png)?;
     }
-    match output {
-        Some(output) => deliver(&image, output)
-            .map_err(|e| (Exit::Io, format!("cannot write {}: {e}", output.display()))),
+    let path = match output {
+        Some(output) => {
+            deliver(&image, output)
+                .map_err(|e| (Exit::Io, format!("cannot write {}: {e}", output.display())))?;
+            (output != Path::new("-")).then(|| output.to_owned())
+        }
         None if config.screenshot.save => {
             let path = crate::save::save(&image, "all", None, &config.screenshot)?;
             println!("{}", path.display());
-            Ok(())
+            Some(path)
         }
-        None => Ok(()),
-    }
+        None => None,
+    };
+    let delivered = Delivered {
+        path,
+        width: image.width,
+        height: image.height,
+        target: "all",
+    };
+    crate::after::run(&delivered, &config.screenshot);
+    Ok(())
 }
 
 fn deliver(image: &Image, output: &Path) -> std::io::Result<()> {
