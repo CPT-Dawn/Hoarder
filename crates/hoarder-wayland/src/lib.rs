@@ -10,5 +10,6 @@ pub mod clipboard;
 pub mod flash;
 
 pub use capture::{
-    Backend, CaptureError, Frozen, FrozenFrame, LogicalRect, ShmFormat, Transform, freeze,
+    Backend, CaptureError, Frozen, FrozenCursor, FrozenFrame, LogicalRect, ShmFormat, Transform,
+    freeze,
 };
