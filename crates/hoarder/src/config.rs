@@ -109,12 +109,11 @@ pub fn run(command: ConfigCommand, overrides: &[(String, String)]) -> Result<(),
     let path = hoarder_config::path();
     match command {
         ConfigCommand::Path => println!("{}", path.display()),
-        ConfigCommand::Get { key, watch } => {
-            let mut last = show(&effective(overrides)?, key.as_deref())?;
-            print!("{last}");
-            if watch {
-                watch_value(&path, key.as_deref(), overrides, &mut last)?;
-            }
+        ConfigCommand::Get { key, watch: false } => {
+            print!("{}", show(&effective(overrides)?, key.as_deref())?);
+        }
+        ConfigCommand::Get { key, watch: true } => {
+            watch_value(&path, key.as_deref(), overrides)?;
         }
         ConfigCommand::Set { key, value } => {
             let text = read_or_template(&path)?;
@@ -174,11 +173,13 @@ fn watch_value(
     path: &Path,
     key: Option<&str>,
     overrides: &[(String, String)],
-    last: &mut String,
 ) -> Result<(), (Exit, String)> {
     use std::io::Write as _;
     let io = |e: std::io::Error| (Exit::Io, format!("cannot watch {}: {e}", path.display()));
+    // Watch first, so no change between the first read and the watch is missed.
     let mut watcher = hoarder_config::Watcher::new(path).map_err(io)?;
+    let mut last = show(&effective(overrides)?, key)?;
+    print!("{last}");
     std::io::stdout().flush().map_err(io)?;
     loop {
         watcher.wait().map_err(io)?;
@@ -197,10 +198,10 @@ fn watch_value(
             }
         };
         let now = show(&config, key)?;
-        if now != *last {
+        if now != last {
             print!("{now}");
             std::io::stdout().flush().map_err(io)?;
-            *last = now;
+            last = now;
         }
     }
 }

@@ -5,8 +5,10 @@ use std::ffi::OsString;
 use std::io;
 use std::os::fd::{AsFd, BorrowedFd};
 use std::path::Path;
+use std::time::Duration;
 
 use inotify::{Inotify, WatchMask};
+use rustix::event::{PollFd, PollFlags};
 
 /// Tells when `config.toml` may have changed. The fd is non-blocking, so a
 /// `calloop` loop can wrap it in a `Generic` source and call
@@ -62,24 +64,37 @@ impl Watcher {
         }
     }
 
-    /// Block until the file has changed.
+    /// Block until the file has changed and then been quiet for
+    /// [`SETTLE`], so a writer that truncates and rewrites in place is not
+    /// caught halfway.
     pub fn wait(&mut self) -> io::Result<()> {
+        while !self.poll(None)? {}
+        while self.poll(Some(SETTLE))? {}
+        Ok(())
+    }
+
+    /// Wait up to `timeout` (forever with `None`) for events; true if any was
+    /// about the file.
+    fn poll(&mut self, timeout: Option<Duration>) -> io::Result<bool> {
+        let timeout = timeout.map(|t| rustix::event::Timespec {
+            tv_sec: t.as_secs() as _,
+            tv_nsec: t.subsec_nanos().into(),
+        });
         loop {
-            let mut fds = [rustix::event::PollFd::new(
-                &self.inotify,
-                rustix::event::PollFlags::IN,
-            )];
-            match rustix::event::poll(&mut fds, None) {
-                Ok(_) => {}
+            let mut fds = [PollFd::new(&self.inotify, PollFlags::IN)];
+            match rustix::event::poll(&mut fds, timeout.as_ref()) {
+                Ok(0) => return Ok(false),
+                Ok(_) => return self.changed(),
                 Err(rustix::io::Errno::INTR) => continue,
                 Err(e) => return Err(e.into()),
-            }
-            if self.changed()? {
-                return Ok(());
             }
         }
     }
 }
+
+/// How long the file must be left alone before [`Watcher::wait`] returns.
+/// Event loops using [`Watcher::changed`] should debounce by the same amount.
+pub const SETTLE: Duration = Duration::from_millis(50);
 
 impl AsFd for Watcher {
     fn as_fd(&self) -> BorrowedFd<'_> {
