@@ -13,12 +13,16 @@ clap.workspace = true
 hoarder-config.workspace = true
 hoarder-ui.workspace = true
 hoarder-wayland.workspace = true
+image.workspace = true
 jiff.workspace = true
 png.workspace = true
+webp.workspace = true
 
 [dev-dependencies]
 hoarder-e2e.workspace = true
+image.workspace = true
 png.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true
