@@ -8,7 +8,7 @@ Hoarder is tested through as few seams as possible, as high up as possible ([PLA
 cargo test --workspace
 ```
 
-The end-to-end tests need these on `PATH` (Arch: `sway grim wl-clipboard libavif dbus`):
+The end-to-end tests need these on `PATH` (Arch: `sway grim wl-clipboard libavif dbus zsh man-db`):
 
 | Tool | Why |
 |---|---|
@@ -18,6 +18,7 @@ The end-to-end tests need these on `PATH` (Arch: `sway grim wl-clipboard libavif
 | `avifdec` | Independent AVIF decoder for the saved-format tests (`libavif`). |
 | `socat`, `jq` | Optional: run the examples in docs/ipc.md (skipped without them). |
 | `dbus-daemon` | A private session bus per notification test (`crates/hoarder/tests/bus/`, used by `e2e_notify.rs` and `e2e_pick.rs`), with a stand-in notification server on it, so no test ever reaches your real desktop. |
+| `bash`, `zsh`, `man` | Oracles for what packages ship (`e2e_dist.rs`): bash runs the completion function, `zsh -n` parses its script, man(1) renders the man pages. |
 
 Latency budgets (4K shot-to-clipboard under 150 ms) are `#[ignore]`d in debug builds, since timing unoptimised code proves nothing. Run them with `cargo test --release -p hoarder --test e2e_shot_clipboard`; see [Timings and budgets](#timings-and-budgets) for scaling them with `HOARDER_BUDGET_SCALE`.
 
@@ -157,11 +158,22 @@ The Picker tests (`e2e_picker.rs`) start it with `Overlay::start(&session, &["pi
 
 ### Scaling budgets on slow machines
 
-Every budget test checks through one helper, `hoarder_e2e::budget::assert_within`, which prints the measurement next to the budget (`budget: …: measured 41.2 ms, budget 60.0 ms (PLAN 60.0 ms x 1)`) and fails if it is over. The budgets in the tests are PLAN's numbers. `HOARDER_BUDGET_SCALE` multiplies all of them (default `1.0`, so local runs enforce PLAN as written). CI sets it to `3`, because shared GitHub runners take 187–245 ms for the 150 ms shot-to-clipboard path that a desktop does well under budget. Read the printed measurements in the CI log to spot a regression that 3× would hide. New budget tests must use the helper, not their own `assert!`.
+Every budget test checks through one helper, `hoarder_e2e::budget::assert_within`, which prints the measurement next to the budget (`budget: …: measured 41.2 ms, budget 60.0 ms (PLAN 60.0 ms x 1)`) and fails if it is over. The budgets in the tests are PLAN's numbers. `HOARDER_BUDGET_SCALE` multiplies all of them (default `1.0`, so local runs enforce PLAN as written). CI sets it to `3`, because shared GitHub runners take 187–245 ms for the 150 ms shot-to-clipboard path that a desktop does well under budget. A regression that 3× would hide is caught by the `budgets` job instead (below). New budget tests must use the helper, not their own `assert!`, since that job reads their `budget:` lines.
 
 ```sh
 HOARDER_BUDGET_SCALE=3 cargo test --release -p hoarder --test e2e_shot_clipboard --test e2e_overlay --test e2e_picker -- 150_ms budget --nocapture
 ```
+
+### The budgets job
+
+CI's `budgets` job runs `scripts/budgets.sh measure` on the change and on its base: the PR's merge base, or the commit a push moved the branch from. Both run on the same runner, so a slow runner slows both alike. Each run records every `budget:` line, plus the size of the stripped release binary. `scripts/budgets.sh compare` then fails the job if any of them grew by more than 20% (`HOARDER_REGRESSION_PCT`). The table lands in the job summary. A brand-new branch has no base, so its job only reports. The absolute budgets (scaled 3×) still fail on their own.
+
+```sh
+scripts/budgets.sh measure . head.tsv                 # what CI measures, here
+scripts/budgets.sh compare base.tsv head.tsv          # the 20% rule
+```
+
+The shipped binary (the `dist` profile: fat LTO, one codegen unit, stripped) measured 14.3 MB on 2026-11-08 against PLAN's 8 MB budget. The release workflow prints its size and warns when it is over.
 
 ## CI (`.github/workflows/ci.yml`)
 
@@ -172,7 +184,8 @@ CI runs on pushes to `main`, `integration/**`, `ticket/**` and `fix/**`, and on 
 | rustfmt | `cargo fmt --all --check` | |
 | clippy | `cargo clippy --workspace --all-targets --locked -- -D warnings` | Any warning fails the build. |
 | MSRV (1.97) | `cargo check --workspace --all-targets --locked` | MSRV is current stable minus two; bump it with `rust-version` in `Cargo.toml`. |
-| tests (headless Sway) | `cargo test --workspace --locked`, then the timing budgets with `--release` and `HOARDER_BUDGET_SCALE=3` | Runs in an `archlinux` container, because Ubuntu's Sway predates the protocols Hoarder targets. Runs as a non-root user. |
+| tests (headless Sway) | `cargo test --workspace --locked` | Runs in an `archlinux` container, because Ubuntu's Sway predates the protocols Hoarder targets. Runs as a non-root user. |
+| budgets | `scripts/budgets.sh` on the change and its base, `--release`, `HOARDER_BUDGET_SCALE=3` | Fails on a budget over 3× PLAN or more than 20% worse than the base ([The budgets job](#the-budgets-job)). |
 | cargo-deny | `cargo deny check` | Advisories, licences (allow-list in `deny.toml`), bans and sources. |
 
 To run the same checks locally before pushing:

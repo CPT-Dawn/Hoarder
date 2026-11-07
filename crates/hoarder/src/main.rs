@@ -4,6 +4,7 @@ mod clipboard;
 mod config;
 mod cut;
 mod daemon;
+mod dist;
 mod doctor;
 mod encode;
 mod history;
@@ -21,7 +22,7 @@ mod window;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 /// Pixel-exact screenshots and a clipboard that outlives the app that set it.
 #[derive(Debug, Parser)]
@@ -140,6 +141,18 @@ enum Command {
         #[arg(long, requires = "apply")]
         yes: bool,
     },
+    /// Print a shell completion script, e.g.
+    /// `hoarder completions zsh > ~/.zfunc/_hoarder`.
+    Completions { shell: dist::Shell },
+    /// Write man pages, completions, the systemd user unit and the default
+    /// config under DIR, for packagers.
+    #[command(hide = true)]
+    Dist {
+        dir: PathBuf,
+        /// Where the packaged binary lives (the unit's ExecStart).
+        #[arg(long, value_name = "DIR", default_value = "/usr/bin")]
+        bindir: PathBuf,
+    },
 }
 
 /// The `screenshot.format` an `-o` file name asks for, if its extension is one.
@@ -233,6 +246,8 @@ fn main() -> ExitCode {
         Some(Command::Service(command)) => daemon::service::run(command),
         Some(Command::Doctor) => doctor::run(),
         Some(Command::Setup { wm, apply, yes }) => setup::run(wm, apply, yes),
+        Some(Command::Completions { shell }) => dist::completions(shell, Cli::command()),
+        Some(Command::Dist { dir, bindir }) => dist::run(&dir, &bindir, Cli::command()),
         None => doctor::first_run(),
     };
     report("hoarder", result)

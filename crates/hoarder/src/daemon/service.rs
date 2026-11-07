@@ -46,12 +46,18 @@ fn unit_path() -> Result<PathBuf, (Exit, String)> {
 fn unit_text() -> Result<String, (Exit, String)> {
     let exe = std::env::current_exe()
         .map_err(|e| (Exit::Io, format!("cannot find the hoarder binary: {e}")))?;
+    Ok(unit_for(&exe))
+}
+
+/// The user unit that runs `exe daemon`: what `hoarder service enable`
+/// writes, and (for the packaged binary) what packages ship.
+pub fn unit_for(exe: &std::path::Path) -> String {
     let exe = exe.to_string_lossy();
-    Ok(format!(
-        "# Written by `hoarder service enable`; `hoarder service disable` removes it.\n\
+    format!(
+        "# The Hoarder Daemon; `hoarder service enable|disable` turns it on and off.\n\
          [Unit]\n\
          Description=Hoarder clipboard Daemon\n\
-         Documentation=https://github.com/CPT-Dawn/Hoarder\n\
+         Documentation=https://github.com/CPT-Dawn/Hoarder man:hoarder(1)\n\
          PartOf=graphical-session.target\n\
          After=graphical-session.target\n\
          \n\
@@ -62,7 +68,7 @@ fn unit_text() -> Result<String, (Exit, String)> {
          \n\
          [Install]\n\
          WantedBy=graphical-session.target\n"
-    ))
+    )
 }
 
 /// Run `systemctl --user ARGS`; a failure carries systemctl's own words.
