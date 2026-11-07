@@ -2,11 +2,12 @@
 //! (ADR-0007: smithay-client-toolkit, tiny-skia and cosmic-text, no toolkit).
 //!
 //! [`overlay::run`] shows the Overlay over the Frozen Frames and returns the
-//! Region the user dragged out or the Window they clicked (PLAN.md §4.2).
+//! Target the user picked, a clicked Window included (PLAN.md §4.2).
 
 mod chrome;
 mod geom;
 pub mod overlay;
+mod select;
 mod snap;
 
-pub use overlay::{Outcome, OverlayError, Region};
+pub use overlay::{Options, Outcome, OverlayError, Region};

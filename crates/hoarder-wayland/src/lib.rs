@@ -2,11 +2,13 @@
 //!
 //! [`capture::freeze`] takes the Frozen Frames a Capture is cut from
 //! (PLAN.md §4.1, ADR-0003). [`clipboard::Clipboard`] reads, serves and
-//! clears Selections over data control (PLAN.md §5). [`windows::detect`]
-//! finds the window-geometry provider the Overlay snaps to (PLAN.md §4.2).
+//! clears Selections over data control (PLAN.md §5). [`flash::flash`] is the
+//! optional camera flash. [`windows::detect`] finds the window-geometry
+//! provider the Overlay snaps to (PLAN.md §4.2).
 
 pub mod capture;
 pub mod clipboard;
+pub mod flash;
 pub mod windows;
 
 pub use capture::{
