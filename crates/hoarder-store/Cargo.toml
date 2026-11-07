@@ -12,5 +12,8 @@ authors.workspace = true
 blake3.workspace = true
 rusqlite.workspace = true
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [lints]
 workspace = true
