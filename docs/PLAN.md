@@ -299,8 +299,6 @@ confirm = false           # always enter Refine
 freeze = true             # false = --live
 cursor = false
 window_source = "frame"   # frame | toplevel
-mixed_scale = "upscale"   # upscale | clamp | split
-depth = "auto"            # auto | 8
 sound = false
 flash = false
 on_capture = ""           # shell hook
@@ -315,6 +313,10 @@ quality = 92
 [screenshot.avif]
 quality = 80
 speed = 6
+
+[capture]
+mixed_scale = "upscale"   # upscale | clamp | split
+depth = "auto"            # auto | 8
 
 [pick]
 format = "hex"

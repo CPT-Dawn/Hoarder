@@ -1,4 +1,4 @@
-//! `screenshot.mixed_scale` and `screenshot.depth` (PLAN.md §4.4), on a 1×
+//! `capture.mixed_scale` and `capture.depth` (PLAN.md §4.4), on a 1×
 //! output next to a 2× one, and on a 10-bit output.
 
 mod common;
@@ -138,7 +138,7 @@ fn clamp_keeps_the_region_on_the_output_where_the_drag_started() {
             "-o",
             "-",
             "--set",
-            "screenshot.mixed_scale=clamp",
+            "capture.mixed_scale=clamp",
         ],
     );
     drag_across(&session);
@@ -173,7 +173,7 @@ fn split_saves_one_file_per_output_each_at_its_own_scale() {
             "shot",
             "region",
             "--set",
-            "screenshot.mixed_scale=split",
+            "capture.mixed_scale=split",
             "--set",
             &dir_setting,
             "--set",
@@ -214,7 +214,7 @@ fn split_writes_all_outputs_next_to_the_o_path() {
     let path = session.runtime_dir().join("all.png");
     let out = session
         .command(env!("CARGO_BIN_EXE_hoarder"))
-        .args(["shot", "all", "--set", "screenshot.mixed_scale=split", "-o"])
+        .args(["shot", "all", "--set", "capture.mixed_scale=split", "-o"])
         .arg(&path)
         .output()
         .unwrap();
@@ -277,7 +277,7 @@ fn depth_8_turns_a_10bit_output_into_an_8bit_png() {
         let out = session
             .command(env!("CARGO_BIN_EXE_hoarder"))
             .args(["shot", "all", "-o", "-", "--set"])
-            .arg(format!("screenshot.depth={depth}"))
+            .arg(format!("capture.depth={depth}"))
             .output()
             .unwrap();
         assert!(

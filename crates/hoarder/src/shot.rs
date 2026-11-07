@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::ValueEnum;
-use hoarder_config::{Config, MixedScale, Screenshot, State, StoredRegion, WindowSource};
+use hoarder_config::{Capture, Config, MixedScale, Screenshot, State, StoredRegion, WindowSource};
 use hoarder_ui::{Error as UiError, Options, Outcome, Region, Theme, countdown, overlay};
 use hoarder_wayland::{CaptureError, Frozen, Window};
 
@@ -78,7 +78,7 @@ pub fn run(
         ));
     }
     if list == Some(None) {
-        crate::window::by_title(None, &config.screenshot)?;
+        crate::window::by_title(None, &config.capture)?;
         return Ok(());
     }
     let mut state = State::load();
@@ -104,13 +104,13 @@ pub fn run(
     let started = Instant::now();
     let (cut, name) = match (target, list) {
         (_, Some(title)) => (
-            crate::window::by_title(title, &config.screenshot)?.expect("a title picks a window"),
+            crate::window::by_title(title, &config.capture)?.expect("a title picks a window"),
             target.name(),
         ),
         (Target::All, None) => {
             let frozen = frozen_with_cursor(config)?;
             (
-                cut::cut(&frozen.frames, None, &config.screenshot),
+                cut::cut(&frozen.frames, None, &config.capture),
                 target.name(),
             )
         }
@@ -123,7 +123,7 @@ pub fn run(
             })?;
             let frozen = frozen_with_cursor(config)?;
             (
-                cut::cut(&frozen.frames, Some(&region), &config.screenshot),
+                cut::cut(&frozen.frames, Some(&region), &config.capture),
                 target.name(),
             )
         }
@@ -137,7 +137,7 @@ pub fn run(
                 Some(name) => {
                     let whole = output_region(&frozen, &name)?;
                     (
-                        cut::cut(&frozen.frames, Some(&whole), &config.screenshot),
+                        cut::cut(&frozen.frames, Some(&whole), &config.capture),
                         target.name(),
                     )
                 }
@@ -333,12 +333,13 @@ fn from_overlay(
     config: &Config,
 ) -> Result<(cut::Cut, &'static str), (Exit, String)> {
     let settings = &config.screenshot;
+    let capture = &config.capture;
     let (mut frozen, outcome, cursor) = if live {
         // No Frozen Frames yet to judge the scales by: the Overlay clamps only
         // if the live outputs it covers turn out to differ in scale.
         // The windows as they are now, on the desktop the Overlay goes over.
         let options = Options {
-            clamp_to_output: settings.mixed_scale == MixedScale::Clamp,
+            clamp_to_output: capture.mixed_scale == MixedScale::Clamp,
             windows: windows(),
             ..options.clone()
         };
@@ -355,7 +356,7 @@ fn from_overlay(
         let windows = std::thread::spawn(windows);
         let frozen = freeze()?;
         let options = Options {
-            clamp_to_output: cut::clamps_regions(&frozen.frames, settings),
+            clamp_to_output: cut::clamps_regions(&frozen.frames, capture),
             windows: windows.join().unwrap_or_default(),
             ..options.clone()
         };
@@ -380,24 +381,24 @@ fn from_overlay(
                 height: r.height,
             });
             save_state(state);
-            (cut::cut(&frozen.frames, Some(&r), settings), "region")
+            (cut::cut(&frozen.frames, Some(&r), capture), "region")
         }
         Outcome::Output(name) => {
             let whole = output_region(&frozen, &name)?;
-            (cut::cut(&frozen.frames, Some(&whole), settings), "output")
+            (cut::cut(&frozen.frames, Some(&whole), capture), "output")
         }
-        Outcome::WindowBuffer(window) => (window_buffer(&frozen, &window, settings), "window"),
+        Outcome::WindowBuffer(window) => (window_buffer(&frozen, &window, capture), "window"),
         Outcome::Window(window) if settings.window_source == WindowSource::Toplevel => {
-            (window_buffer(&frozen, &window, settings), "window")
+            (window_buffer(&frozen, &window, capture), "window")
         }
         Outcome::Window(window) => {
             // What you saw: the window's rectangle cut from the Frozen Frames,
             // popups and anything over it included, under the same mixed-scale
             // and depth policies as any Region.
             let region = window_region(&window);
-            (cut::cut(&frozen.frames, Some(&region), settings), "window")
+            (cut::cut(&frozen.frames, Some(&region), capture), "window")
         }
-        Outcome::AllOutputs => (cut::cut(&frozen.frames, None, settings), "all"),
+        Outcome::AllOutputs => (cut::cut(&frozen.frames, None, capture), "all"),
         Outcome::Cancelled => return Err((Exit::Cancelled, "cancelled".into())),
         Outcome::Pixel { .. } => unreachable!("only `hoarder pick` picks pixels"),
     })
@@ -405,7 +406,7 @@ fn from_overlay(
 
 /// `window`'s own buffer; if the compositor cannot give it, say why and
 /// fall back to what the Frozen Frames show of it.
-fn window_buffer(frozen: &Frozen, window: &Window, settings: &Screenshot) -> cut::Cut {
+fn window_buffer(frozen: &Frozen, window: &Window, settings: &Capture) -> cut::Cut {
     crate::window::own_buffer(window, settings).unwrap_or_else(|e| {
         eprintln!("hoarder: taking the window as shown instead of its own buffer: {e}");
         cut::cut(&frozen.frames, Some(&window_region(window)), settings)

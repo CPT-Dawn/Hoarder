@@ -66,7 +66,7 @@ impl Image {
     ///
     /// Outputs at the highest scale among `frames` are copied pixel for pixel.
     /// Outputs at a lower scale are enlarged by nearest neighbour
-    /// (`screenshot.mixed_scale = "upscale"`, PLAN.md §4.4), so no pixel is
+    /// (`capture.mixed_scale = "upscale"`, PLAN.md §4.4), so no pixel is
     /// ever blended.
     pub fn all_outputs(frames: &[&FrozenFrame]) -> Image {
         let parts: Vec<(Image, &FrozenFrame)> =
@@ -163,7 +163,7 @@ impl Image {
     }
 
     /// The same image at 8 bits per channel, each sample rounded to the
-    /// nearest 8-bit value (`screenshot.depth = 8`).
+    /// nearest 8-bit value (`capture.depth = 8`).
     pub fn into_eight_bit(self) -> Image {
         match self.depth {
             Depth::Eight => self,

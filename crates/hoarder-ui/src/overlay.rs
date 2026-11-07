@@ -123,7 +123,7 @@ pub struct Options {
     /// so after [`run`] it holds the user's final choice.
     pub cursor: Cell<bool>,
     /// A selection cannot leave the output where its drag started
-    /// (`screenshot.mixed_scale = "clamp"`). With `run_live`, only when the
+    /// (`capture.mixed_scale = "clamp"`). With `run_live`, only when the
     /// outputs differ in scale.
     pub clamp_to_output: bool,
     /// The windows hovering highlights and a click captures, topmost first,

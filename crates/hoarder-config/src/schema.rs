@@ -14,6 +14,7 @@ use crate::template::NameTemplate;
 pub struct Config {
     pub theme: Theme,
     pub screenshot: Screenshot,
+    pub capture: Capture,
     pub pick: Pick,
     pub clipboard: Clipboard,
     pub history: History,
@@ -75,8 +76,6 @@ pub struct Screenshot {
     pub freeze: bool,
     pub cursor: bool,
     pub window_source: WindowSource,
-    pub mixed_scale: MixedScale,
-    pub depth: Depth,
     pub sound: bool,
     pub flash: bool,
     pub on_capture: String,
@@ -99,8 +98,6 @@ impl Default for Screenshot {
             freeze: true,
             cursor: false,
             window_source: WindowSource::Frame,
-            mixed_scale: MixedScale::Upscale,
-            depth: Depth::Auto,
             sound: false,
             flash: false,
             on_capture: String::new(),
@@ -110,6 +107,15 @@ impl Default for Screenshot {
             avif: Avif::default(),
         }
     }
+}
+
+/// `[capture]` (PLAN.md §4.4): how a Target that spans outputs of
+/// different scales or depths is cut.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Capture {
+    pub mixed_scale: MixedScale,
+    pub depth: Depth,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]

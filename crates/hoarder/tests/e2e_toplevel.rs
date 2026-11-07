@@ -273,7 +273,7 @@ fn a_logical_size_buffer_on_a_fractional_output_follows_mixed_scale() {
     assert_all(&png, GREEN, "enlarged, never blended");
     assert!(stderr.contains("mixed scale"), "the badge: {stderr}");
 
-    let (png, stderr) = take(&["--set", "screenshot.mixed_scale=split"]);
+    let (png, stderr) = take(&["--set", "capture.mixed_scale=split"]);
     assert_eq!((png.width, png.height), (160, 96), "the buffer as it came");
     assert!(!stderr.contains("mixed scale"), "no badge: {stderr}");
 }
