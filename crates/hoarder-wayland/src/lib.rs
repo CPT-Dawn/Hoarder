@@ -10,6 +10,7 @@
 pub mod capture;
 pub mod clipboard;
 pub mod flash;
+pub mod toplevel;
 pub mod watch;
 pub mod windows;
 

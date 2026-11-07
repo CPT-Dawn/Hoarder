@@ -9,6 +9,7 @@ mod image;
 mod notify;
 mod save;
 mod shot;
+mod window;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -57,6 +58,10 @@ enum Command {
         /// No notification for this Capture (`screenshot.notify = false`).
         #[arg(long)]
         no_notify: bool,
+        /// With `window`: list every window, or capture the one titled
+        /// TITLE (a listed line also works), from its own buffer.
+        #[arg(long, value_name = "TITLE", num_args = 0..=1)]
+        list: Option<Option<String>>,
     },
     /// Copy stdin or text to the clipboard (accepts every wl-copy flag).
     Copy(clipboard::CopyArgs),
@@ -123,6 +128,7 @@ fn main() -> ExitCode {
             live,
             delay,
             no_notify,
+            list,
         }) => {
             // Shot flags are one-run overrides, applied after any `--set`.
             let format = format.or_else(|| output.as_deref().and_then(format_of_path));
@@ -137,6 +143,7 @@ fn main() -> ExitCode {
             config::effective(&cli.overrides).and_then(|config| {
                 shot::run(
                     target,
+                    list.as_ref().map(Option::as_deref),
                     shot::When { live, delay },
                     output.as_deref(),
                     &config,
