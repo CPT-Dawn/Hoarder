@@ -2,6 +2,7 @@
 //! laid out as one image, and encoded (PLAN.md §4.1 steps 3, 5 and 7).
 
 use hoarder_config::PngLevel;
+use hoarder_ui::Region;
 use hoarder_wayland::{FrozenFrame, Transform};
 
 /// Bits per channel of an [`Image`].
@@ -75,17 +76,16 @@ impl Image {
         let scale_of = |image: &Image, frame: &FrozenFrame| {
             image.width as f64 / frame.logical.width.max(1) as f64
         };
-        let scale = parts
-            .iter()
-            .map(|(i, f)| scale_of(i, f))
-            .fold(0.0_f64, f64::max);
+        let Layout {
+            scale,
+            min_x,
+            min_y,
+        } = Layout::of(frames);
         let depth = if parts.iter().any(|(i, _)| i.depth == Depth::Sixteen) {
             Depth::Sixteen
         } else {
             Depth::Eight
         };
-        let min_x = parts.iter().map(|(_, f)| f.logical.x).min().unwrap_or(0);
-        let min_y = parts.iter().map(|(_, f)| f.logical.y).min().unwrap_or(0);
 
         let placed: Vec<(&Image, u32, u32, u32, u32)> = parts
             .iter()
@@ -126,9 +126,38 @@ impl Image {
         canvas
     }
 
+    /// The Region cut from All Outputs: every pixel exactly as frozen (see
+    /// [`all_outputs`](Self::all_outputs) for outputs at a lower scale).
+    pub fn region(frames: &[FrozenFrame], region: &Region) -> Image {
+        let all = Image::all_outputs(frames);
+        let Layout {
+            scale,
+            min_x,
+            min_y,
+        } = Layout::of(frames);
+        let to_px = |v: f64, min: i32, limit: u32| {
+            ((v - min as f64) * scale).round().clamp(0.0, limit as f64) as u32
+        };
+        let x0 = to_px(region.x, min_x, all.width);
+        let y0 = to_px(region.y, min_y, all.height);
+        let x1 = to_px(region.x + region.width, min_x, all.width);
+        let y1 = to_px(region.y + region.height, min_y, all.height);
+        all.crop(x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0))
+    }
+
+    fn crop(&self, x0: u32, y0: u32, width: u32, height: u32) -> Image {
+        let mut out = Image::new(width, height, self.depth);
+        let row = width as usize * 3;
+        for y in 0..height {
+            let s = self.index(x0, y0 + y);
+            let d = out.index(0, y);
+            out.samples[d..d + row].copy_from_slice(&self.samples[s..s + row]);
+        }
+        out
+    }
+
     /// Encode as an RGB PNG: 8-bit, or 16-bit for 10-bit sources, with the
     /// fast compression the clipboard wants.
-    #[allow(dead_code, reason = "the clipboard copy (#60) encodes with it")]
     pub fn write_png(&self, out: impl std::io::Write) -> Result<(), png::EncodingError> {
         self.write_png_with(out, PngLevel::Fast)
     }
@@ -192,5 +221,28 @@ fn upright_position(transform: Transform, bx: u32, by: u32, w: u32, h: u32) -> (
         (upright_width - 1 - x, y)
     } else {
         (x, y)
+    }
+}
+
+/// How All Outputs map onto one image: logical layout coordinates times the
+/// highest output scale, with the top-left output corner at the origin.
+#[derive(Debug, Clone, Copy)]
+struct Layout {
+    scale: f64,
+    min_x: i32,
+    min_y: i32,
+}
+
+impl Layout {
+    fn of(frames: &[FrozenFrame]) -> Layout {
+        let scale = frames
+            .iter()
+            .map(|f| f.upright_size().0 as f64 / f.logical.width.max(1) as f64)
+            .fold(0.0_f64, f64::max);
+        Layout {
+            scale,
+            min_x: frames.iter().map(|f| f.logical.x).min().unwrap_or(0),
+            min_y: frames.iter().map(|f| f.logical.y).min().unwrap_or(0),
+        }
     }
 }

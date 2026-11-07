@@ -1,3 +1,4 @@
+mod clipboard;
 mod config;
 mod encode;
 mod image;
@@ -25,6 +26,7 @@ enum Command {
     /// Take a Capture.
     Shot {
         /// What to capture.
+        #[arg(default_value = "region")]
         target: shot::Target,
         /// Write the image to PATH, or to stdout with `-`, instead of saving it
         /// to `screenshot.dir`.
@@ -41,6 +43,13 @@ enum Command {
         #[arg(long)]
         no_copy: bool,
     },
+    /// Copy stdin or text to the clipboard (accepts every wl-copy flag).
+    Copy(clipboard::CopyArgs),
+    /// Paste the clipboard to stdout (accepts every wl-paste flag).
+    Paste(clipboard::PasteArgs),
+    /// Serve an Offer read from stdin; started by Hoarder itself.
+    #[command(name = clipboard::SERVE_SUBCOMMAND, hide = true)]
+    ServeOffer(clipboard::ServeArgs),
     /// Read, change and check `config.toml`.
     #[command(subcommand)]
     Config(config::ConfigCommand),
@@ -61,6 +70,9 @@ fn format_of_path(path: &std::path::Path) -> Option<String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exit {
     Success = 0,
+    /// Cancelled by the user (Esc or right-click in the Overlay), or (for
+    /// `paste`) nothing to paste.
+    Cancelled = 1,
     /// Bad arguments or an invalid config.
     Usage = 2,
     /// Unsupported compositor or protocol.
@@ -96,6 +108,9 @@ fn main() -> ExitCode {
             config::effective(&cli.overrides)
                 .and_then(|config| shot::run(target, output.as_deref(), &config))
         }
+        Some(Command::Copy(args)) => clipboard::copy(args),
+        Some(Command::Paste(args)) => clipboard::paste(args),
+        Some(Command::ServeOffer(args)) => clipboard::serve_child(args),
         Some(Command::Config(command)) => config::run(command, &cli.overrides),
         None => Ok(()),
     };

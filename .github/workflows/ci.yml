@@ -60,7 +60,7 @@ jobs:
     steps:
       - name: Install Sway, grim, wl-clipboard, libavif and Rust
         run: |
-          pacman -Syu --noconfirm --needed base-devel git rust sway grim wl-clipboard libavif xkeyboard-config
+          pacman -Syu --noconfirm --needed base-devel git rust sway grim wl-clipboard libavif xdg-utils shared-mime-info file xkeyboard-config
           # Arch gives sway cap_sys_nice, which an unprivileged container cannot
           # grant, so exec fails with EPERM. Headless tests don't need it.
           setcap -r "$(command -v sway)"
@@ -76,6 +76,9 @@ jobs:
           chown -R tester: "$CARGO_HOME" "$GITHUB_WORKSPACE"
       - name: cargo test
         run: runuser -u tester -- cargo test --workspace --locked
+      # Latency budgets mean nothing in a debug build, so they run optimised.
+      - name: cargo test --release (timing budgets)
+        run: runuser -u tester -- cargo test --release --locked -p hoarder --test e2e_shot_clipboard 150_ms
 
   deny:
     name: cargo-deny

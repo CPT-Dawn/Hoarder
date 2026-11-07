@@ -9,6 +9,13 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+cosmic-text.workspace = true
+hoarder-wayland.workspace = true
+rustix.workspace = true
+smithay-client-toolkit.workspace = true
+tiny-skia.workspace = true
+wayland-client.workspace = true
+wayland-protocols.workspace = true
 
 [lints]
 workspace = true

@@ -11,6 +11,7 @@ authors.workspace = true
 [dependencies]
 clap.workspace = true
 hoarder-config.workspace = true
+hoarder-ui.workspace = true
 hoarder-wayland.workspace = true
 image.workspace = true
 jiff.workspace = true

@@ -281,3 +281,54 @@ fn an_unknown_format_is_a_usage_error() {
 
     assert_eq!(out.status.code(), Some(2), "{out:?}");
 }
+
+#[test]
+fn the_clipboard_has_the_capture_while_a_slow_save_is_still_encoding() {
+    let session = Session::start(&[OutputSpec::new(1280, 720)]).unwrap();
+    let painter = session.client().unwrap();
+    painter
+        .paint(session.output("HEADLESS-1"), &Pattern::Ramp)
+        .unwrap();
+    let set = |kv: &str| ["--set".to_owned(), kv.to_owned()];
+    let args = [
+        set("screenshot.avif.speed=10"),
+        set("screenshot.avif.quality=100"),
+    ]
+    .concat();
+
+    // Even at its fastest, AVIF takes far longer than a PNG for the clipboard.
+    let mut shot = session
+        .command(env!("CARGO_BIN_EXE_hoarder"))
+        .args(args)
+        .args(["shot", "all", "--format", "avif"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let on_clipboard = loop {
+        let types = session
+            .command("wl-paste")
+            .arg("--list-types")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        if types.stdout == b"image/png\n" {
+            break true;
+        }
+        if std::time::Instant::now() > deadline {
+            break false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    let still_saving = shot.try_wait().unwrap().is_none();
+    let status = shot.wait().unwrap();
+
+    assert!(on_clipboard, "the Capture never reached the clipboard");
+    assert!(still_saving, "the clipboard waited for the AVIF encode");
+    assert!(status.success(), "{status}");
+    let saved = home(&session).join("Pictures/Screenshots");
+    let files: Vec<_> = std::fs::read_dir(saved).unwrap().collect();
+    assert_eq!(files.len(), 1, "the AVIF was still saved");
+}
