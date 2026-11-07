@@ -25,7 +25,7 @@ Each test starts its own Sway in a private directory under `/tmp`, so tests run 
 ## The harness (`crates/hoarder-e2e`)
 
 ```rust
-use hoarder_e2e::{keys, BitDepth, OutputSpec, Pattern, Reply, Selection, Session, Transform};
+use hoarder_e2e::{keys, BitDepth, OutputSpec, Pattern, Reply, Selection, Session, TextField, Transform};
 
 let session = Session::start(&[
     OutputSpec::new(1920, 1080),                               // HEADLESS-1
@@ -47,6 +47,7 @@ app.set_selection_replying(Selection::Clipboard, vec![                // a slow 
 ])?;
 assert!(app.owns_selection(Selection::Clipboard)?);                    // not cancelled by anyone
 app.open_window("org.example.app")?;                                  // focused probe window
+app.open_text_field("foot", TextField::Terminal)?;                    // pastes on Ctrl+Shift+V
 let frame = app.capture(session.output("HEADLESS-2"))?;               // raw buffer, native depth
 app.exit();                                                           // like the app quitting
 
@@ -56,6 +57,7 @@ input.move_to(session.output("HEADLESS-1"), 100.0, 50.0)?;
 input.click(keys::BTN_LEFT)?;
 input.chord(&[keys::KEY_LEFTCTRL, keys::KEY_V])?;
 let events = app.take_input_events()?; // what the probe window received
+let typed = app.text()?;               // what its text fields pasted
 
 let image = session.screenshot("HEADLESS-1")?; // grim: what the user sees
 ```
@@ -67,6 +69,7 @@ What it guarantees:
 - **Selections**: set over `ext-data-control-v1`, so no focus is needed; payloads of any size are written off-thread. `exit()` (or dropping the client) closes the connection, and the compositor clears the Selection exactly as it does when a real app quits. `Reply` scripts how each type answers a paste (`Now`, `After(delay)`, `Never`), which is how the Reader's time limits are tested. `owns_selection` says whether the compositor has cancelled the client's source: the independent check that the Daemon never takes a live app's Selection.
 - **Input**: `wlr-virtual-pointer` with absolute motion in output-logical coordinates, and `zwp-virtual-keyboard` with a US keymap. The harness tracks modifiers itself, because the protocol leaves that to the client. Every call returns after the compositor has processed it.
 - **Probe windows**: plain `xdg_toplevel`s that Sway tiles and focuses like any new app, filled with one colour (grey `#808080`, or any `Rgb8` through `open_window_coloured`, so stacked windows can be told apart in a Capture). They record `InputEvent`s (enter, motion, buttons, keys, modifiers). Float and place them with `Session::swaymsg`, e.g. `[app_id=…] floating enable, resize set 200 120, move absolute position 100 60`.
+- **Text fields**: probe windows that paste like real apps, through `wl_data_device`, so they only see the clipboard while focused. A `TextField::Editor` pastes on Ctrl+V; a `TextField::Terminal` only on Ctrl+Shift+V (its Ctrl+V is a literal `^V`). `Client::text` returns everything they pasted.
 
 Every helper call times out after 10 s with an error rather than hanging the test.
 
