@@ -1,8 +1,12 @@
 //! `hoarder copy` / `hoarder paste` against wl-clipboard: the same cases run
-//! with both tools, in every pairing, and must agree byte for byte.
+//! with both tools, in every pairing, and must agree byte for byte. Hoarder
+//! plays its part as `hoarder copy`/`paste` and as the Compat shims (a
+//! `wl-copy`/`wl-paste` symlink to `hoarder`), with and without the Daemon.
 
 use std::fs::File;
 use std::io::Write as _;
+use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
@@ -15,6 +19,8 @@ const HOARDER: &str = env!("CARGO_BIN_EXE_hoarder");
 enum Tool {
     WlClipboard,
     Hoarder,
+    /// `hoarder` behind a symlink named `wl-copy` or `wl-paste`.
+    Shim,
 }
 
 impl Tool {
@@ -26,6 +32,7 @@ impl Tool {
                 cmd.arg("copy");
                 cmd
             }
+            Tool::Shim => session.command(shim(session, "wl-copy")),
         }
     }
 
@@ -37,16 +44,61 @@ impl Tool {
                 cmd.arg("paste");
                 cmd
             }
+            Tool::Shim => session.command(shim(session, "wl-paste")),
         }
     }
 }
 
-const PAIRS: [(Tool, Tool); 4] = [
+/// A symlink to `hoarder` called `name`, as `hoarder-wl-compat` installs.
+fn shim(session: &Session, name: &str) -> PathBuf {
+    let dir = session.runtime_dir().join("shims");
+    let link = dir.join(name);
+    if !link.exists() {
+        std::fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(HOARDER, &link).unwrap();
+    }
+    link
+}
+
+const PAIRS: [(Tool, Tool); 7] = [
     (Tool::WlClipboard, Tool::WlClipboard),
     (Tool::Hoarder, Tool::WlClipboard),
     (Tool::WlClipboard, Tool::Hoarder),
     (Tool::Hoarder, Tool::Hoarder),
+    (Tool::Shim, Tool::WlClipboard),
+    (Tool::WlClipboard, Tool::Shim),
+    (Tool::Shim, Tool::Shim),
 ];
+
+/// A running `hoarder daemon`, killed when dropped.
+struct Daemon(Child);
+
+impl Daemon {
+    fn start(session: &Session) -> Daemon {
+        let child = session
+            .command(HOARDER)
+            .arg("daemon")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("start hoarder daemon");
+        let socket = session.runtime_dir().join("hoarder/hoarder.sock");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while UnixStream::connect(&socket).is_err() {
+            assert!(Instant::now() < deadline, "daemon socket never appeared");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        Daemon(child)
+    }
+}
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
 
 /// One step of a case: a copy or a paste, with its arguments.
 #[derive(Debug, Clone)]
@@ -115,8 +167,10 @@ fn wait_with_timeout(child: &mut Child, limit: Duration) -> ExitStatus {
 
 /// Run `steps` with `copier` and `paster`, starting from an empty clipboard.
 fn play(session: &Session, steps: &[Step], copier: Tool, paster: Tool) -> Vec<Outcome> {
+    // Through the Daemon when it runs: a clipboard wl-copy cleared would be
+    // restored by Takeover.
     for primary in [false, true] {
-        let mut clear = session.command("wl-copy");
+        let mut clear = Tool::Hoarder.copy(session);
         clear.arg("--clear");
         if primary {
             clear.arg("--primary");
@@ -165,112 +219,137 @@ fn assert_parity(session: &Session, name: &str, steps: &[Step]) {
 #[test]
 fn copy_and_paste_agree_with_wl_clipboard() {
     let session = Session::start_default().unwrap();
-    let cases: &[(&str, &[Step])] = &[
-        ("nothing copied", &[Paste(&[]), Paste(&["--list-types"])]),
-        (
-            "text from arguments",
-            &[
-                Copy(&["hello", "world"], None),
-                Paste(&[]),
-                Paste(&["-l"]),
-                Paste(&["-n"]),
-            ],
-        ),
-        (
-            "text from stdin keeps its newline",
-            &[
-                Copy(&[], Some(b"line\n")),
-                Paste(&[]),
-                Paste(&["--no-newline"]),
-            ],
-        ),
-        (
-            "trim newline",
-            &[Copy(&["-n"], Some(b"line\n\n")), Paste(&["-n"])],
-        ),
-        (
-            "empty stdin",
-            &[Copy(&[], Some(b"")), Paste(&[]), Paste(&["-l"])],
-        ),
-        (
-            "png is sniffed and pasted raw",
-            &[
-                Copy(&[], Some(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR")),
-                Paste(&["-l"]),
-                Paste(&[]),
-                Paste(&["-t", "image"]),
-                Paste(&["-t", "text"]),
-            ],
-        ),
-        (
-            "binary is an octet stream",
-            &[
-                Copy(&[], Some(b"\x00\x01\xfe\xffbinary\x00")),
-                Paste(&["-l"]),
-                Paste(&[]),
-            ],
-        ),
-        (
-            "explicit non-text type",
-            &[
-                Copy(&["-t", "foo/bar"], Some(b"xyz")),
-                Paste(&["-l"]),
-                Paste(&[]),
-                Paste(&["-t", "foo/bar"]),
-                Paste(&["-t", "text"]),
-            ],
-        ),
-        (
-            "explicit text type adds aliases",
-            &[
-                Copy(&["--type", "text/html"], Some(b"<b>x</b>")),
-                Paste(&["-l"]),
-                Paste(&["-t", "text"]),
-                Paste(&["-t", "STRING"]),
-                Paste(&["-t", "text/html"]),
-                Paste(&["-t", "html"]),
-                Paste(&["-t", "image/png"]),
-            ],
-        ),
-        (
-            "sensitive",
-            &[
-                Copy(&["--sensitive", "hunter2"], None),
-                Paste(&["-l"]),
-                Paste(&[]),
-            ],
-        ),
-        (
-            "clear",
-            &[
-                Copy(&["gone"], None),
-                Copy(&["-c"], None),
-                Paste(&[]),
-                Paste(&["-l"]),
-            ],
-        ),
-        (
-            "primary is separate",
-            &[
-                Copy(&["-p", "prim"], None),
-                Paste(&["-p"]),
-                Paste(&[]),
-                Copy(&["clip"], None),
-                Paste(&["--primary"]),
-                Copy(&["--primary", "--clear"], None),
-                Paste(&["-p"]),
-                Paste(&[]),
-            ],
-        ),
-        (
-            "paste once",
-            &[Copy(&["-o", "once"], None), Paste(&[]), Paste(&[])],
-        ),
-    ];
-    for (name, steps) in cases {
+    for (name, steps) in CASES {
         assert_parity(&session, name, steps);
     }
 }
+
+/// With the Daemon serving what Hoarder copies, every case still behaves
+/// as wl-copy → wl-paste does without one.
+#[test]
+fn copying_through_the_daemon_agrees_with_wl_clipboard() {
+    let session = Session::start_default().unwrap();
+    let reference: Vec<Vec<Outcome>> = CASES
+        .iter()
+        .map(|(_, steps)| play(&session, steps, Tool::WlClipboard, Tool::WlClipboard))
+        .collect();
+    let _daemon = Daemon::start(&session);
+    for ((name, steps), reference) in CASES.iter().zip(reference) {
+        for copier in [Tool::Hoarder, Tool::Shim] {
+            for paster in [Tool::WlClipboard, Tool::Hoarder, Tool::Shim] {
+                let got = play(&session, steps, copier, paster);
+                assert_eq!(
+                    got, reference,
+                    "case {name:?}: {copier:?} copy → {paster:?} paste with the Daemon up \
+                     disagrees with wl-clipboard"
+                );
+            }
+        }
+    }
+}
+
+const CASES: &[(&str, &[Step])] = &[
+    ("nothing copied", &[Paste(&[]), Paste(&["--list-types"])]),
+    (
+        "text from arguments",
+        &[
+            Copy(&["hello", "world"], None),
+            Paste(&[]),
+            Paste(&["-l"]),
+            Paste(&["-n"]),
+        ],
+    ),
+    (
+        "text from stdin keeps its newline",
+        &[
+            Copy(&[], Some(b"line\n")),
+            Paste(&[]),
+            Paste(&["--no-newline"]),
+        ],
+    ),
+    (
+        "trim newline",
+        &[Copy(&["-n"], Some(b"line\n\n")), Paste(&["-n"])],
+    ),
+    (
+        "empty stdin",
+        &[Copy(&[], Some(b"")), Paste(&[]), Paste(&["-l"])],
+    ),
+    (
+        "png is sniffed and pasted raw",
+        &[
+            Copy(&[], Some(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR")),
+            Paste(&["-l"]),
+            Paste(&[]),
+            Paste(&["-t", "image"]),
+            Paste(&["-t", "text"]),
+        ],
+    ),
+    (
+        "binary is an octet stream",
+        &[
+            Copy(&[], Some(b"\x00\x01\xfe\xffbinary\x00")),
+            Paste(&["-l"]),
+            Paste(&[]),
+        ],
+    ),
+    (
+        "explicit non-text type",
+        &[
+            Copy(&["-t", "foo/bar"], Some(b"xyz")),
+            Paste(&["-l"]),
+            Paste(&[]),
+            Paste(&["-t", "foo/bar"]),
+            Paste(&["-t", "text"]),
+        ],
+    ),
+    (
+        "explicit text type adds aliases",
+        &[
+            Copy(&["--type", "text/html"], Some(b"<b>x</b>")),
+            Paste(&["-l"]),
+            Paste(&["-t", "text"]),
+            Paste(&["-t", "STRING"]),
+            Paste(&["-t", "text/html"]),
+            Paste(&["-t", "html"]),
+            Paste(&["-t", "image/png"]),
+        ],
+    ),
+    (
+        "sensitive",
+        &[
+            Copy(&["--sensitive", "hunter2"], None),
+            Paste(&["-l"]),
+            Paste(&[]),
+        ],
+    ),
+    (
+        "clear",
+        &[
+            Copy(&["gone"], None),
+            Copy(&["-c"], None),
+            Paste(&[]),
+            Paste(&["-l"]),
+        ],
+    ),
+    (
+        "primary is separate",
+        &[
+            Copy(&["-p", "prim"], None),
+            Paste(&["-p"]),
+            Paste(&[]),
+            Copy(&["clip"], None),
+            Paste(&["--primary"]),
+            Copy(&["--primary", "--clear"], None),
+            Paste(&["-p"]),
+            Paste(&[]),
+        ],
+    ),
+    (
+        "paste once",
+        &[Copy(&["-o", "once"], None), Paste(&[]), Paste(&[])],
+    ),
+];
 
 /// Wait until `path` holds `lines` complete (newline-terminated) lines, then
 /// return its text. A line still being written does not count, or the
@@ -352,6 +431,7 @@ fn paste_watch_agrees_with_wl_paste() {
     let session = Session::start_default().unwrap();
     let reference = watch_log(&session, Tool::WlClipboard);
     assert_eq!(watch_log(&session, Tool::Hoarder), reference);
+    assert_eq!(watch_log(&session, Tool::Shim), reference);
 }
 
 /// `copy --foreground` serves from the process itself until replaced.
@@ -395,6 +475,7 @@ fn copy_foreground_agrees_with_wl_copy() {
     let session = Session::start_default().unwrap();
     foreground_serves_until_replaced(&session, Tool::WlClipboard);
     foreground_serves_until_replaced(&session, Tool::Hoarder);
+    foreground_serves_until_replaced(&session, Tool::Shim);
 }
 
 #[test]

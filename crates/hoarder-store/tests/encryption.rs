@@ -34,6 +34,9 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 const SECRET_TEXT: &[u8] = b"correct horse battery staple, the vault code";
 const SECRET_FILE: &[u8] = b"file:///home/me/tax-return-2026.pdf";
 
+/// A stand-in thumbnail (the Store keeps whatever bytes it is given).
+const THUMB: &[u8] = b"THUMBNAIL-OF-A-PRIVATE-SCREENSHOT";
+
 /// A representation too big to live inline, so it becomes a blob file.
 fn big() -> Vec<u8> {
     let mut big = b"BIGSECRET".repeat(40_000);
@@ -48,15 +51,18 @@ fn fill(store: &mut Store) {
     store
         .record(&[("text/uri-list", SECRET_FILE)], None, 2_000)
         .unwrap();
-    store
+    let id = store
         .record(&[("application/octet-stream", &big())], None, 3_000)
-        .unwrap();
+        .unwrap()
+        .id;
+    store.set_thumb(id, THUMB).unwrap();
 }
 
 fn assert_no_plaintext(dir: &Path) {
     let disk = disk(dir);
     let plain_hash = blake3::hash(SECRET_TEXT);
-    let needles: [&[u8]; 6] = [
+    let needles: [&[u8]; 7] = [
+        b"THUMBNAIL-OF",
         &SECRET_TEXT[..20],
         b"vault code",
         b"tax-return",
@@ -75,26 +81,27 @@ fn assert_no_plaintext(dir: &Path) {
     // Likewise a blob named by the plain blake3 of its content.
     let plain_name = blake3::hash(&big()).to_hex().to_string();
     assert!(!dir.join("blobs").join(plain_name).exists());
-    // The full-text index on disk is a trigram soup the byte scan can't
-    // see into; ask it directly, as anyone holding the file could.
-    for word in ["vault", "horse", "tax-return"] {
+    // The full-text indexes on disk are trigram soup the byte scan can't
+    // see into; list their terms directly, as anyone holding the file could.
+    for index in ["clips_fts", "clips_text"] {
         assert_eq!(
-            fts_hits(dir, word),
+            index_terms(dir, index),
             0,
-            "{word:?} is in the on-disk search index"
+            "the on-disk {index} index still has terms"
         );
     }
 }
 
-/// Matches for `word` in the on-disk full-text index, read straight off the file.
-fn fts_hits(dir: &Path, word: &str) -> i64 {
+/// How many distinct terms the on-disk full-text `index` holds, read
+/// straight off the file through fts5vocab.
+fn index_terms(dir: &Path, index: &str) -> i64 {
     let db = rusqlite::Connection::open(dir.join("history.db")).unwrap();
-    db.query_row(
-        "SELECT count(*) FROM main.clips_fts WHERE clips_fts MATCH ?1",
-        [format!("\"{word}\"")],
-        |r| r.get(0),
-    )
-    .unwrap()
+    db.execute_batch(&format!(
+        "CREATE VIRTUAL TABLE temp.vocab USING fts5vocab(main, {index}, 'row');"
+    ))
+    .unwrap();
+    db.query_row("SELECT count(*) FROM temp.vocab", [], |r| r.get(0))
+        .unwrap()
 }
 
 fn assert_reads_back(store: &Store) {
@@ -113,6 +120,17 @@ fn assert_reads_back(store: &Store) {
     assert_eq!(reprs[0].1, big());
     let reprs = store.representations(clips[2].id).unwrap().unwrap();
     assert_eq!(reprs, [("text/plain".to_owned(), SECRET_TEXT.to_vec())]);
+    assert_eq!(store.thumb(clips[0].id).unwrap().as_deref(), Some(THUMB));
+    let found = |query: &str| -> Vec<i64> {
+        store
+            .search(query, 10)
+            .unwrap()
+            .iter()
+            .map(|c| c.id)
+            .collect()
+    };
+    assert_eq!(found("battery staple"), [clips[2].id]);
+    assert_eq!(found("TAX-RETURN"), [clips[1].id]);
 }
 
 /// Close the Store (folding its WAL in) and open it again.
@@ -165,7 +183,8 @@ fn turning_encryption_on_migrates_existing_history_and_scrubs_the_plaintext() {
     fill(&mut store);
     let mut store = reopen(dir.path(), store);
     assert!(contains(&disk(dir.path()), b"vault code"), "test premise");
-    assert_eq!(fts_hits(dir.path(), "vault"), 1, "test premise");
+    assert!(index_terms(dir.path(), "clips_fts") > 0, "test premise");
+    assert!(index_terms(dir.path(), "clips_text") > 0, "test premise");
 
     let key = Key::generate();
     store.encrypt(key.clone()).unwrap();
@@ -223,4 +242,28 @@ fn a_key_survives_a_round_trip_through_its_secret_string() {
     store.unlock(Key::parse(&secret).unwrap()).unwrap();
     assert_reads_back(&store);
     assert!(Key::parse("not a key").is_err());
+}
+
+#[test]
+fn search_reaches_past_the_preview_of_an_encrypted_text_clip() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = Key::generate();
+    let mut store = Store::open(dir.path()).unwrap();
+    store.encrypt(key.clone()).unwrap();
+    let long = format!("{} buried-needle at the end", "filler ".repeat(100));
+    let id = store
+        .record(&[("text/plain", long.as_bytes())], None, 1)
+        .unwrap()
+        .id;
+    let mut store = reopen(dir.path(), store);
+    assert!(matches!(store.search("buried", 10), Err(Error::Locked)));
+    store.unlock(key).unwrap();
+    let found: Vec<i64> = store
+        .search("buried-needle", 10)
+        .unwrap()
+        .iter()
+        .map(|c| c.id)
+        .collect();
+    assert_eq!(found, [id]);
+    assert_no_plaintext(dir.path());
 }

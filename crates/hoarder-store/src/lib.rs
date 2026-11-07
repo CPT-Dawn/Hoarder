@@ -11,10 +11,11 @@
 //!
 //! An encrypted History ([`Store::encrypt`]) seals every piece of content
 //! with age to the [`Key`]'s X25519 recipient: each inline representation,
-//! each blob file, each thumbnail and each preview. Previews stay searchable
-//! through a full-text index that lives only in memory (`temp.clips_fts`,
-//! rebuilt from the sealed previews by [`Store::unlock`]); the on-disk index
-//! then holds nothing. Dedup hashes and blob file names are blake3 keyed with
+//! each blob file, each thumbnail, and each Clip's preview and search text.
+//! Search keeps working through full-text indexes that live only in memory
+//! (`temp.clips_fts` and `temp.clips_text`, which shadow the on-disk ones by
+//! name and are rebuilt from the sealed text by [`Store::unlock`]); the
+//! on-disk indexes then hold nothing. Dedup hashes and blob file names are blake3 keyed with
 //! a key derived from the History key, so they confirm nothing to someone
 //! hashing a guess. What stays readable is metadata: times, pinned, the
 //! source app, kind, MIME types and sizes.
@@ -80,7 +81,19 @@ CREATE TRIGGER clips_fts_update AFTER UPDATE OF preview ON clips BEGIN
 END;
 "#,
     r#"
-ALTER TABLE clips ADD COLUMN preview_sealed BLOB;
+CREATE VIRTUAL TABLE clips_text USING fts5(
+    body, content='', contentless_delete=1, tokenize='trigram'
+);
+INSERT INTO clips_text(rowid, body) SELECT id, preview FROM clips;
+CREATE TRIGGER clips_text_delete AFTER DELETE ON clips BEGIN
+    DELETE FROM clips_text WHERE rowid = old.id;
+END;
+"#,
+    // Encryption at rest: `sealed` is the age-sealed preview and search
+    // text of a Clip in an encrypted History; `encryption` names the
+    // recipient it is sealed to (one row) or is empty.
+    r#"
+ALTER TABLE clips ADD COLUMN sealed BLOB;
 CREATE TABLE encryption(
     id INTEGER PRIMARY KEY CHECK (id = 1),
     recipient TEXT NOT NULL
@@ -267,7 +280,7 @@ impl Store {
     ) -> Result<Recorded> {
         let key = self.sealer()?.cloned();
         let key = key.as_ref();
-        let (kind, preview, hash) = clip::describe(reprs, key);
+        let (kind, preview, hash, text) = clip::describe_with_text(reprs, key);
         let tx = self.db.transaction()?;
         let now = next_time(&tx, now)?;
         let existing: Option<i64> = tx
@@ -284,20 +297,20 @@ impl Store {
             return Ok(Recorded { id, new: false });
         }
         let size: usize = reprs.iter().map(|(_, d)| d.len()).sum();
-        let (plain_preview, sealed_preview) = match key {
-            Some(key) => ("", Some(key.seal(preview.as_bytes())?)),
+        let (plain_preview, sealed) = match key {
+            Some(key) => ("", Some(key.seal(&seal_text(&preview, &text))?)),
             None => (preview.as_str(), None),
         };
         tx.execute(
             "INSERT INTO clips(created_at, last_used_at, source_app, kind, preview,
-                               preview_sealed, size, hash)
+                               sealed, size, hash)
              VALUES (?1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 now,
                 source_app,
                 kind.as_str(),
                 plain_preview,
-                sealed_preview,
+                sealed,
                 size as i64,
                 &hash[..]
             ],
@@ -307,6 +320,15 @@ impl Store {
             tx.execute(
                 "INSERT INTO temp.clips_fts(rowid, preview) VALUES (?1, ?2)",
                 params![id, preview],
+            )?;
+            tx.execute(
+                "INSERT INTO temp.clips_text(rowid, body) VALUES (?1, ?2)",
+                params![id, text],
+            )?;
+        } else {
+            tx.execute(
+                "INSERT INTO main.clips_text(rowid, body) VALUES (?1, ?2)",
+                params![id, text],
             )?;
         }
         for (ord, (mime, data)) in reprs.iter().enumerate() {
@@ -328,6 +350,33 @@ impl Store {
             .prepare_cached("SELECT id FROM clips ORDER BY last_used_at DESC, id DESC LIMIT ?1")?;
         let ids = stmt
             .query_map([limit.min(i64::MAX as usize) as i64], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<i64>>>()?;
+        ids.into_iter()
+            .filter_map(|id| self.clip(id).transpose())
+            .collect()
+    }
+
+    /// Up to `limit` Clips whose text contains `query` (case-insensitive),
+    /// most recently used first. Text Clips are searched through their
+    /// first 64 KB, not just their preview; other Clips through their
+    /// preview. Queries under three characters match nothing (the trigram
+    /// index cannot answer them; the Picker's fuzzy match covers those).
+    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Clip>> {
+        // Under encryption `clips_text` is the in-memory index.
+        self.sealer()?;
+        if query.chars().count() < 3 {
+            return Ok(Vec::new());
+        }
+        let phrase = format!("\"{}\"", query.replace('"', "\"\""));
+        let mut stmt = self.db.prepare_cached(
+            "SELECT c.id FROM clips_text JOIN clips c ON c.id = clips_text.rowid
+             WHERE clips_text MATCH ?1
+             ORDER BY c.last_used_at DESC, c.id DESC LIMIT ?2",
+        )?;
+        let ids = stmt
+            .query_map(params![phrase, limit.min(i64::MAX as usize) as i64], |r| {
+                r.get(0)
+            })?
             .collect::<rusqlite::Result<Vec<i64>>>()?;
         ids.into_iter()
             .filter_map(|id| self.clip(id).transpose())
@@ -397,6 +446,30 @@ impl Store {
             )?
             .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Keep `png` as a Clip's thumbnail, replacing any it had.
+    pub fn set_thumb(&mut self, id: i64, png: &[u8]) -> Result<()> {
+        let sealed = self.sealer()?.map(|key| key.seal(png)).transpose()?;
+        self.db.execute(
+            "INSERT OR REPLACE INTO thumbs(clip_id, png) VALUES (?1, ?2)",
+            params![id, sealed.as_deref().unwrap_or(png)],
+        )?;
+        Ok(())
+    }
+
+    /// A Clip's thumbnail, if it has one.
+    pub fn thumb(&self, id: i64) -> Result<Option<Vec<u8>>> {
+        let key = self.sealer()?;
+        let png: Option<Vec<u8>> = self
+            .db
+            .prepare_cached("SELECT png FROM thumbs WHERE clip_id = ?1")?
+            .query_row([id], |r| r.get(0))
+            .optional()?;
+        match (png, key) {
+            (Some(png), Some(key)) => key.open(&png).map(Some),
+            (png, _) => Ok(png),
+        }
     }
 
     /// Mark a Clip used at `now` (a Restore), moving it to the top.
@@ -501,30 +574,37 @@ impl Store {
         blob_path(&self.blobs, hash)
     }
 
-    /// Rebuild the in-memory search index of an unlocked encrypted History
-    /// from its sealed previews. Deleting a Clip by any path drops its entry.
+    /// Rebuild the in-memory search indexes of an unlocked encrypted History
+    /// from its sealed text. Deleting a Clip by any path drops its entries.
     fn index_in_memory(&self) -> Result<()> {
         let Some(key) = self.sealer()? else {
             return Ok(());
         };
         self.db.execute_batch(
             "DROP TABLE IF EXISTS temp.clips_fts;
+             DROP TABLE IF EXISTS temp.clips_text;
              CREATE VIRTUAL TABLE temp.clips_fts USING fts5(preview, tokenize='trigram');
-             CREATE TEMP TRIGGER IF NOT EXISTS clips_fts_forget AFTER DELETE ON main.clips BEGIN
+             CREATE VIRTUAL TABLE temp.clips_text USING fts5(body, tokenize='trigram');
+             CREATE TEMP TRIGGER IF NOT EXISTS clips_mem_forget AFTER DELETE ON main.clips BEGIN
                  DELETE FROM clips_fts WHERE rowid = old.id;
+                 DELETE FROM clips_text WHERE rowid = old.id;
              END;",
         )?;
-        let mut insert = self
+        let mut previews = self
             .db
             .prepare("INSERT INTO temp.clips_fts(rowid, preview) VALUES (?1, ?2)")?;
+        let mut texts = self
+            .db
+            .prepare("INSERT INTO temp.clips_text(rowid, body) VALUES (?1, ?2)")?;
         let mut sealed = self
             .db
-            .prepare("SELECT id, preview_sealed FROM clips WHERE preview_sealed IS NOT NULL")?;
+            .prepare("SELECT id, sealed FROM clips WHERE sealed IS NOT NULL")?;
         let mut rows = sealed.query([])?;
         while let Some(row) = rows.next()? {
             let id: i64 = row.get(0)?;
-            let preview = key.open(&row.get::<_, Vec<u8>>(1)?)?;
-            insert.execute(params![id, String::from_utf8_lossy(&preview)])?;
+            let (preview, text) = open_text(&key.open(&row.get::<_, Vec<u8>>(1)?)?)?;
+            previews.execute(params![id, preview])?;
+            texts.execute(params![id, text])?;
         }
         Ok(())
     }
@@ -562,15 +642,22 @@ impl Store {
             }
             let reprs: Vec<(&str, &[u8])> =
                 plain.iter().map(|(_, m, d)| (m.as_str(), &d[..])).collect();
-            let (_, preview, hash) = clip::describe(&reprs, to);
-            let (plain_preview, sealed_preview) = match to {
-                Some(key) => (String::new(), Some(key.seal(preview.as_bytes())?)),
-                None => (preview, None),
+            let (_, preview, hash, text) = clip::describe_with_text(&reprs, to);
+            // The on-disk search text goes when sealing, comes back when not.
+            tx.prepare_cached("DELETE FROM main.clips_text WHERE rowid = ?1")?
+                .execute([id])?;
+            let (plain_preview, sealed) = match to {
+                Some(key) => (String::new(), Some(key.seal(&seal_text(&preview, &text))?)),
+                None => {
+                    tx.prepare_cached("INSERT INTO main.clips_text(rowid, body) VALUES (?1, ?2)")?
+                        .execute(params![id, text])?;
+                    (preview, None)
+                }
             };
             tx.prepare_cached(
-                "UPDATE clips SET preview = ?1, preview_sealed = ?2, hash = ?3 WHERE id = ?4",
+                "UPDATE clips SET preview = ?1, sealed = ?2, hash = ?3 WHERE id = ?4",
             )?
-            .execute(params![plain_preview, sealed_preview, &hash[..], id])?;
+            .execute(params![plain_preview, sealed, &hash[..], id])?;
         }
         let thumbs: Vec<(i64, Vec<u8>)> = tx
             .prepare("SELECT clip_id, png FROM thumbs")?
@@ -592,10 +679,11 @@ impl Store {
                 [recipient],
             )?;
         }
-        // The on-disk index is rebuilt from `preview`: empty when sealed.
-        tx.execute(
-            "INSERT INTO main.clips_fts(clips_fts) VALUES ('rebuild')",
-            [],
+        // The on-disk preview index is rebuilt from `preview`, empty when
+        // sealed; merging the text index's segments drops deleted entries.
+        tx.execute_batch(
+            "INSERT INTO main.clips_fts(clips_fts) VALUES ('rebuild');
+             INSERT INTO main.clips_text(clips_text) VALUES ('optimize');",
         )?;
         tx.commit()?;
         self.recipient = recipient;
@@ -614,7 +702,9 @@ impl Store {
             self.index_in_memory()?;
         } else {
             self.db.execute_batch(
-                "DROP TRIGGER IF EXISTS temp.clips_fts_forget; DROP TABLE IF EXISTS temp.clips_fts;",
+                "DROP TRIGGER IF EXISTS temp.clips_mem_forget;
+                 DROP TABLE IF EXISTS temp.clips_fts;
+                 DROP TABLE IF EXISTS temp.clips_text;",
             )?;
         }
         // Fold the WAL (which holds the old pages) in, rewrite the file
@@ -643,6 +733,30 @@ impl Store {
         }
         Ok(())
     }
+}
+
+/// A Clip's preview and search text, as one buffer to seal.
+fn seal_text(preview: &str, text: &str) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(4 + preview.len() + text.len());
+    buf.extend_from_slice(&(preview.len() as u32).to_le_bytes());
+    buf.extend_from_slice(preview.as_bytes());
+    buf.extend_from_slice(text.as_bytes());
+    buf
+}
+
+/// The preview and search text [`seal_text`] put together.
+fn open_text(buf: &[u8]) -> Result<(String, String)> {
+    let bad = || Error::Crypto("malformed sealed text".into());
+    let (len, rest) = buf.split_first_chunk::<4>().ok_or_else(bad)?;
+    let len = u32::from_le_bytes(*len) as usize;
+    if len > rest.len() {
+        return Err(bad());
+    }
+    let (preview, text) = rest.split_at(len);
+    Ok((
+        String::from_utf8_lossy(preview).into_owned(),
+        String::from_utf8_lossy(text).into_owned(),
+    ))
 }
 
 /// The `inline` and `blob_hash` columns of one representation.
@@ -753,6 +867,58 @@ fn migrate(db: &mut Connection) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// A History written before the `clips_text` index (schema version 1)
+    /// upgrades in place: old Clips become searchable, deletes reach the new
+    /// index, and new Clips land in it too.
+    #[test]
+    fn a_version_1_history_migrates_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let db = Connection::open(dir.path().join("history.db")).unwrap();
+            db.execute_batch(MIGRATIONS[0]).unwrap();
+            db.pragma_update(None, "user_version", 1).unwrap();
+            for (id, preview) in [(1, "an old needle"), (2, "another old needle")] {
+                db.execute(
+                    "INSERT INTO clips(id, created_at, last_used_at, kind, preview, size, hash)
+                     VALUES (?1, ?1, ?1, 'text', ?2, ?3, ?4)",
+                    (id, preview, preview.len() as i64, [id as u8; 32]),
+                )
+                .unwrap();
+                db.execute(
+                    "INSERT INTO reprs(clip_id, ord, mime, inline) VALUES (?1, 0, 'text/plain', ?2)",
+                    (id, preview.as_bytes()),
+                )
+                .unwrap();
+            }
+        }
+
+        let mut store = Store::open(dir.path()).unwrap();
+        let version: i64 = store
+            .db
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, MIGRATIONS.len() as i64);
+
+        let ids = |store: &Store| -> Vec<i64> {
+            store
+                .search("needle", 10)
+                .unwrap()
+                .into_iter()
+                .map(|c| c.id)
+                .collect()
+        };
+        assert_eq!(ids(&store), [2, 1]);
+
+        assert!(store.delete(1).unwrap());
+        assert_eq!(ids(&store), [2]);
+
+        let new = store
+            .record(&[("text/plain", b"a new needle")], None, 3)
+            .unwrap()
+            .id;
+        assert_eq!(ids(&store), [new, 2]);
+    }
+
     /// Searches go through `clips_fts`, which under encryption must be the
     /// in-memory index of the plain previews (the one on disk is empty),
     /// and must forget Clips however they are deleted.
@@ -786,5 +952,60 @@ mod tests {
             .execute("DELETE FROM clips WHERE id = ?1", [old])
             .unwrap();
         assert_eq!(hits(&store), [new]);
+    }
+
+    /// A History at schema version 2 (with `clips_text`, before encryption)
+    /// upgrades in place: plain and searchable as before, and it can then
+    /// be encrypted, after which search still finds the old Clip.
+    #[test]
+    fn a_version_2_history_migrates_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let db = Connection::open(dir.path().join("history.db")).unwrap();
+            db.execute_batch(MIGRATIONS[0]).unwrap();
+            db.execute_batch(MIGRATIONS[1]).unwrap();
+            db.pragma_update(None, "user_version", 2).unwrap();
+            let text = "a version two needle";
+            let (_, _, hash) = clip::describe(&[("text/plain", text.as_bytes())], None);
+            db.execute(
+                "INSERT INTO clips(id, created_at, last_used_at, kind, preview, size, hash)
+                 VALUES (1, 1, 1, 'text', ?1, ?2, ?3)",
+                (text, text.len() as i64, &hash[..]),
+            )
+            .unwrap();
+            db.execute("INSERT INTO clips_text(rowid, body) VALUES (1, ?1)", [text])
+                .unwrap();
+            db.execute(
+                "INSERT INTO reprs(clip_id, ord, mime, inline) VALUES (1, 0, 'text/plain', ?1)",
+                [text.as_bytes()],
+            )
+            .unwrap();
+        }
+
+        let mut store = Store::open(dir.path()).unwrap();
+        let version: i64 = store
+            .db
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, MIGRATIONS.len() as i64);
+        assert!(!store.is_encrypted());
+        let ids = |store: &Store| -> Vec<i64> {
+            store
+                .search("two needle", 10)
+                .unwrap()
+                .into_iter()
+                .map(|c| c.id)
+                .collect()
+        };
+        assert_eq!(ids(&store), [1]);
+
+        store.encrypt(Key::generate()).unwrap();
+        assert_eq!(ids(&store), [1]);
+        assert_eq!(store.list(10).unwrap()[0].preview, "a version two needle");
+        // The same content is still one Clip, under its new keyed hash.
+        let again = store
+            .record(&[("text/plain", b"a version two needle")], None, 5)
+            .unwrap();
+        assert_eq!((again.id, again.new), (1, false));
     }
 }

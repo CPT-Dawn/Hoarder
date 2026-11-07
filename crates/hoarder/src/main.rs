@@ -11,6 +11,7 @@ mod image;
 mod notify;
 mod pause;
 mod pick;
+mod picker;
 mod save;
 mod setup;
 mod shot;
@@ -93,6 +94,9 @@ enum Command {
     Config(config::ConfigCommand),
     /// Empty the clipboard, and keep the Daemon from restoring it.
     Clear,
+    /// Search History in a panel; Enter makes the selected Clip the
+    /// clipboard again, Esc closes (needs the Daemon).
+    Picker,
     /// List, read, restore, delete, pin and clear Clips in History (needs
     /// the Daemon).
     #[command(subcommand)]
@@ -169,6 +173,10 @@ impl From<Exit> for ExitCode {
 }
 
 fn main() -> ExitCode {
+    // The Compat shims: `wl-copy` and `wl-paste` symlinks to this binary.
+    if let Some((name, result)) = clipboard::run_as_shim() {
+        return report(name, result);
+    }
     let mut cli = Cli::parse();
     let result = match cli.command {
         Some(Command::Shot {
@@ -214,7 +222,8 @@ fn main() -> ExitCode {
         Some(Command::ServeOffer(args)) => clipboard::serve_child(args),
         Some(Command::NotifyCapture(args)) => notify::serve_child(args),
         Some(Command::Config(command)) => config::run(command, &cli.overrides),
-        Some(Command::Clear) => daemon::clear(),
+        Some(Command::Clear) => daemon::clear(hoarder_wayland::clipboard::Selection::Clipboard),
+        Some(Command::Picker) => picker::run(&cli.overrides),
         Some(Command::History(command)) => history::run(command),
         Some(Command::Pause { duration, json }) => pause::pause(duration, json.json),
         Some(Command::Resume { json }) => pause::resume(json.json),
@@ -225,10 +234,15 @@ fn main() -> ExitCode {
         Some(Command::Setup { wm, apply, yes }) => setup::run(wm, apply, yes),
         None => doctor::first_run(),
     };
+    report("hoarder", result)
+}
+
+/// The exit code for `result`, with any complaint on stderr as `name: …`.
+fn report(name: &str, result: Result<(), (Exit, String)>) -> ExitCode {
     match result {
         Ok(()) => Exit::Success.into(),
         Err((code, message)) => {
-            eprintln!("hoarder: {message}");
+            eprintln!("{name}: {message}");
             code.into()
         }
     }

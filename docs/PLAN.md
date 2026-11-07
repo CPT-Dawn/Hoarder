@@ -213,7 +213,7 @@ clips_fts(preview)                                                              
 - **Dedup:** a repeat hash bumps `last_used_at`.
 - **Retention:** 1,000 Clips, 30 days for unpinned Clips, 64 MB per Clip, 1 GB in total, evicting the oldest unpinned first. It runs on insert and on an hourly timer.
 - **Encryption:** off by default. `history.encrypt = true` encrypts with age, using a key held in the Secret Service keyring (`oo7`).
-  - Sealed: every representation (inline and blob files), thumbnails and previews. Search uses an in-memory FTS index (`temp.clips_fts`, which shadows the on-disk one), rebuilt from the sealed previews on unlock; the on-disk index stays empty.
+  - Sealed: every representation (inline and blob files), thumbnails, and each Clip's preview and search text (`clips.sealed`). Search uses in-memory FTS indexes (`temp.clips_fts` and `temp.clips_text`, which shadow the on-disk ones by name), rebuilt from the sealed text on unlock. The on-disk indexes stay empty.
   - The dedup `hash` and blob file names are blake3 keyed with a key derived from the History key, so they can't confirm a guessed copy.
   - Left readable: times, pinned, source app, kind, MIME types and sizes, which ordering and retention need.
   - Toggling the setting (live or at start) migrates History both ways, then scrubs the old form: superseded blob files are deleted, and `secure_delete`, `VACUUM` and a truncating WAL checkpoint clean the database. Copy-on-write filesystems and SSDs may still hold old blocks; full-disk encryption covers those.
@@ -379,9 +379,10 @@ One JSON object per line, sent over `$XDG_RUNTIME_DIR/hoarder/hoarder.sock`. The
 → {"v":1,"id":8,"op":"subscribe"}
 ← {"v":1,"event":"clip_added","clip":{…}}
 ← {"v":1,"event":"state","state":"paused","until":"…"}
+← {"v":1,"event":"selection","selection":"clipboard","types":["text/plain",…]}
 ```
 
-**Ops:** `hello` (version negotiation), `status`, `list`, `get` (the representation is streamed over a passed fd), `thumb`, `restore`, `offer` (Capture or `copy` data; fd passing), `delete`, `pin`, `unpin`, `clear` (the clipboard), `clear_history`, `pause`, `resume`, `subscribe`, `reload`.
+**Ops:** `hello` (version negotiation), `status`, `list`, `get` (the representation is streamed over a passed fd), `thumb`, `restore`, `offer` (Capture or `copy` data in a passed memfd), `paste` (the current Selection, streamed from its source into a passed pipe; what `paste --watch` reads through), `delete`, `pin`, `unpin`, `clear` (the clipboard), `clear_history`, `pause`, `resume`, `subscribe`, `reload`.
 
 **Compatibility:** additive changes keep `v:1`; breaking changes bump `v` and the `hoarder-ipc` major version.
 
