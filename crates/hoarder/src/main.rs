@@ -3,12 +3,14 @@ mod clipboard;
 mod config;
 mod cut;
 mod daemon;
+mod doctor;
 mod encode;
 mod hook;
 mod image;
 mod notify;
 mod pick;
 mod save;
+mod setup;
 mod shot;
 
 use std::path::PathBuf;
@@ -89,6 +91,21 @@ enum Command {
     /// Install, remove or inspect the Daemon's systemd user service.
     #[command(subcommand)]
     Service(daemon::service::ServiceCommand),
+    /// Check the compositor, protocols, paths, service and conflicting tools;
+    /// every problem comes with a fix (exit 1 if there are any).
+    Doctor,
+    /// Print recommended keybindings for a compositor; `--apply` writes
+    /// them to a file the compositor config includes.
+    Setup {
+        wm: setup::Wm,
+        /// Write the bindings to Hoarder's own included file (never to the
+        /// main compositor config).
+        #[arg(long)]
+        apply: bool,
+        /// With `--apply`, replace an edited included file without asking.
+        #[arg(long, requires = "apply")]
+        yes: bool,
+    },
 }
 
 /// The `screenshot.format` an `-o` file name asks for, if its extension is one.
@@ -169,7 +186,9 @@ fn main() -> ExitCode {
         Some(Command::Clear) => daemon::clear(),
         Some(Command::Daemon) => daemon::run(&cli.overrides),
         Some(Command::Service(command)) => daemon::service::run(command),
-        None => Ok(()),
+        Some(Command::Doctor) => doctor::run(),
+        Some(Command::Setup { wm, apply, yes }) => setup::run(wm, apply, yes),
+        None => doctor::first_run(),
     };
     match result {
         Ok(()) => Exit::Success.into(),
