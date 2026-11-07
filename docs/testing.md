@@ -16,7 +16,7 @@ The end-to-end tests need these on `PATH` (Arch: `sway grim wl-clipboard libavif
 | `grim` | Independent oracle for "what the user sees" (`Session::screenshot`). |
 | `wl-copy`, `wl-paste` | Independent oracle for Selections, and the reference the `hoarder copy`/`paste` parity suite (`crates/hoarder/tests/e2e_clipboard.rs`) runs every case against, in every copier/paster pairing. |
 | `avifdec` | Independent AVIF decoder for the saved-format tests (`libavif`). |
-| `dbus-daemon` | A private session bus per notification test (`crates/hoarder/tests/e2e_notify.rs`), with a stand-in notification server on it, so no test ever reaches your real desktop. |
+| `dbus-daemon` | A private session bus per notification test (`crates/hoarder/tests/bus/`, used by `e2e_notify.rs` and `e2e_pick.rs`), with a stand-in notification server on it, so no test ever reaches your real desktop. |
 
 Latency budgets (4K shot-to-clipboard under 150 ms) are `#[ignore]`d in debug builds, since timing unoptimised code proves nothing. Run them with `cargo test --release -p hoarder --test e2e_shot_clipboard`; see [Timings and budgets](#timings-and-budgets) for scaling them with `HOARDER_BUDGET_SCALE`.
 

@@ -388,6 +388,20 @@ pub fn copy_capture(png: &[u8]) -> Result<(), (Exit, String)> {
     offer.serve_in_background(png)
 }
 
+/// Put `text` on the clipboard, under every text type, so it stays
+/// pasteable after the command that copied it exits: served by the Daemon
+/// (and recorded) when it runs, else by a background child.
+pub fn copy_text(text: &str) -> Result<(), (Exit, String)> {
+    let offer = Offer {
+        which: Selection::Clipboard,
+        mime_types: offered_types("text/plain;charset=utf-8"),
+        sensitive: false,
+        serve: Serve::UntilReplaced,
+        seat: None,
+    };
+    offer.serve(text.as_bytes())
+}
+
 /// The hidden subcommand the background child runs.
 pub const SERVE_SUBCOMMAND: &str = "serve-offer";
 

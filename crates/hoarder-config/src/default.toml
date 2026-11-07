@@ -62,6 +62,7 @@ history = false
 
 [history]
 enabled = true
+# Limits: 0 means none. Pinned Clips count toward them but are never evicted.
 max_clips = 1000
 max_age_days = 30
 max_clip_mb = 64

@@ -37,6 +37,8 @@ const HINT_MARGIN: f64 = 24.0;
 pub(crate) struct Layers {
     /// Alt is held: the Loupe shows at once.
     alt: bool,
+    /// The Loupe always shows (`hoarder pick`).
+    pinned: bool,
     /// The pointer: which view it is on, and where (view-local logical).
     pointer: Option<(usize, (f64, f64))>,
     /// When the pointer will have been still long enough for the Loupe.
@@ -53,6 +55,7 @@ impl Layers {
     pub(crate) fn new(hint_bar: bool, cursor: bool) -> Layers {
         Layers {
             alt: false,
+            pinned: false,
             pointer: None,
             loupe_due: None,
             still: false,
@@ -84,6 +87,11 @@ impl Layers {
             self.loupe_due = None;
             self.still = false;
         }
+    }
+
+    /// Show the Loupe wherever the pointer is, still or not (`hoarder pick`).
+    pub(crate) fn pin_loupe(&mut self) {
+        self.pinned = true;
     }
 
     pub(crate) fn set_alt(&mut self, held: bool) {
@@ -133,7 +141,7 @@ impl Layers {
     /// Where the Loupe goes on `view`, if anywhere (view-local logical).
     fn loupe_on(&self, view: usize) -> Option<(f64, f64)> {
         match self.pointer {
-            Some((v, at)) if v == view && (self.alt || self.still) => Some(at),
+            Some((v, at)) if v == view && (self.alt || self.still || self.pinned) => Some(at),
             _ => None,
         }
     }
@@ -264,11 +272,7 @@ impl ViewLayers {
         // The Loupe.
         match layers.loupe_on(index).zip(cx.frame) {
             Some((at, frame)) => {
-                let (fw, fh) = frame.upright_size();
-                let pixel = (
-                    ((at.0 * s).floor().max(0.0) as u32).min(fw.saturating_sub(1)),
-                    ((at.1 * s).floor().max(0.0) as u32).min(fh.saturating_sub(1)),
-                );
+                let pixel = loupe::pixel_under(at, s, frame.upright_size());
                 let unchanged =
                     self.loupe.is_shown() && self.loupe_drawn.is_some_and(|(p, _)| p == pixel);
                 if unchanged {

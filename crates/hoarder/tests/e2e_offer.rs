@@ -301,3 +301,24 @@ fn paste_watch_runs_off_the_daemons_event_stream() {
         let _ = child.wait();
     }
 }
+
+#[test]
+fn a_copied_token_is_served_but_never_recorded() {
+    let session = Session::start_default().unwrap();
+    let _daemon = Daemon::start(&session);
+
+    let mut copy = session.command(HOARDER);
+    copy.args(["copy", "AKIAIOSFODNN7EXAMPLE"]);
+    let out = run_marked(&session, copy, None);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert_eq!(
+        wl_paste(&session, &["-n"]),
+        (Some(0), b"AKIAIOSFODNN7EXAMPLE".to_vec())
+    );
+    assert_eq!(history(&session), Vec::<Value>::new());
+}

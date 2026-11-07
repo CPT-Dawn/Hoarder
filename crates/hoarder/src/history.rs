@@ -1,4 +1,4 @@
-//! `hoarder history list|get|restore|delete [--json]`: History, read and
+//! `hoarder history list|get|restore|delete|pin|unpin|clear [--json]`: History, read and
 //! changed through the Daemon's socket (PLAN.md §10, §11).
 
 use std::io::Write as _;
@@ -48,13 +48,35 @@ pub enum HistoryCommand {
         #[command(flatten)]
         json: Json,
     },
+    /// Keep a Clip for good: exempt from expiry, limits and `clear`.
+    Pin {
+        #[command(flatten)]
+        clip: ClipArg,
+        #[command(flatten)]
+        json: Json,
+    },
+    /// Let a pinned Clip expire and be evicted again.
+    Unpin {
+        #[command(flatten)]
+        clip: ClipArg,
+        #[command(flatten)]
+        json: Json,
+    },
+    /// Remove every Clip except pinned ones.
+    Clear {
+        /// Remove pinned Clips too.
+        #[arg(long)]
+        all: bool,
+        #[command(flatten)]
+        json: Json,
+    },
 }
 
 #[derive(Debug, Args)]
 pub struct Json {
     /// Print machine-readable JSON.
     #[arg(long)]
-    json: bool,
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -73,14 +95,7 @@ fn clip_id(arg: &str) -> Result<i64, String> {
 }
 
 pub fn run(command: HistoryCommand) -> Result<(), Fail> {
-    let mut daemon = Connection::connect().map_err(|_| {
-        (
-            Exit::Io,
-            "the Daemon is not running, and History lives in it; start it with \
-             `hoarder service enable`"
-                .to_owned(),
-        )
-    })?;
+    let mut daemon = connect("History lives in it")?;
     match command {
         HistoryCommand::List { limit, json } => {
             let clips = answer(daemon.list(limit))?;
@@ -124,11 +139,36 @@ pub fn run(command: HistoryCommand) -> Result<(), Fail> {
                 Ok(())
             }
         }
+        HistoryCommand::Pin { clip, json } => pin(&mut daemon, clip, true, json),
+        HistoryCommand::Unpin { clip, json } => pin(&mut daemon, clip, false, json),
+        HistoryCommand::Clear { all, json } => {
+            let cleared = answer(daemon.clear_history(all))?;
+            if json.json {
+                print_json(&cleared)
+            } else {
+                Ok(())
+            }
+        }
     }
 }
 
+fn pin(daemon: &mut Connection, clip: ClipArg, pinned: bool, json: Json) -> Result<(), Fail> {
+    let clip = answer(daemon.pin(clip.id, pinned))?;
+    if json.json { print_json(&clip) } else { Ok(()) }
+}
+
+/// Connect to the Daemon, or explain that `why` needs it.
+pub fn connect(why: &str) -> Result<Connection, Fail> {
+    Connection::connect().map_err(|_| {
+        (
+            Exit::Io,
+            format!("the Daemon is not running, and {why}; start it with `hoarder service enable`"),
+        )
+    })
+}
+
 /// The Daemon's answer, or why there is none.
-fn answer<T>(response: std::io::Result<Result<T, Failure>>) -> Result<T, Fail> {
+pub fn answer<T>(response: std::io::Result<Result<T, Failure>>) -> Result<T, Fail> {
     match response {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(failure)) => Err((Exit::Io, failure.message)),
@@ -136,7 +176,7 @@ fn answer<T>(response: std::io::Result<Result<T, Failure>>) -> Result<T, Fail> {
     }
 }
 
-fn print_json<T: serde::Serialize>(value: &T) -> Result<(), Fail> {
+pub fn print_json<T: serde::Serialize>(value: &T) -> Result<(), Fail> {
     let mut line = serde_json::to_string(value).expect("JSON values serialise");
     line.push('\n');
     write_stdout(line.as_bytes())
