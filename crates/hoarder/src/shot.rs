@@ -3,12 +3,12 @@
 use std::io::Write as _;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use clap::ValueEnum;
 use hoarder_config::{Config, Screenshot, State, StoredRegion};
-use hoarder_ui::{Options, Outcome, OverlayError, Region, Theme, overlay};
-use hoarder_wayland::CaptureError;
+use hoarder_ui::{Options, Outcome, OverlayError, Region, Theme, countdown, overlay};
+use hoarder_wayland::{CaptureError, Frozen};
 
 use crate::Exit;
 use crate::after::Delivered;
@@ -33,19 +33,50 @@ impl Target {
     }
 }
 
+/// When the pixels are taken.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct When {
+    /// `--live`: no freeze; the Region is cut from the desktop as it is when
+    /// the selection ends.
+    pub live: bool,
+    /// `--delay`: count down this long before the freeze.
+    pub delay: Option<Duration>,
+}
+
+/// Parse `--delay`: non-negative seconds, decimals allowed.
+pub fn parse_delay(s: &str) -> Result<Duration, String> {
+    let secs: f64 = s
+        .parse()
+        .map_err(|_| format!("`{s}` is not a number of seconds"))?;
+    Duration::try_from_secs_f64(secs)
+        .map_err(|_| format!("`{s}` is not a non-negative number of seconds"))
+}
+
 /// Capture `target`. `output` (`-o`) replaces saving to `screenshot.dir`.
-pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(), (Exit, String)> {
+pub fn run(
+    target: Target,
+    when: When,
+    output: Option<&Path>,
+    config: &Config,
+) -> Result<(), (Exit, String)> {
+    let mut state = State::load();
+    let options = Options {
+        confirm: config.screenshot.confirm,
+        last_region: state.last_region().map(|r| Region {
+            x: r.x,
+            y: r.y,
+            width: r.width,
+            height: r.height,
+        }),
+        theme: Theme::load(&config.theme),
+    };
+    if let Some(delay) = when.delay.filter(|d| !d.is_zero()) {
+        countdown::run(delay, &options).map_err(overlay_error)?;
+    }
     let started = Instant::now();
-    let frozen = hoarder_wayland::freeze().map_err(|e| {
-        let code = match e {
-            CaptureError::NoWayland(_) | CaptureError::Unsupported(_) => Exit::Unsupported,
-            CaptureError::Failed(_) | CaptureError::Io(_) => Exit::Io,
-        };
-        (code, e.to_string())
-    })?;
     let (image, name) = match target {
-        Target::All => (Image::all_outputs(&frozen.frames), target.name()),
-        Target::Region => from_overlay(&frozen, started, config)?,
+        Target::All => (Image::all_outputs(&freeze()?.frames), target.name()),
+        Target::Region => from_overlay(when.live, started, &options, &mut state)?,
     };
     let image = Arc::new(image);
     // The file is encoded on a worker thread, started before the clipboard
@@ -84,31 +115,44 @@ pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(),
     Ok(())
 }
 
-/// Show the Overlay and cut out the Target picked there; returns the image
-/// and the Target's name for file names.
-fn from_overlay(
-    frozen: &hoarder_wayland::Frozen,
-    started: Instant,
-    config: &Config,
-) -> Result<(Image, &'static str), (Exit, String)> {
-    let mut state = State::load();
-    let options = Options {
-        confirm: config.screenshot.confirm,
-        last_region: state.last_region().map(|r| Region {
-            x: r.x,
-            y: r.y,
-            width: r.width,
-            height: r.height,
-        }),
-        theme: Theme::load(&config.theme),
-    };
-    let outcome = overlay::run(frozen, started, &options).map_err(|e| {
+fn freeze() -> Result<Frozen, (Exit, String)> {
+    hoarder_wayland::freeze().map_err(|e| {
         let code = match e {
-            OverlayError::Unsupported(_) => Exit::Unsupported,
-            OverlayError::Failed(_) => Exit::Io,
+            CaptureError::NoWayland(_) | CaptureError::Unsupported(_) => Exit::Unsupported,
+            CaptureError::Failed(_) | CaptureError::Io(_) => Exit::Io,
         };
         (code, e.to_string())
-    })?;
+    })
+}
+
+fn overlay_error(e: OverlayError) -> (Exit, String) {
+    let code = match e {
+        OverlayError::Unsupported(_) => Exit::Unsupported,
+        OverlayError::Failed(_) => Exit::Io,
+    };
+    (code, e.to_string())
+}
+
+/// Show the Overlay and cut out the Target picked there; returns the image
+/// and the Target's name for file names. With `live`, the Overlay goes over
+/// the live desktop and the freeze comes after it, Overlay already hidden.
+fn from_overlay(
+    live: bool,
+    started: Instant,
+    options: &Options,
+    state: &mut State,
+) -> Result<(Image, &'static str), (Exit, String)> {
+    let (frozen, outcome) = if live {
+        let outcome = overlay::run_live(started, options).map_err(overlay_error)?;
+        if outcome == Outcome::Cancelled {
+            return Err((Exit::Cancelled, "cancelled".into()));
+        }
+        (freeze()?, outcome)
+    } else {
+        let frozen = freeze()?;
+        let outcome = overlay::run(&frozen, started, options).map_err(overlay_error)?;
+        (frozen, outcome)
+    };
     Ok(match outcome {
         Outcome::Region(r) => {
             state.set_last_region(StoredRegion {

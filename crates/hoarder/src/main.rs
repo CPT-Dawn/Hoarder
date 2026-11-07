@@ -46,6 +46,13 @@ enum Command {
         /// Do not copy the Capture to the clipboard (`screenshot.copy = false`).
         #[arg(long)]
         no_copy: bool,
+        /// Skip the freeze: select over the live desktop and capture it as it
+        /// is when the selection ends.
+        #[arg(long)]
+        live: bool,
+        /// Count down SECONDS (decimals allowed) before freezing.
+        #[arg(long, value_name = "SECONDS", value_parser = shot::parse_delay)]
+        delay: Option<std::time::Duration>,
         /// No notification for this Capture (`screenshot.notify = false`).
         #[arg(long)]
         no_notify: bool,
@@ -112,6 +119,8 @@ fn main() -> ExitCode {
             format,
             no_save,
             no_copy,
+            live,
+            delay,
             no_notify,
         }) => {
             // Shot flags are one-run overrides, applied after any `--set`.
@@ -124,8 +133,14 @@ fn main() -> ExitCode {
             ];
             cli.overrides
                 .extend(flags.into_iter().flatten().map(|(k, v)| (k.into(), v)));
-            config::effective(&cli.overrides)
-                .and_then(|config| shot::run(target, output.as_deref(), &config))
+            config::effective(&cli.overrides).and_then(|config| {
+                shot::run(
+                    target,
+                    shot::When { live, delay },
+                    output.as_deref(),
+                    &config,
+                )
+            })
         }
         Some(Command::Copy(args)) => clipboard::copy(args),
         Some(Command::Paste(args)) => clipboard::paste(args),

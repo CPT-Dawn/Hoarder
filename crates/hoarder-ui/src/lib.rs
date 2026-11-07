@@ -5,10 +5,12 @@
 //! Target the user picked (PLAN.md §4.2).
 
 mod chrome;
+pub mod countdown;
 mod geom;
 pub mod overlay;
 mod select;
 pub mod theme;
+mod wait;
 
 pub use overlay::{Options, Outcome, OverlayError, Region};
 pub use theme::Theme;
