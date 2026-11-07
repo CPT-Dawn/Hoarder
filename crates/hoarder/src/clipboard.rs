@@ -6,10 +6,13 @@ use std::io::{BufRead as _, Read as _, Write as _};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 
-use clap::Args;
+use clap::{Args, Parser};
 use hoarder_wayland::clipboard::{Clipboard, ClipboardError, Representation, Selection, Serve};
 
 use crate::Exit;
+
+/// Why a command failed: its exit code and what to tell the user.
+type Fail = (Exit, String);
 
 /// The KDE hint password managers set; its value is `secret`.
 pub(crate) const PASSWORD_HINT: &str = "x-kde-passwordManagerHint";
@@ -79,6 +82,42 @@ pub struct PasteArgs {
     /// Use the seat with this name.
     #[arg(short, long, value_name = "NAME")]
     seat: Option<String>,
+}
+
+/// `wl-copy`, as the Compat shim: `hoarder copy` under wl-clipboard's name.
+#[derive(Debug, Parser)]
+#[command(
+    name = "wl-copy",
+    version,
+    about = "Copy stdin or text to the Wayland clipboard"
+)]
+struct WlCopy {
+    #[command(flatten)]
+    args: CopyArgs,
+}
+
+/// `wl-paste`, as the Compat shim: `hoarder paste` under wl-clipboard's name.
+#[derive(Debug, Parser)]
+#[command(
+    name = "wl-paste",
+    version,
+    about = "Paste the Wayland clipboard to stdout"
+)]
+struct WlPaste {
+    #[command(flatten)]
+    args: PasteArgs,
+}
+
+/// If this binary was started as `wl-copy` or `wl-paste` (argv[0], as the
+/// `hoarder-wl-compat` symlinks do), run as that tool: its name and outcome.
+pub fn run_as_shim() -> Option<(&'static str, Result<(), Fail>)> {
+    let argv0 = std::env::args_os().next()?;
+    let name = std::path::Path::new(&argv0).file_name()?.to_str()?;
+    match name {
+        "wl-copy" => Some(("wl-copy", copy(WlCopy::parse().args))),
+        "wl-paste" => Some(("wl-paste", paste(WlPaste::parse().args))),
+        _ => None,
+    }
 }
 
 /// The hidden serving child: stdin holds the bytes, offered as each `--type`.
@@ -161,6 +200,10 @@ fn offered_types(mime: &str) -> Vec<String> {
 pub fn copy(args: CopyArgs) -> Result<(), (Exit, String)> {
     let which = which(args.primary);
     if args.clear {
+        // Through the Daemon, which would otherwise restore what was cleared.
+        if args.seat.is_none() {
+            return crate::daemon::clear(which);
+        }
         let mut clipboard = Clipboard::connect(args.seat.as_deref()).map_err(clipboard_error)?;
         return clipboard.clear(which).map_err(clipboard_error);
     }
@@ -194,7 +237,7 @@ pub fn copy(args: CopyArgs) -> Result<(), (Exit, String)> {
     if args.foreground {
         offer.serve_here(data.into(), || {})
     } else {
-        offer.serve_in_background(&data)
+        offer.serve(&data)
     }
 }
 
@@ -233,6 +276,41 @@ impl Offer {
         clipboard
             .serve(self.which, self.representations(data), self.serve, ready)
             .map_err(clipboard_error)
+    }
+
+    /// Serve `data` after this process exits: by the Daemon when it runs,
+    /// else by a background child.
+    pub fn serve(&self, data: &[u8]) -> Result<(), (Exit, String)> {
+        match self.hand_to_daemon(data) {
+            Some(result) => result,
+            None => self.serve_in_background(data),
+        }
+    }
+
+    /// Hand `data` to the Daemon (`offer`); `None` if no Daemon takes it,
+    /// so the caller serves it some other way.
+    fn hand_to_daemon(&self, data: &[u8]) -> Option<Result<(), (Exit, String)>> {
+        // The Daemon watches the default seat only.
+        if self.seat.is_some() {
+            return None;
+        }
+        let mut daemon = hoarder_ipc::Connection::connect().ok()?;
+        // The Daemon adds the password hint itself.
+        let types = self
+            .mime_types
+            .iter()
+            .filter(|m| *m != PASSWORD_HINT)
+            .cloned()
+            .collect();
+        let once = self.serve == Serve::Once;
+        let which = crate::daemon::to_ipc(self.which);
+        match daemon.offer(which, types, self.sensitive, once, data) {
+            Ok(Ok(())) => Some(Ok(())),
+            // A Daemon too old for `offer`, or one that went away.
+            Ok(Err(f)) if f.code == hoarder_ipc::ErrorCode::UnknownOp => None,
+            Err(_) => None,
+            Ok(Err(f)) => Some(Err((Exit::Io, f.message))),
+        }
     }
 
     /// Hand `data` to a detached child of this binary that serves it, and
@@ -292,15 +370,10 @@ impl Offer {
 }
 
 /// Put a Capture's PNG on the clipboard so it stays pasteable after
-/// `hoarder shot` exits. Until the Daemon can take it (#76), a serving child
-/// holds it, and with no Daemon running the user hears once that History is off.
+/// `hoarder shot` exits. The Daemon takes it and records it as an image
+/// Clip; with no Daemon running a serving child holds it, and the user hears
+/// once that History is off.
 pub fn copy_capture(png: &[u8]) -> Result<(), (Exit, String)> {
-    if !daemon_running() {
-        eprintln!(
-            "hoarder: History is off (no Daemon running); the Capture is on the clipboard \
-             but will not be kept. Run `hoarder service enable` to keep Captures."
-        );
-    }
     let offer = Offer {
         which: Selection::Clipboard,
         mime_types: vec!["image/png".into()],
@@ -308,11 +381,19 @@ pub fn copy_capture(png: &[u8]) -> Result<(), (Exit, String)> {
         serve: Serve::UntilReplaced,
         seat: None,
     };
+    if let Some(result) = offer.hand_to_daemon(png) {
+        return result;
+    }
+    eprintln!(
+        "hoarder: History is off (no Daemon running); the Capture is on the clipboard \
+         but will not be kept. Run `hoarder service enable` to keep Captures."
+    );
     offer.serve_in_background(png)
 }
 
 /// Put `text` on the clipboard, under every text type, so it stays
-/// pasteable after the command that copied it exits.
+/// pasteable after the command that copied it exits: served by the Daemon
+/// (and recorded) when it runs, else by a background child.
 pub fn copy_text(text: &str) -> Result<(), (Exit, String)> {
     let offer = Offer {
         which: Selection::Clipboard,
@@ -321,17 +402,7 @@ pub fn copy_text(text: &str) -> Result<(), (Exit, String)> {
         serve: Serve::UntilReplaced,
         seat: None,
     };
-    offer.serve_in_background(text.as_bytes())
-}
-
-/// Whether something answers on the Daemon's socket (PLAN.md §11).
-fn daemon_running() -> bool {
-    std::env::var_os("XDG_RUNTIME_DIR").is_some_and(|dir| {
-        std::os::unix::net::UnixStream::connect(
-            std::path::Path::new(&dir).join("hoarder/hoarder.sock"),
-        )
-        .is_ok()
-    })
+    offer.serve(text.as_bytes())
 }
 
 /// The hidden subcommand the background child runs.
@@ -390,10 +461,10 @@ fn choose_type<'a>(offered: &'a [String], wanted: Option<&str>) -> Option<&'a st
 
 pub fn paste(args: PasteArgs) -> Result<(), (Exit, String)> {
     let which = which(args.primary);
-    let mut clipboard = Clipboard::connect(args.seat.as_deref()).map_err(clipboard_error)?;
     if let Some(command) = &args.watch {
-        return watch(&mut clipboard, which, &args, command);
+        return watch(which, &args, command);
     }
+    let mut clipboard = Clipboard::connect(args.seat.as_deref()).map_err(clipboard_error)?;
     let Some(offered) = clipboard.offered(which).map(<[String]>::to_vec) else {
         return Err((Exit::Cancelled, "Nothing is copied".into()));
     };
@@ -423,16 +494,79 @@ pub fn paste(args: PasteArgs) -> Result<(), (Exit, String)> {
     stdout.flush().map_err(io)
 }
 
+/// Where `paste --watch` hears of changes and reads them from.
+enum Changes {
+    /// The Daemon's event stream (`subscribe`); reads go through it too.
+    Daemon(hoarder_ipc::Connection),
+    /// A data-control connection of our own, when no Daemon runs.
+    Own {
+        clipboard: Box<Clipboard>,
+        started: bool,
+    },
+}
+
+impl Changes {
+    /// The Daemon's event stream if it runs (and the default seat is
+    /// wanted), else a connection of our own.
+    fn open(seat: Option<&str>) -> Result<Changes, (Exit, String)> {
+        if seat.is_none()
+            && let Ok(mut daemon) = hoarder_ipc::Connection::connect()
+            && let Ok(Ok(())) = daemon.subscribe()
+        {
+            return Ok(Changes::Daemon(daemon));
+        }
+        let clipboard = Clipboard::connect(seat).map_err(clipboard_error)?;
+        Ok(Changes::Own {
+            clipboard: Box::new(clipboard),
+            started: false,
+        })
+    }
+
+    /// The types `which` offers: as it is now the first time, then after
+    /// each change (`None` while it is empty).
+    fn next(&mut self, which: Selection) -> Result<Option<Vec<String>>, (Exit, String)> {
+        match self {
+            Changes::Daemon(daemon) => loop {
+                let event = daemon.next_event().map_err(lost_daemon)?;
+                if let hoarder_ipc::Event::Selection { selection, types } = event
+                    && selection == crate::daemon::to_ipc(which)
+                {
+                    return Ok(types);
+                }
+            },
+            Changes::Own { clipboard, started } if !*started => {
+                *started = true;
+                Ok(clipboard.offered(which).map(<[String]>::to_vec))
+            }
+            Changes::Own { clipboard, .. } => clipboard.next_change(which).map_err(clipboard_error),
+        }
+    }
+
+    fn read(&mut self, which: Selection, mime: &str) -> Result<Vec<u8>, (Exit, String)> {
+        match self {
+            Changes::Daemon(daemon) => {
+                let which = crate::daemon::to_ipc(which);
+                let mut data = Vec::new();
+                // Gone again before we asked: nothing to hand on.
+                if let Ok(mut pipe) = daemon.paste(which, mime.into()).map_err(lost_daemon)? {
+                    pipe.read_to_end(&mut data).map_err(lost_daemon)?;
+                }
+                Ok(data)
+            }
+            Changes::Own { clipboard, .. } => clipboard.read(which, mime).map_err(clipboard_error),
+        }
+    }
+}
+
+fn lost_daemon(e: std::io::Error) -> (Exit, String) {
+    (Exit::Io, format!("lost the Daemon: {e}"))
+}
+
 /// `paste --watch`: run `command` for the current selection and every change.
-fn watch(
-    clipboard: &mut Clipboard,
-    which: Selection,
-    args: &PasteArgs,
-    command: &[String],
-) -> Result<(), (Exit, String)> {
-    let mut offered = clipboard.offered(which).map(<[String]>::to_vec);
+fn watch(which: Selection, args: &PasteArgs, command: &[String]) -> Result<(), (Exit, String)> {
+    let mut changes = Changes::open(args.seat.as_deref())?;
     loop {
-        let (state, data) = match &offered {
+        let (state, data) = match changes.next(which)? {
             None => ("nil", Vec::new()),
             Some(types) => {
                 let state = if types.iter().any(|m| m == PASSWORD_HINT) {
@@ -440,14 +574,13 @@ fn watch(
                 } else {
                     "data"
                 };
-                match choose_type(types, args.mime_type.as_deref()) {
-                    Some(mime) => (state, clipboard.read(which, mime).map_err(clipboard_error)?),
+                match choose_type(&types, args.mime_type.as_deref()) {
+                    Some(mime) => (state, changes.read(which, mime)?),
                     None => (state, Vec::new()),
                 }
             }
         };
         run_watcher(command, state, &data)?;
-        offered = clipboard.next_change(which).map_err(clipboard_error)?;
     }
 }
 

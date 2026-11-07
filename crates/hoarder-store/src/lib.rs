@@ -288,6 +288,24 @@ impl Store {
         Ok(Some(reprs))
     }
 
+    /// Keep `png` as a Clip's thumbnail, replacing any it had.
+    pub fn set_thumb(&mut self, id: i64, png: &[u8]) -> Result<()> {
+        self.db.execute(
+            "INSERT OR REPLACE INTO thumbs(clip_id, png) VALUES (?1, ?2)",
+            params![id, png],
+        )?;
+        Ok(())
+    }
+
+    /// A Clip's thumbnail, if it has one.
+    pub fn thumb(&self, id: i64) -> Result<Option<Vec<u8>>> {
+        Ok(self
+            .db
+            .prepare_cached("SELECT png FROM thumbs WHERE clip_id = ?1")?
+            .query_row([id], |r| r.get(0))
+            .optional()?)
+    }
+
     /// Mark a Clip used at `now` (a Restore), moving it to the top.
     /// `false` if there is no such Clip.
     pub fn touch(&mut self, id: i64, now: i64) -> Result<bool> {

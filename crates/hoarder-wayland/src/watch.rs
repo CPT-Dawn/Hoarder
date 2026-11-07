@@ -216,6 +216,15 @@ impl Watcher {
         Ok(read)
     }
 
+    /// Ask the source of `offer` to write `mime_type` straight into `fd`
+    /// (someone else's pipe), and let go of it.
+    pub fn receive_into(&mut self, offer: &Offer, mime_type: &str, fd: OwnedFd) -> Result<()> {
+        offer.proxy.receive(mime_type, fd.as_fd());
+        self.flush()?;
+        drop(fd);
+        Ok(())
+    }
+
     /// Become the owner of `which`, offering `mime_types` in this order.
     /// Pastes arrive as [`WatchEvent::Send`]. Replaces any earlier Offer of ours.
     pub fn serve(&mut self, which: Selection, mime_types: &[String]) {
