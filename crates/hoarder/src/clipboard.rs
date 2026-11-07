@@ -11,6 +11,9 @@ use hoarder_wayland::clipboard::{Clipboard, ClipboardError, Representation, Sele
 
 use crate::Exit;
 
+/// Why a command failed: its exit code and what to tell the user.
+type Fail = (Exit, String);
+
 /// The KDE hint password managers set; its value is `secret`.
 pub(crate) const PASSWORD_HINT: &str = "x-kde-passwordManagerHint";
 
@@ -107,7 +110,7 @@ struct WlPaste {
 
 /// If this binary was started as `wl-copy` or `wl-paste` (argv[0], as the
 /// `hoarder-wl-compat` symlinks do), run as that tool: its name and outcome.
-pub fn run_as_shim() -> Option<(&'static str, Result<(), (Exit, String)>)> {
+pub fn run_as_shim() -> Option<(&'static str, Result<(), Fail>)> {
     let argv0 = std::env::args_os().next()?;
     let name = std::path::Path::new(&argv0).file_name()?.to_str()?;
     match name {
@@ -496,7 +499,10 @@ enum Changes {
     /// The Daemon's event stream (`subscribe`); reads go through it too.
     Daemon(hoarder_ipc::Connection),
     /// A data-control connection of our own, when no Daemon runs.
-    Own { clipboard: Clipboard, started: bool },
+    Own {
+        clipboard: Box<Clipboard>,
+        started: bool,
+    },
 }
 
 impl Changes {
@@ -511,7 +517,7 @@ impl Changes {
         }
         let clipboard = Clipboard::connect(seat).map_err(clipboard_error)?;
         Ok(Changes::Own {
-            clipboard,
+            clipboard: Box::new(clipboard),
             started: false,
         })
     }
