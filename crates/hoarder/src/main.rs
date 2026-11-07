@@ -182,7 +182,7 @@ fn main() -> ExitCode {
         Some(Command::ServeOffer(args)) => clipboard::serve_child(args),
         Some(Command::NotifyCapture(args)) => notify::serve_child(args),
         Some(Command::Config(command)) => config::run(command, &cli.overrides),
-        Some(Command::Clear) => daemon::clear(),
+        Some(Command::Clear) => daemon::clear(hoarder_wayland::clipboard::Selection::Clipboard),
         Some(Command::History(command)) => history::run(command),
         Some(Command::Daemon) => daemon::run(&cli.overrides),
         Some(Command::Service(command)) => daemon::service::run(command),

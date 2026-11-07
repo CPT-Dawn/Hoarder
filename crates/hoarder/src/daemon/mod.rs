@@ -86,6 +86,7 @@ pub fn run(overrides: &[(String, String)]) -> Result<(), Fail> {
         overrides: overrides.to_vec(),
         config_watch,
         slots: Default::default(),
+        current: Default::default(),
         clients: Default::default(),
         syncs: Vec::new(),
         next_token: 0,
@@ -103,17 +104,34 @@ pub fn run(overrides: &[(String, String)]) -> Result<(), Fail> {
 
 /// `hoarder clear`: through the Daemon when it runs, so it forgets the
 /// clipboard too; otherwise straight over data control.
-pub fn clear() -> Result<(), Fail> {
+pub fn clear(which: Selection) -> Result<(), Fail> {
     if let Ok(mut daemon) = hoarder_ipc::Connection::connect() {
-        return match daemon.call(hoarder_ipc::Op::Clear) {
+        let op = hoarder_ipc::Op::Clear {
+            selection: to_ipc(which),
+        };
+        return match daemon.call(op) {
             Ok(Ok(_)) => Ok(()),
             Ok(Err(failure)) => Err((Exit::Io, failure.message)),
             Err(e) => Err((Exit::Io, format!("lost the Daemon: {e}"))),
         };
     }
     hoarder_wayland::clipboard::Clipboard::connect(None)
-        .and_then(|mut c| c.clear(Selection::Clipboard))
+        .and_then(|mut c| c.clear(which))
         .map_err(wayland_error)
+}
+
+pub(crate) fn to_ipc(which: Selection) -> hoarder_ipc::Selection {
+    match which {
+        Selection::Clipboard => hoarder_ipc::Selection::Clipboard,
+        Selection::Primary => hoarder_ipc::Selection::Primary,
+    }
+}
+
+fn from_ipc(which: hoarder_ipc::Selection) -> Selection {
+    match which {
+        hoarder_ipc::Selection::Clipboard => Selection::Clipboard,
+        hoarder_ipc::Selection::Primary => Selection::Primary,
+    }
 }
 
 fn wayland_error(e: ClipboardError) -> Fail {
@@ -139,6 +157,8 @@ struct Slot {
     may_take_over: bool,
     /// Whether `kept` goes to History once read.
     record: bool,
+    /// Our Offer serves one paste, then gives the Selection up (`copy -o`).
+    once: bool,
     read: Option<ReadState>,
     /// The Selection went empty mid-read: take over once the read ends.
     take_over_after_read: bool,
@@ -165,6 +185,16 @@ struct InFlight {
     timer: RegistrationToken,
 }
 
+/// An `offer` request, its payload read.
+#[derive(Debug)]
+struct OfferRequest {
+    which: Selection,
+    types: Vec<String>,
+    sensitive: bool,
+    once: bool,
+    data: Vec<u8>,
+}
+
 /// How a type's read ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Ended {
@@ -180,6 +210,8 @@ pub(crate) struct Daemon {
     overrides: Vec<(String, String)>,
     config_watch: Option<hoarder_config::Watcher>,
     slots: [Slot; 2],
+    /// The Offer on each Selection right now, watched or not, for `paste`.
+    current: [Option<Offer>; 2],
     history: history::History,
     clients: socket::Clients,
     /// `(sync token, client, request id, answer)` of requests answered once
@@ -206,13 +238,26 @@ impl Daemon {
         };
         for event in events {
             match event {
-                WatchEvent::Changed { which, offer } => self.selection_changed(which, offer),
+                WatchEvent::Changed { which, offer } => {
+                    self.current[which as usize] = offer.clone();
+                    self.broadcast(&hoarder_ipc::Event::Selection {
+                        selection: to_ipc(which),
+                        types: offer.as_ref().map(|o| o.mime_types.clone()),
+                    });
+                    self.selection_changed(which, offer);
+                }
                 WatchEvent::Send {
                     which,
                     mime_type,
                     fd,
                 } => self.send(which, &mime_type, fd),
-                WatchEvent::Cancelled { .. } => {}
+                WatchEvent::Cancelled { which } => {
+                    // Nothing else tracks an unwatched Selection: let go of
+                    // what we served on it.
+                    if !self.watched(which) {
+                        self.slots[which as usize] = Slot::default();
+                    }
+                }
                 WatchEvent::Synced(token) => self.synced(token),
             }
         }
@@ -280,6 +325,7 @@ impl Daemon {
         slot.kept.clear();
         slot.may_take_over = may_take_over;
         slot.record = record;
+        slot.once = false;
         slot.take_over_after_read = false;
         slot.read = Some(ReadState {
             offer,
@@ -318,7 +364,8 @@ impl Daemon {
     /// Answer a paste from our own Offer, off-thread so a slow reader never
     /// stalls the loop.
     fn send(&mut self, which: Selection, mime_type: &str, fd: OwnedFd) {
-        let data = self.slots[which as usize]
+        let slot = &mut self.slots[which as usize];
+        let data = slot
             .kept
             .iter()
             .find(|(m, _)| m == mime_type)
@@ -329,6 +376,64 @@ impl Daemon {
                 let _ = File::from(fd).write_all(&data);
             });
         }
+        if std::mem::take(&mut slot.once) {
+            // Pasted once: give it up for good, as `wl-copy -o` exits.
+            slot.kept.clear();
+            slot.may_take_over = false;
+            self.watcher.clear(which);
+        }
+    }
+
+    /// `offer`: serve `data` as `types` on `which`, as `copy` or a Capture
+    /// asks, and record it unless it is a password.
+    fn offer(&mut self, client: u64, id: u64, offer: OfferRequest) {
+        let OfferRequest {
+            which,
+            types,
+            sensitive,
+            once,
+            data,
+        } = offer;
+        self.stop_reading(which);
+        let data: Arc<[u8]> = data.into();
+        let mut kept: Vec<Representation> = types
+            .iter()
+            .map(|m| (m.clone(), Arc::clone(&data)))
+            .collect();
+        if sensitive {
+            kept.push((PASSWORD_HINT.into(), Arc::from(&b"secret"[..])));
+        } else if self.records(which) {
+            let job = history::Job::Record {
+                reprs: kept.clone(),
+                app: None,
+            };
+            let _ = self.history.send(job);
+        }
+        let served: Vec<String> = kept.iter().map(|(m, _)| m.clone()).collect();
+        let slot = &mut self.slots[which as usize];
+        slot.kept = kept;
+        // A password is never restored (ADR-0006); a one-paste Offer is gone
+        // once pasted.
+        slot.may_take_over = !sensitive && !once;
+        slot.record = false;
+        slot.once = once;
+        slot.take_over_after_read = false;
+        self.watcher.serve(which, &served);
+        self.reply_when_synced(client, id, hoarder_ipc::Value::Null);
+    }
+
+    /// `paste`: have the source of `which` write `mime` into `pipe`.
+    fn paste(&mut self, which: Selection, mime: &str, pipe: OwnedFd) -> Result<(), String> {
+        let Some(offer) = &self.current[which as usize] else {
+            return Err("Nothing is copied".into());
+        };
+        if !offer.mime_types.iter().any(|m| m == mime) {
+            return Err(format!("the Selection is not offered as {mime}"));
+        }
+        let offer = offer.clone();
+        self.watcher
+            .receive_into(&offer, mime, pipe)
+            .map_err(|e| e.to_string())
     }
 
     /// Start reading the next planned type, or finish the read.
@@ -480,11 +585,11 @@ impl Daemon {
 
     /// `hoarder clear`: forget the clipboard and empty it, so nothing is
     /// restored. The reply waits until the compositor has applied it.
-    fn clear(&mut self, client: u64, id: u64) {
-        let which = Selection::Clipboard;
+    fn clear(&mut self, client: u64, id: u64, which: Selection) {
         self.stop_reading(which);
         let slot = &mut self.slots[which as usize];
         slot.kept.clear();
+        slot.once = false;
         slot.take_over_after_read = false;
         self.watcher.clear(which);
         self.reply_when_synced(client, id, hoarder_ipc::Value::Null);
@@ -533,6 +638,7 @@ impl Daemon {
         slot.kept = reprs;
         slot.may_take_over = true;
         slot.record = false;
+        slot.once = false;
         slot.take_over_after_read = false;
         let types: Vec<String> = slot.kept.iter().map(|(m, _)| m.clone()).collect();
         self.watcher.serve(which, &types);

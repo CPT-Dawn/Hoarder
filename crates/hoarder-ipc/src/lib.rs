@@ -53,9 +53,44 @@ pub enum Op {
     Hello,
     /// The Daemon's state; answered with [`Status`].
     Status,
-    /// Empty the clipboard and keep it empty: no Takeover restores it.
+    /// Empty a Selection (the clipboard unless `selection` says) and keep
+    /// it empty: no Takeover restores it. Answered once the compositor has
+    /// applied it.
+    Clear {
+        #[serde(default, skip_serializing_if = "Selection::is_clipboard")]
+        selection: Selection,
+    },
+    /// Make the Daemon serve one payload as the Selection under each of
+    /// `types`, in this order: what `hoarder copy` and Captures send. The
+    /// payload is the whole of a regular file (a memfd) passed with the
+    /// request (`SCM_RIGHTS`). Recorded in History unless `sensitive`.
     /// Answered once the compositor has applied it.
-    Clear,
+    Offer {
+        #[serde(default, skip_serializing_if = "Selection::is_clipboard")]
+        selection: Selection,
+        types: Vec<String>,
+        /// A password: offered with `x-kde-passwordManagerHint: secret`,
+        /// never recorded nor restored.
+        #[serde(default)]
+        sensitive: bool,
+        /// Serve one paste, then give the Selection up.
+        #[serde(default)]
+        once: bool,
+    },
+    /// Stream `mime` of the current Selection, straight from its source,
+    /// into the pipe passed with the request (`SCM_RIGHTS`). Answered once
+    /// the source has been asked; the pipe closes at the data's end.
+    Paste {
+        #[serde(default, skip_serializing_if = "Selection::is_clipboard")]
+        selection: Selection,
+        mime: String,
+    },
+    /// Receive [`Event`]s on this connection from now on, starting with a
+    /// `selection` event for each Selection as it is now.
+    Subscribe,
+    /// Stream a Clip's thumbnail (a PNG at most 256 px on a side) into the
+    /// pipe passed with the request; answered with [`Got`].
+    Thumb { clip: i64 },
     /// History, most recently used first; answered with [`ClipSummary`]s.
     List {
         /// At most this many Clips (all of them if absent).
@@ -76,6 +111,47 @@ pub enum Op {
     Restore { clip: i64 },
     /// Remove a Clip from History.
     Delete { clip: i64 },
+}
+
+/// Which Selection a request is about.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Selection {
+    /// The regular clipboard (Ctrl+C / Ctrl+V).
+    #[default]
+    Clipboard,
+    /// The primary selection (select / middle-click).
+    Primary,
+}
+
+impl Selection {
+    fn is_clipboard(&self) -> bool {
+        *self == Selection::Clipboard
+    }
+}
+
+/// Something that happened, pushed to subscribed connections
+/// ([`Op::Subscribe`]) as `{"v":1,"event":…}` lines between responses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum Event {
+    /// A Selection changed hands: `types` is what it offers now, in the
+    /// source's order, or `None` once it is empty.
+    Selection {
+        selection: Selection,
+        types: Option<Vec<String>>,
+    },
+    /// An event newer than this crate.
+    #[serde(other)]
+    Unknown,
+}
+
+/// One event line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventLine {
+    pub v: u32,
+    #[serde(flatten)]
+    pub event: Event,
 }
 
 /// One Clip, as `list` shows it.
@@ -262,12 +338,20 @@ fn failure(code: ErrorCode, message: String) -> Outcome {
     Outcome::Err(Failure { code, message })
 }
 
+/// One line from the Daemon.
+enum Line {
+    Response(Response),
+    Event(Event),
+}
+
 /// A blocking connection to the Daemon, for one-shot Front ends like the CLI.
 #[derive(Debug)]
 pub struct Connection {
     writer: UnixStream,
     reader: BufReader<UnixStream>,
     next_id: u64,
+    /// Events that arrived while waiting for a response.
+    events: std::collections::VecDeque<Event>,
 }
 
 impl Connection {
@@ -286,6 +370,7 @@ impl Connection {
             writer,
             reader,
             next_id: 1,
+            events: Default::default(),
         })
     }
 
@@ -340,8 +425,18 @@ impl Connection {
         clip: i64,
         mime: Option<String>,
     ) -> std::io::Result<Result<(Got, std::fs::File), Failure>> {
+        self.streamed(Op::Get { clip, mime })
+    }
+
+    /// [`Op::Thumb`]: the response and a reader for the PNG.
+    pub fn thumb(&mut self, clip: i64) -> std::io::Result<Result<(Got, std::fs::File), Failure>> {
+        self.streamed(Op::Thumb { clip })
+    }
+
+    /// Send `op` with a pipe: its [`Got`] and the pipe's read end.
+    fn streamed(&mut self, op: Op) -> std::io::Result<Result<(Got, std::fs::File), Failure>> {
         let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)?;
-        let response = self.call_with_fd(Op::Get { clip, mime }, write.as_fd());
+        let response = self.call_with_fd(op, write.as_fd());
         drop(write);
         Ok(match response? {
             Ok(v) => Ok((
@@ -350,6 +445,74 @@ impl Connection {
                 std::fs::File::from(read),
             )),
             Err(f) => Err(f),
+        })
+    }
+
+    /// [`Op::Offer`]: `data` goes over in a memfd.
+    pub fn offer(
+        &mut self,
+        selection: Selection,
+        types: Vec<String>,
+        sensitive: bool,
+        once: bool,
+        data: &[u8],
+    ) -> std::io::Result<Result<(), Failure>> {
+        let memfd = rustix::fs::memfd_create("hoarder-offer", rustix::fs::MemfdFlags::CLOEXEC)?;
+        let mut file = std::fs::File::from(memfd);
+        file.write_all(data)?;
+        let op = Op::Offer {
+            selection,
+            types,
+            sensitive,
+            once,
+        };
+        Ok(self.call_with_fd(op, file.as_fd())?.map(drop))
+    }
+
+    /// [`Op::Paste`]: a reader for the data, which ends with it.
+    pub fn paste(
+        &mut self,
+        selection: Selection,
+        mime: String,
+    ) -> std::io::Result<Result<std::fs::File, Failure>> {
+        let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)?;
+        let response = self.call_with_fd(Op::Paste { selection, mime }, write.as_fd());
+        drop(write);
+        Ok(response?.map(|_| std::fs::File::from(read)))
+    }
+
+    /// [`Op::Subscribe`]: events then arrive through [`Connection::next_event`].
+    pub fn subscribe(&mut self) -> std::io::Result<Result<(), Failure>> {
+        Ok(self.call(Op::Subscribe)?.map(drop))
+    }
+
+    /// The next event on a subscribed connection, waiting for it.
+    pub fn next_event(&mut self) -> std::io::Result<Event> {
+        if let Some(event) = self.events.pop_front() {
+            return Ok(event);
+        }
+        loop {
+            if let Line::Event(event) = self.next_line()? {
+                return Ok(event);
+            }
+        }
+    }
+
+    fn next_line(&mut self) -> std::io::Result<Line> {
+        let mut line = String::new();
+        if self.reader.read_line(&mut line)? == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        let invalid = |e| std::io::Error::new(std::io::ErrorKind::InvalidData, e);
+        let value: Value = serde_json::from_str(&line).map_err(invalid)?;
+        Ok(if value.get("event").is_some() {
+            Line::Event(
+                serde_json::from_value::<EventLine>(value)
+                    .map_err(invalid)?
+                    .event,
+            )
+        } else {
+            Line::Response(serde_json::from_value(value).map_err(invalid)?)
         })
     }
 
@@ -366,16 +529,18 @@ impl Connection {
         self.typed(Op::Restore { clip })
     }
 
-    /// Wait for the response to request `id`.
+    /// Wait for the response to request `id`, keeping events that arrive
+    /// meanwhile for [`Connection::next_event`].
     fn response(&mut self, id: u64) -> std::io::Result<Result<Value, Failure>> {
         loop {
-            let mut line = String::new();
-            if self.reader.read_line(&mut line)? == 0 {
-                return Err(std::io::ErrorKind::UnexpectedEof.into());
-            }
-            let response: Response = serde_json::from_str(&line)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            // Skip anything else on the stream (events of a subscription).
+            let response = match self.next_line()? {
+                Line::Event(event) => {
+                    self.events.push_back(event);
+                    continue;
+                }
+                Line::Response(response) => response,
+            };
+            // Skip answers to anything else.
             if response.id == Some(id) {
                 return Ok(match response.outcome {
                     Outcome::Ok(v) => Ok(v),

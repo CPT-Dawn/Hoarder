@@ -1,7 +1,8 @@
 //! The Daemon's end of the socket (PLAN.md §11): a private directory, a
 //! same-user check on every connection, and JSON-lines requests answered on
-//! the event loop. Ops that take a file descriptor (`get`) take the oldest
-//! one passed (`SCM_RIGHTS`) on that connection and not yet used.
+//! the event loop. Ops that take a file descriptor (`get`, `thumb`, `paste`,
+//! `offer`) take the oldest one passed (`SCM_RIGHTS`) on that connection and
+//! not yet used. Subscribed connections also get event lines.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{ErrorKind, Write as _};
@@ -12,7 +13,9 @@ use std::os::unix::net::{UnixListener, UnixStream};
 
 use calloop::generic::Generic;
 use calloop::{Interest, LoopHandle, Mode, PostAction};
-use hoarder_ipc::{ErrorCode, Failure, Hello, Op, Outcome, PROTOCOL, Response, SUPPORTED, Value};
+use hoarder_ipc::{
+    ErrorCode, EventLine, Failure, Hello, Op, Outcome, PROTOCOL, Response, SUPPORTED, Value,
+};
 use rustix::io::Errno;
 use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, recvmsg};
 
@@ -45,6 +48,8 @@ struct Client {
     fds: VecDeque<OwnedFd>,
     /// Reply bytes the socket had no room for yet.
     pending: Vec<u8>,
+    /// Whether it gets events (`subscribe`).
+    subscribed: bool,
 }
 
 /// Create `$XDG_RUNTIME_DIR/hoarder` (mode 0700) and listen on its socket.
@@ -139,6 +144,7 @@ impl Daemon {
                     buf: Vec::new(),
                     fds: VecDeque::new(),
                     pending: Vec::new(),
+                    subscribed: false,
                 },
             );
         }
@@ -221,39 +227,127 @@ impl Daemon {
                 let status = self.status();
                 self.reply(client, id, Ok(to_value(&status)));
             }
-            Op::Clear => self.clear(client, id),
+            Op::Clear { selection } => self.clear(client, id, super::from_ipc(selection)),
             Op::List { limit } => self.ask_history(client, id, Job::List { client, id, limit }),
             Op::Get { clip, mime } => {
-                let pipe = self
-                    .clients
-                    .open
-                    .get_mut(&client)
-                    .and_then(|c| c.fds.pop_front());
-                match pipe {
-                    Some(pipe) => self.ask_history(
-                        client,
-                        id,
-                        Job::Get {
-                            client,
-                            id,
-                            clip,
-                            mime,
-                            pipe,
-                        },
-                    ),
-                    None => self.reply(
-                        client,
-                        id,
-                        Err(Failure {
-                            code: ErrorCode::BadRequest,
-                            message: "get streams into a pipe passed with the request".into(),
-                        }),
-                    ),
-                }
+                let Some(pipe) = self.take_fd(client, id, "get streams into a pipe") else {
+                    return;
+                };
+                let job = Job::Get {
+                    client,
+                    id,
+                    clip,
+                    mime,
+                    pipe,
+                };
+                self.ask_history(client, id, job);
+            }
+            Op::Thumb { clip } => {
+                let Some(pipe) = self.take_fd(client, id, "thumb streams into a pipe") else {
+                    return;
+                };
+                let job = Job::Thumb {
+                    client,
+                    id,
+                    clip,
+                    pipe,
+                };
+                self.ask_history(client, id, job);
             }
             Op::Restore { clip } => self.ask_history(client, id, Job::Restore { client, id, clip }),
             Op::Delete { clip } => self.ask_history(client, id, Job::Delete { client, id, clip }),
+            Op::Offer {
+                selection,
+                types,
+                sensitive,
+                once,
+            } => {
+                let Some(file) = self.take_fd(client, id, "offer data comes in a memfd") else {
+                    return;
+                };
+                if types.is_empty() {
+                    return self.reply(client, id, Err(bad_request("offer needs types")));
+                }
+                match read_payload(file) {
+                    Ok(data) => {
+                        let offer = super::OfferRequest {
+                            which: super::from_ipc(selection),
+                            types,
+                            sensitive,
+                            once,
+                            data,
+                        };
+                        self.offer(client, id, offer);
+                    }
+                    Err(failure) => self.reply(client, id, Err(failure)),
+                }
+            }
+            Op::Paste { selection, mime } => {
+                let Some(pipe) = self.take_fd(client, id, "paste streams into a pipe") else {
+                    return;
+                };
+                let result = self
+                    .paste(super::from_ipc(selection), &mime, pipe)
+                    .map(|()| Value::Null)
+                    .map_err(|message| Failure {
+                        code: ErrorCode::NotFound,
+                        message,
+                    });
+                self.reply(client, id, result);
+            }
+            Op::Subscribe => {
+                if let Some(c) = self.clients.open.get_mut(&client) {
+                    c.subscribed = true;
+                }
+                self.reply(client, id, Ok(Value::Null));
+                for which in super::SELECTIONS {
+                    let event = hoarder_ipc::Event::Selection {
+                        selection: super::to_ipc(which),
+                        types: self.current[which as usize]
+                            .as_ref()
+                            .map(|o| o.mime_types.clone()),
+                    };
+                    self.send_event(client, &event);
+                }
+            }
         }
+    }
+
+    /// The oldest fd `client` passed and no request has taken yet; without
+    /// one, answers `id` with `needs` and returns `None`.
+    fn take_fd(&mut self, client: u64, id: u64, needs: &str) -> Option<OwnedFd> {
+        let fd = self
+            .clients
+            .open
+            .get_mut(&client)
+            .and_then(|c| c.fds.pop_front());
+        if fd.is_none() {
+            let why = format!("{needs} passed with the request (SCM_RIGHTS)");
+            self.reply(client, id, Err(bad_request(&why)));
+        }
+        fd
+    }
+
+    /// Tell every subscribed Front end about `event`.
+    pub(super) fn broadcast(&mut self, event: &hoarder_ipc::Event) {
+        let subscribed: Vec<u64> = self
+            .clients
+            .open
+            .iter()
+            .filter(|(_, c)| c.subscribed)
+            .map(|(id, _)| *id)
+            .collect();
+        for client in subscribed {
+            self.send_event(client, event);
+        }
+    }
+
+    fn send_event(&mut self, client: u64, event: &hoarder_ipc::Event) {
+        let line = hoarder_ipc::encode(&EventLine {
+            v: PROTOCOL,
+            event: event.clone(),
+        });
+        self.send_line(client, &line);
     }
 
     /// Hand a request to the History thread, which answers it.
@@ -277,7 +371,10 @@ impl Daemon {
     }
 
     fn send_response(&mut self, client: u64, response: &Response) {
-        let line = hoarder_ipc::encode(response);
+        self.send_line(client, &hoarder_ipc::encode(response));
+    }
+
+    fn send_line(&mut self, client: u64, line: &str) {
         let Some(Client {
             writer, pending, ..
         }) = self.clients.open.get_mut(&client)
@@ -342,6 +439,32 @@ impl Daemon {
             }
         }
     }
+}
+
+fn bad_request(message: &str) -> Failure {
+    Failure {
+        code: ErrorCode::BadRequest,
+        message: message.into(),
+    }
+}
+
+/// The whole of an `offer`'s payload file. Only a regular file (a memfd)
+/// will do: a pipe could keep the loop waiting forever.
+fn read_payload(fd: OwnedFd) -> Result<Vec<u8>, Failure> {
+    use std::os::unix::fs::FileExt as _;
+    let stat = rustix::fs::fstat(&fd).map_err(|e| bad_request(&e.to_string()))?;
+    if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile {
+        return Err(bad_request(
+            "offer data comes in a regular file (a memfd), not a pipe",
+        ));
+    }
+    let file = std::fs::File::from(fd);
+    let mut data = vec![0; stat.st_size as usize];
+    file.read_exact_at(&mut data, 0).map_err(|e| Failure {
+        code: ErrorCode::Failed,
+        message: format!("cannot read the offer: {e}"),
+    })?;
+    Ok(data)
 }
 
 /// Write as much of `data` as the socket takes now.

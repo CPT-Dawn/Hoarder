@@ -25,8 +25,11 @@ pub enum HistoryCommand {
         #[command(flatten)]
         clip: ClipArg,
         /// The MIME type to write.
-        #[arg(long, short = 't', value_name = "MIME")]
+        #[arg(long, short = 't', value_name = "MIME", conflicts_with = "thumb")]
         r#type: Option<String>,
+        /// Write the Clip's thumbnail (a PNG, 256 px at most) instead.
+        #[arg(long)]
+        thumb: bool,
         /// Print the Clip's details as JSON instead of its data.
         #[command(flatten)]
         json: Json,
@@ -90,8 +93,17 @@ pub fn run(command: HistoryCommand) -> Result<(), Fail> {
             }
             write_stdout(out.as_bytes())
         }
-        HistoryCommand::Get { clip, r#type, json } => {
-            let (got, mut data) = answer(daemon.get(clip.id, r#type))?;
+        HistoryCommand::Get {
+            clip,
+            r#type,
+            thumb,
+            json,
+        } => {
+            let (got, mut data) = if thumb {
+                answer(daemon.thumb(clip.id))?
+            } else {
+                answer(daemon.get(clip.id, r#type))?
+            };
             if json.json {
                 return print_json(&got);
             }

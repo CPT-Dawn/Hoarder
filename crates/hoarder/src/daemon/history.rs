@@ -35,6 +35,12 @@ pub(super) enum Job {
         mime: Option<String>,
         pipe: OwnedFd,
     },
+    Thumb {
+        client: u64,
+        id: u64,
+        clip: i64,
+        pipe: OwnedFd,
+    },
     Restore {
         client: u64,
         id: u64,
@@ -142,11 +148,19 @@ fn worker(mut store: Store, jobs: mpsc::Receiver<Job>, done: calloop::channel::S
             Job::Record { reprs, app } => {
                 let reprs: Vec<(&str, &[u8])> =
                     reprs.iter().map(|(m, d)| (m.as_str(), &d[..])).collect();
-                if let Err(e) = store.record(&reprs, app.as_deref(), now()) {
-                    eprintln!("hoarder: cannot record a Clip: {e}");
+                match store.record(&reprs, app.as_deref(), now()) {
+                    Ok(recorded) if recorded.new => add_thumb(&mut store, recorded.id, &reprs),
+                    Ok(_) => {}
+                    Err(e) => eprintln!("hoarder: cannot record a Clip: {e}"),
                 }
                 continue;
             }
+            Job::Thumb {
+                client,
+                id,
+                clip,
+                pipe,
+            } => reply(client, id, thumb(&store, clip, pipe)),
             Job::List { client, id, limit } => {
                 let limit = limit.map_or(usize::MAX, |l| l as usize);
                 let result = store
@@ -215,6 +229,50 @@ fn get(store: &Store, clip: i64, mime: Option<String>, pipe: OwnedFd) -> Result<
     std::thread::spawn(move || {
         // A reader that hangs up early is its own business.
         let _ = File::from(pipe).write_all(&data);
+    });
+    Ok(to_value(&got))
+}
+
+/// Thumbnails fit in a square this many pixels on a side (PLAN.md §5.3).
+const THUMB_SIZE: u32 = 256;
+
+/// Give a new image Clip its thumbnail, made from its PNG (or its first
+/// image type). An image that does not decode simply has none.
+fn add_thumb(store: &mut Store, clip: i64, reprs: &[(&str, &[u8])]) {
+    let image = reprs
+        .iter()
+        .find(|(m, _)| *m == "image/png")
+        .or_else(|| reprs.iter().find(|(m, _)| m.starts_with("image/")));
+    let Some((_, data)) = image else { return };
+    let Ok(decoded) = image::load_from_memory(data) else {
+        return;
+    };
+    let small =
+        image::DynamicImage::ImageRgba8(decoded.thumbnail(THUMB_SIZE, THUMB_SIZE).to_rgba8());
+    let mut png = Vec::new();
+    if small
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .is_ok()
+        && let Err(e) = store.set_thumb(clip, &png)
+    {
+        eprintln!("hoarder: cannot keep a thumbnail: {e}");
+    }
+}
+
+/// Answer `thumb`, streaming the PNG into `pipe` off-thread.
+fn thumb(store: &Store, clip: i64, pipe: OwnedFd) -> Result<Value, Failure> {
+    let meta = store.clip(clip).map_err(failed)?.ok_or(not_found(clip))?;
+    let png = store.thumb(clip).map_err(failed)?.ok_or_else(|| Failure {
+        code: ErrorCode::NotFound,
+        message: format!("Clip {clip} has no thumbnail"),
+    })?;
+    let got = Got {
+        clip: summary(&meta),
+        mime: "image/png".into(),
+        size: png.len() as u64,
+    };
+    std::thread::spawn(move || {
+        let _ = File::from(pipe).write_all(&png);
     });
     Ok(to_value(&got))
 }

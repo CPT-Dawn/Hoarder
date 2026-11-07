@@ -161,6 +161,10 @@ fn offered_types(mime: &str) -> Vec<String> {
 pub fn copy(args: CopyArgs) -> Result<(), (Exit, String)> {
     let which = which(args.primary);
     if args.clear {
+        // Through the Daemon, which would otherwise restore what was cleared.
+        if args.seat.is_none() {
+            return crate::daemon::clear(which);
+        }
         let mut clipboard = Clipboard::connect(args.seat.as_deref()).map_err(clipboard_error)?;
         return clipboard.clear(which).map_err(clipboard_error);
     }
@@ -194,7 +198,7 @@ pub fn copy(args: CopyArgs) -> Result<(), (Exit, String)> {
     if args.foreground {
         offer.serve_here(data.into(), || {})
     } else {
-        offer.serve_in_background(&data)
+        offer.serve(&data)
     }
 }
 
@@ -233,6 +237,41 @@ impl Offer {
         clipboard
             .serve(self.which, self.representations(data), self.serve, ready)
             .map_err(clipboard_error)
+    }
+
+    /// Serve `data` after this process exits: by the Daemon when it runs,
+    /// else by a background child.
+    pub fn serve(&self, data: &[u8]) -> Result<(), (Exit, String)> {
+        match self.hand_to_daemon(data) {
+            Some(result) => result,
+            None => self.serve_in_background(data),
+        }
+    }
+
+    /// Hand `data` to the Daemon (`offer`); `None` if no Daemon takes it,
+    /// so the caller serves it some other way.
+    fn hand_to_daemon(&self, data: &[u8]) -> Option<Result<(), (Exit, String)>> {
+        // The Daemon watches the default seat only.
+        if self.seat.is_some() {
+            return None;
+        }
+        let mut daemon = hoarder_ipc::Connection::connect().ok()?;
+        // The Daemon adds the password hint itself.
+        let types = self
+            .mime_types
+            .iter()
+            .filter(|m| *m != PASSWORD_HINT)
+            .cloned()
+            .collect();
+        let once = self.serve == Serve::Once;
+        let which = crate::daemon::to_ipc(self.which);
+        match daemon.offer(which, types, self.sensitive, once, data) {
+            Ok(Ok(())) => Some(Ok(())),
+            // A Daemon too old for `offer`, or one that went away.
+            Ok(Err(f)) if f.code == hoarder_ipc::ErrorCode::UnknownOp => None,
+            Err(_) => None,
+            Ok(Err(f)) => Some(Err((Exit::Io, f.message))),
+        }
     }
 
     /// Hand `data` to a detached child of this binary that serves it, and
@@ -292,15 +331,10 @@ impl Offer {
 }
 
 /// Put a Capture's PNG on the clipboard so it stays pasteable after
-/// `hoarder shot` exits. Until the Daemon can take it (#76), a serving child
-/// holds it, and with no Daemon running the user hears once that History is off.
+/// `hoarder shot` exits. The Daemon takes it and records it as an image
+/// Clip; with no Daemon running a serving child holds it, and the user hears
+/// once that History is off.
 pub fn copy_capture(png: &[u8]) -> Result<(), (Exit, String)> {
-    if !daemon_running() {
-        eprintln!(
-            "hoarder: History is off (no Daemon running); the Capture is on the clipboard \
-             but will not be kept. Run `hoarder service enable` to keep Captures."
-        );
-    }
     let offer = Offer {
         which: Selection::Clipboard,
         mime_types: vec!["image/png".into()],
@@ -308,17 +342,14 @@ pub fn copy_capture(png: &[u8]) -> Result<(), (Exit, String)> {
         serve: Serve::UntilReplaced,
         seat: None,
     };
+    if let Some(result) = offer.hand_to_daemon(png) {
+        return result;
+    }
+    eprintln!(
+        "hoarder: History is off (no Daemon running); the Capture is on the clipboard \
+         but will not be kept. Run `hoarder service enable` to keep Captures."
+    );
     offer.serve_in_background(png)
-}
-
-/// Whether something answers on the Daemon's socket (PLAN.md §11).
-fn daemon_running() -> bool {
-    std::env::var_os("XDG_RUNTIME_DIR").is_some_and(|dir| {
-        std::os::unix::net::UnixStream::connect(
-            std::path::Path::new(&dir).join("hoarder/hoarder.sock"),
-        )
-        .is_ok()
-    })
 }
 
 /// The hidden subcommand the background child runs.
