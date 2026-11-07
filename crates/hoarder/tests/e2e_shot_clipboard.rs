@@ -31,11 +31,12 @@ fn wl_paste(session: &Session, args: &[&str]) -> std::process::Output {
 
 /// Run `hoarder shot all` with stdio detached from any pipe a serving child
 /// could hold open, returning its exit status and stderr.
-fn shot_all(session: &Session) -> (std::process::ExitStatus, String) {
+fn shot_all(session: &Session, extra: &[&str]) -> (std::process::ExitStatus, String) {
     let err = session.runtime_dir().join("shot.stderr");
     let status = session
         .command(HOARDER)
         .args(["shot", "all"])
+        .args(extra)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(std::fs::File::create(&err).unwrap())
@@ -52,7 +53,7 @@ fn a_capture_is_pasteable_after_shot_has_exited() {
         .paint(session.output("HEADLESS-1"), &Pattern::Quadrants)
         .unwrap();
 
-    let (status, stderr) = shot_all(&session);
+    let (status, stderr) = shot_all(&session, &[]);
     assert!(status.success(), "hoarder shot all failed: {stderr}");
 
     let types = wl_paste(&session, &["--list-types"]);
@@ -75,7 +76,7 @@ fn a_capture_is_pasteable_after_shot_has_exited() {
 #[test]
 fn shot_warns_once_that_history_is_off_without_a_daemon() {
     let session = Session::start_default().unwrap();
-    let (status, stderr) = shot_all(&session);
+    let (status, stderr) = shot_all(&session, &[]);
     assert!(status.success(), "hoarder shot all failed: {stderr}");
     let warnings: Vec<&str> = stderr
         .lines()
@@ -101,4 +102,30 @@ fn no_copy_leaves_the_clipboard_alone() {
     assert!(out.status.success());
     assert!(out.stderr.is_empty(), "no warning without a copy");
     assert!(!wl_paste(&session, &[]).status.success(), "nothing copied");
+}
+
+/// PLAN.md §4.1: a 4K Capture is on the clipboard within 150 ms. With no
+/// Overlay yet (#61) the clock starts at process launch, so this covers the
+/// freeze and start-up as well as release-to-clipboard. Saving is off, so the
+/// process exits as soon as the clipboard Offer is live. Timing an unoptimised
+/// build says nothing, so this runs under `cargo test --release` only.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "timing needs `cargo test --release`")]
+fn a_4k_capture_reaches_the_clipboard_within_150_ms() {
+    let session = Session::start(&[OutputSpec::new(3840, 2160)]).unwrap();
+    let painter = session.client().unwrap();
+    painter
+        .paint(session.output("HEADLESS-1"), &Pattern::Ramp)
+        .unwrap();
+    let mut best = std::time::Duration::MAX;
+    for _ in 0..5 {
+        let start = std::time::Instant::now();
+        let (status, stderr) = shot_all(&session, &["--set", "screenshot.save=false"]);
+        let took = start.elapsed();
+        assert!(status.success(), "hoarder shot all failed: {stderr}");
+        best = best.min(took);
+    }
+    eprintln!("4K shot-to-clipboard: best of 5 = {best:?}");
+    assert!(wl_paste(&session, &["-t", "image/png"]).status.success());
+    assert!(best.as_millis() < 150, "took {best:?}");
 }
