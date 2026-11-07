@@ -372,6 +372,8 @@ hoarder doctor
 hoarder completions bash|zsh|fish
 ```
 
+`hoarder setup <wm> --apply` writes the recommended bindings and the login-time service start to a file of Hoarder's own (`hypr/hoarder.conf`, `sway/config.d/hoarder`, `niri/hoarder.kdl`) and prints the line the main config needs; it never edits the main config. A Hyprland config dir with `hyprland.lua` is a Lua config (Hyprland 0.57 loads it and ignores `hyprland.conf`): the file is then the module `hypr/hoarder.lua` (`hl.bind`, `hl.on("hyprland.start", …)`), pulled in by `require("hoarder")`. `hoarder service enable` reports the Daemon running only once its socket answers `hello`, and after a 5 s deadline says it did not and points at `journalctl --user -u hoarder`.
+
 Exit codes: 0 on success, 1 when cancelled by the user, 2 for usage errors, 3 for unsupported compositor or protocol, 4 for I/O errors.
 
 ## 11. IPC API (v1)

@@ -90,7 +90,9 @@ It is also handy for bug reports: a user can check whether a capture problem fol
 
 ## The Daemon (`crates/hoarder/tests/e2e_daemon.rs`)
 
-The Daemon tests start `hoarder daemon` in the session and judge it only by what a user or Front end can see: `wl-paste` after the source app exits (Takeover and the Reader rules), the source still owning its Selection, socket responses, `/proc` context switches for idle wakeups, and exit codes. The `status` op's `reading` flag tells a test when the Daemon has finished reading an Offer, so a source is never quit mid-read by accident. `hoarder service` runs against a stand-in `systemctl` placed first on `PATH`, so no test touches your real user manager.
+The Daemon tests start `hoarder daemon` in the session and judge it only by what a user or Front end can see: `wl-paste` after the source app exits (Takeover and the Reader rules), the source still owning its Selection, socket responses, `/proc` context switches for idle wakeups, and exit codes. The `status` op's `reading` flag tells a test when the Daemon has finished reading an Offer, so a source is never quit mid-read by accident. `hoarder service` runs against a stand-in `systemctl` placed first on `PATH`, so no test touches your real user manager; for `enable`, the stand-in starts the Daemon half a second late, as the user manager would, or not at all.
+
+`hoarder setup` runs in the session's private HOME (`e2e_setup.rs`). When `Hyprland` is on `PATH`, `hyprland_accepts_the_written_lua_module` also runs `Hyprland --verify-config` against that private config dir, which starts no compositor; without it (as in CI) the test skips.
 
 ## The socket API (`crates/hoarder/tests/e2e_ipc.rs`)
 
