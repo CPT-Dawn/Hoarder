@@ -384,6 +384,8 @@ One JSON object per line, sent over `$XDG_RUNTIME_DIR/hoarder/hoarder.sock`. The
 
 **Ops:** `hello` (version negotiation), `status`, `list`, `get` (the representation is streamed over a passed fd), `thumb`, `restore`, `offer` (Capture or `copy` data in a passed memfd), `paste` (the current Selection, streamed from its source into a passed pipe; what `paste --watch` reads through), `delete`, `pin`, `unpin`, `clear` (the clipboard), `clear_history`, `pause`, `resume`, `subscribe`, `reload`.
 
+**Concealed Clips** show up in `list` only when it asks with `"concealed":true`, among History's Clips by time: negative ids, `"sensitivity":"concealed"`, an `expires` time and a masked preview. Their text comes only through `get`, so a Front end keeps them masked until the user asks (the Picker: while `Alt` is held). `restore` and `delete` take their ids too; `restore` with `"plain":true` serves only the plain text (Shift+Enter).
+
 **Compatibility:** additive changes keep `v:1`; breaking changes bump `v` and the `hoarder-ipc` major version.
 
 ## 12. Budgets
