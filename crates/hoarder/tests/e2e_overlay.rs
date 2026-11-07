@@ -244,3 +244,45 @@ fn right_click_cancels_with_exit_code_1() {
     assert_eq!(done.status.code(), Some(1), "exit code: {}", done.stderr);
     assert!(done.stdout.is_empty(), "nothing is written when cancelled");
 }
+
+/// Budget (PLAN.md §12): key press to Overlay visible on 4K under 60 ms.
+/// Measured by hoarder itself, from start to the first frame callback of
+/// every Overlay surface. Only enforced in optimised builds; run with
+/// `cargo test --release --test e2e_overlay budget -- --nocapture`.
+#[test]
+fn budget_overlay_visible_on_4k() {
+    let session = Session::start(&[OutputSpec::new(3840, 2160)]).unwrap();
+    let app = session.client().unwrap();
+    app.paint(session.output("HEADLESS-1"), &Pattern::Quadrants)
+        .unwrap();
+
+    let mut samples = Vec::new();
+    for _ in 0..5 {
+        let overlay = Overlay::start_with(
+            &session,
+            &["shot", "region", "-o", "-"],
+            &["HEADLESS-1"],
+            |cmd| {
+                cmd.env("HOARDER_TIMINGS", "1");
+            },
+        );
+        session.input().tap(keys::KEY_ESC).unwrap();
+        let done = overlay.finish();
+        eprintln!("{}", done.stderr.trim_end());
+        let ms: f64 = done
+            .stderr
+            .lines()
+            .find_map(|l| l.split("overlay_visible_ms=").nth(1))
+            .unwrap_or_else(|| panic!("no timing printed: {}", done.stderr))
+            .trim()
+            .parse()
+            .unwrap();
+        samples.push(ms);
+    }
+    samples.sort_by(f64::total_cmp);
+    let median = samples[samples.len() / 2];
+    eprintln!("key press -> Overlay visible on 4K: median {median:.1} ms of {samples:?}");
+    if !cfg!(debug_assertions) {
+        assert!(median < 60.0, "over the 60 ms budget: {samples:?}");
+    }
+}

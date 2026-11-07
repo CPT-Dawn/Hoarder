@@ -102,6 +102,16 @@ impl std::fmt::Display for OverlayError {
 
 impl std::error::Error for OverlayError {}
 
+/// With [`TIMINGS_ENV`] set, print how long `stage` took to reach since `started`.
+fn timing(started: Instant, stage: &str) {
+    if std::env::var_os(TIMINGS_ENV).is_some() {
+        eprintln!(
+            "hoarder: timing {stage}_ms={:.1}",
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+}
+
 fn failed(e: impl std::fmt::Display) -> OverlayError {
     OverlayError::Failed(e.to_string())
 }
@@ -110,6 +120,7 @@ fn failed(e: impl std::fmt::Display) -> OverlayError {
 /// cancel. `started` is when the user asked for the Capture; with
 /// [`TIMINGS_ENV`] set, the time until the Overlay is visible is printed.
 pub fn run(frozen: &Frozen, started: Instant) -> Result<Outcome, OverlayError> {
+    timing(started, "frozen");
     let conn = Connection::connect_to_env().map_err(failed)?;
     let (globals, mut queue): (_, EventQueue<App>) = registry_queue_init(&conn).map_err(failed)?;
     let qh = queue.handle();
@@ -169,6 +180,7 @@ pub fn run(frozen: &Frozen, started: Instant) -> Result<Outcome, OverlayError> {
         .map_err(failed)?;
         app.views.push(view);
     }
+    timing(started, "surfaces_created");
 
     while app.outcome.is_none() {
         queue.blocking_dispatch(&mut app).map_err(failed)?;
@@ -322,21 +334,24 @@ impl View {
             return Ok(());
         }
         let (w, h) = self.size;
-        let index = match self
+        let free = self
             .buffers
             .iter()
-            .position(|b| b.buffer.canvas(pool).is_some())
-        {
-            Some(i) => i,
+            .position(|b| b.buffer.canvas(pool).is_some());
+        let (index, repaint) = match free {
+            Some(i) => {
+                let stale = std::mem::take(&mut self.buffers[i].stale);
+                (i, stale.into_iter().chain(damage.iter().copied()).collect())
+            }
             None => {
                 let (buffer, _) = pool
                     .create_buffer(w as i32, h as i32, w as i32 * 4, wl_shm::Format::Argb8888)
                     .map_err(std::io::Error::other)?;
                 self.buffers.push(ChromeBuffer {
                     buffer,
-                    stale: vec![full],
+                    stale: Vec::new(),
                 });
-                self.buffers.len() - 1
+                (self.buffers.len() - 1, vec![full])
             }
         };
         for (i, b) in self.buffers.iter_mut().enumerate() {
@@ -348,9 +363,9 @@ impl View {
                 }
             }
         }
-        let target = &mut self.buffers[index];
-        let canvas = target.buffer.canvas(pool).expect("checked free above");
-        for area in target.stale.drain(..).chain(damage.iter().copied()) {
+        let target = &self.buffers[index];
+        let canvas = target.buffer.canvas(pool).expect("free or new");
+        for area in repaint {
             self.wanted.paint(canvas, w, h, area);
         }
 
@@ -570,12 +585,7 @@ impl CompositorHandler for App {
         view.presented = true;
         if !self.visible_reported && self.views.iter().all(|v| v.presented) {
             self.visible_reported = true;
-            if std::env::var_os(TIMINGS_ENV).is_some() {
-                eprintln!(
-                    "hoarder: timing overlay_visible_ms={:.1}",
-                    self.started.elapsed().as_secs_f64() * 1000.0
-                );
-            }
+            timing(self.started, "overlay_visible");
         }
         if let Err(e) = self.views[i].redraw(&mut self.pool, qh) {
             eprintln!("hoarder: cannot draw the Overlay: {e}");
