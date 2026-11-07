@@ -46,7 +46,7 @@ pub struct ImageData {
 
 impl ImageData {
     fn parse(v: OwnedVariant) -> Option<ImageData> {
-        let s = zbus::zvariant::Structure::try_from(v).ok()?;
+        let s = zbus::Structure::try_from(v).ok()?;
         let (width, height, rowstride, has_alpha, bits_per_sample, channels, data) =
             <(i32, i32, i32, bool, i32, i32, Vec<u8>)>::try_from(s).ok()?;
         Some(ImageData {
