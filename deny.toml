@@ -15,6 +15,12 @@ ignore = [
     # cosmic-text 0.19 -> fontdb 0.23 (ADR-0007), which has no release without
     # it yet; revisit when cosmic-text moves fontdb to skrifa.
     { id = "RUSTSEC-2026-0192", reason = "unmaintained, via cosmic-text/fontdb; no alternative release yet" },
+    # basic-toml and proc-macro-error2 are archived (unmaintained, no
+    # vulnerability). Both are build-time only: age's i18n-embed-fl and
+    # i18n-embed-impl proc-macros read its Fluent config with them. Every age
+    # release has them; revisit when i18n-embed moves to `toml`/`manyhow`.
+    { id = "RUSTSEC-2026-0374", reason = "build-time proc-macro dep of age (i18n-config); no age release without it" },
+    { id = "RUSTSEC-2026-0173", reason = "build-time proc-macro dep of age (i18n-embed-fl); no age release without it" },
 ]
 
 [licenses]
