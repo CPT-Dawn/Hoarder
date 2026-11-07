@@ -189,8 +189,9 @@ fn arrows_nudge_the_dragged_corner_by_1_px_and_shift_arrows_by_10() {
     assert_cut_from(&png, &Pattern::Ramp, (320, 240), (20, 20), "nudged Region");
 }
 
-/// The accent colour of the selection border and Refine's handles.
-const ACCENT: Rgb8 = Rgb8(0x3d, 0x8e, 0xff);
+/// The accent colour of the selection border and Refine's handles: Midnight
+/// Bloom's, the theme when Zenith is not configured.
+const ACCENT: Rgb8 = Rgb8(0x8d, 0xe3, 0xdc);
 
 /// Poll grim until `ready` holds for `output`'s screenshot (at most 5 s).
 fn screenshot_when(session: &Session, output: &str, ready: impl Fn(&Image) -> bool) -> Image {

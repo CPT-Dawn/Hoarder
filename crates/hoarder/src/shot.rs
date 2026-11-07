@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use clap::ValueEnum;
 use hoarder_config::{Config, Screenshot, State, StoredRegion};
-use hoarder_ui::{Options, Outcome, OverlayError, Region, overlay};
+use hoarder_ui::{Options, Outcome, OverlayError, Region, Theme, overlay};
 use hoarder_wayland::CaptureError;
 
 use crate::Exit;
@@ -100,6 +100,7 @@ fn from_overlay(
             width: r.width,
             height: r.height,
         }),
+        theme: Theme::load(&config.theme),
     };
     let outcome = overlay::run(frozen, started, &options).map_err(|e| {
         let code = match e {

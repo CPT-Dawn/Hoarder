@@ -8,6 +8,7 @@
 //! - [`set`] and [`reset`] edit the file's text without losing comments.
 //! - [`Watcher`] tells when the file changed, for live reload.
 
+mod colour;
 mod edit;
 mod schema;
 mod state;
@@ -17,6 +18,7 @@ mod watch;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+pub use colour::{BadColour, Colour};
 pub use edit::{EditError, get, reset, set};
 pub use schema::*;
 pub use state::{State, StoredRegion, state_path};
@@ -37,7 +39,8 @@ fn home() -> PathBuf {
         .unwrap_or_default()
 }
 
-fn config_home() -> PathBuf {
+/// `$XDG_CONFIG_HOME`, or `~/.config`.
+pub fn config_home() -> PathBuf {
     match std::env::var_os("XDG_CONFIG_HOME") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
         _ => home().join(".config"),

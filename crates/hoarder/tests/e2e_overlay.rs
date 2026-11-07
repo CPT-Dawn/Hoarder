@@ -91,8 +91,9 @@ fn a_drag_across_two_outputs_yields_one_region() {
     );
 }
 
-/// The accent colour of the selection border.
-const ACCENT: Rgb8 = Rgb8(0x3d, 0x8e, 0xff);
+/// The accent colour of the selection border: Midnight Bloom's, the theme
+/// when Zenith is not configured.
+const ACCENT: Rgb8 = Rgb8(0x8d, 0xe3, 0xdc);
 
 /// Poll grim until `ready` holds for `output`'s screenshot (at most 5 s).
 fn screenshot_when(session: &Session, output: &str, ready: impl Fn(&Image) -> bool) -> Image {

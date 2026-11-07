@@ -55,9 +55,10 @@ use wayland_protocols::wp::{
     viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
 };
 
-use crate::chrome::{DIM, Fonts, Scene};
+use crate::chrome::{DIM, Fonts, Palette, Scene};
 use crate::geom::Rect;
 use crate::select::{Action, Key, Selector};
+use crate::theme::Theme;
 
 /// Set to print how long the Overlay took to become visible.
 pub const TIMINGS_ENV: &str = "HOARDER_TIMINGS";
@@ -97,6 +98,8 @@ pub struct Options {
     pub confirm: bool,
     /// What Enter with no selection captures.
     pub last_region: Option<Region>,
+    /// What the chrome and labels are drawn in (Midnight Bloom by default).
+    pub theme: Theme,
 }
 
 /// Everything that can stop the Overlay.
@@ -134,8 +137,9 @@ fn failed(e: impl std::fmt::Display) -> OverlayError {
 }
 
 /// Show the Overlay over `frozen` and wait for the user to pick a Target or
-/// cancel. `started` is when the user asked for the Capture; with
-/// [`TIMINGS_ENV`] set, the time until the Overlay is visible is printed.
+/// cancel, drawn in `options.theme`. `started` is when the user asked for the
+/// Capture; with [`TIMINGS_ENV`] set, the time until the Overlay is visible is
+/// printed.
 pub fn run(frozen: &Frozen, started: Instant, options: &Options) -> Result<Outcome, OverlayError> {
     timing(started, "frozen");
     let conn = Connection::connect_to_env().map_err(failed)?;
@@ -171,6 +175,7 @@ pub fn run(frozen: &Frozen, started: Instant, options: &Options) -> Result<Outco
         keyboard: None,
         views: Vec::new(),
         fonts: Fonts::load(),
+        theme: options.theme.clone(),
         selector: Selector::new(options.confirm, options.last_region),
         pointer_at: None,
         outcome: None,
@@ -200,6 +205,7 @@ pub fn run(frozen: &Frozen, started: Instant, options: &Options) -> Result<Outco
             &viewporter,
             &app.shm,
             dim,
+            Palette::of(&options.theme),
             &qh,
         )
         .map_err(failed)?;
@@ -234,6 +240,7 @@ struct View {
     /// Until there is a selection, the chrome is this one dim pixel stretched
     /// over the output: nothing to paint, nothing to upload.
     dim_buffer: WlBuffer,
+    palette: Palette,
     buffers: Vec<ChromeBuffer>,
     drawn: Scene,
     wanted: Scene,
@@ -259,6 +266,7 @@ impl View {
         viewporter: &WpViewporter,
         shm: &Shm,
         dim_buffer: WlBuffer,
+        palette: Palette,
         qh: &QueueHandle<App>,
     ) -> std::io::Result<View> {
         let root = compositor.create_surface(qh);
@@ -299,6 +307,7 @@ impl View {
             frame_viewport,
             frame_buffer,
             dim_buffer,
+            palette,
             buffers: Vec::new(),
             drawn: Scene::default(),
             wanted: Scene::default(),
@@ -394,7 +403,7 @@ impl View {
         let target = &self.buffers[index];
         let canvas = target.buffer.canvas(pool).expect("free or new");
         for area in repaint {
-            self.wanted.paint(canvas, w, h, area);
+            self.wanted.paint(canvas, w, h, area, self.palette);
         }
 
         let surface = self.layer.wl_surface();
@@ -505,6 +514,7 @@ struct App {
     keyboard: Option<WlKeyboard>,
     views: Vec<View>,
     fonts: Fonts,
+    theme: Theme,
     selector: Selector,
     /// Where the pointer last was, in global logical coordinates.
     pointer_at: Option<(f64, f64)>,
@@ -597,7 +607,7 @@ impl App {
                         Some(l) => Some(l.clone()),
                         None => {
                             let (sx, _) = view.scale();
-                            let mut l = self.fonts.label(&text, sx, sel.x, 0);
+                            let mut l = self.fonts.label(&text, sx, sel.x, 0, &self.theme);
                             l.rect.y = label_y(sel, l.rect.h, view.size.1);
                             Some(l)
                         }

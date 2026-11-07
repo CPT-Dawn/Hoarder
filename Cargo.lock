@@ -719,10 +719,12 @@ name = "hoarder-ui"
 version = "0.1.0"
 dependencies = [
  "cosmic-text",
+ "hoarder-config",
  "hoarder-wayland",
  "rustix",
  "smithay-client-toolkit",
  "tiny-skia",
+ "toml_edit",
  "wayland-client",
  "wayland-protocols",
 ]
