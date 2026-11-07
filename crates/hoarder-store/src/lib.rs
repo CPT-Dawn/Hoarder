@@ -6,8 +6,21 @@
 //!
 //! A [`Connection`](rusqlite::Connection) is `Send` but not `Sync`: own the
 //! Store on one thread and send it work.
+//!
+//! # Encryption at rest
+//!
+//! An encrypted History ([`Store::encrypt`]) seals every piece of content
+//! with age to the [`Key`]'s X25519 recipient: each inline representation,
+//! each blob file, each thumbnail and each preview. Previews stay searchable
+//! through a full-text index that lives only in memory (`temp.clips_fts`,
+//! rebuilt from the sealed previews by [`Store::unlock`]); the on-disk index
+//! then holds nothing. Dedup hashes and blob file names are blake3 keyed with
+//! a key derived from the History key, so they confirm nothing to someone
+//! hashing a guess. What stays readable is metadata: times, pinned, the
+//! source app, kind, MIME types and sizes.
 
 mod clip;
+mod crypt;
 
 use std::fs::{DirBuilder, OpenOptions, Permissions};
 use std::io::Write as _;
@@ -17,13 +30,15 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, OptionalExtension as _, Transaction, params};
 
 pub use clip::Kind;
+pub use crypt::Key;
 
 /// Representations up to this size live in the database; larger ones are
 /// blob files.
 pub const INLINE_MAX: usize = 256 * 1024;
 
 /// The schema migrations, in order; `user_version` counts those applied.
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE clips(
     id INTEGER PRIMARY KEY,
     created_at INTEGER NOT NULL,
@@ -62,13 +77,27 @@ CREATE TRIGGER clips_fts_update AFTER UPDATE OF preview ON clips BEGIN
     INSERT INTO clips_fts(clips_fts, rowid, preview) VALUES ('delete', old.id, old.preview);
     INSERT INTO clips_fts(rowid, preview) VALUES (new.id, new.preview);
 END;
-"#];
+"#,
+    r#"
+ALTER TABLE clips ADD COLUMN preview_sealed BLOB;
+CREATE TABLE encryption(
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    recipient TEXT NOT NULL
+);
+"#,
+];
 
 /// Why the Store failed.
 #[derive(Debug)]
 pub enum Error {
     Sqlite(rusqlite::Error),
     Io(std::io::Error),
+    /// The History is encrypted and has not been given its key.
+    Locked,
+    /// The key given is not the one the History is encrypted with.
+    WrongKey,
+    /// Sealed content that would not open, or a malformed key.
+    Crypto(String),
 }
 
 impl std::fmt::Display for Error {
@@ -76,6 +105,11 @@ impl std::fmt::Display for Error {
         match self {
             Error::Sqlite(e) => write!(f, "History database: {e}"),
             Error::Io(e) => write!(f, "History files: {e}"),
+            Error::Locked => f.write_str("History is encrypted and its key is not available"),
+            Error::WrongKey => {
+                f.write_str("the key given is not the one History is encrypted with")
+            }
+            Error::Crypto(e) => write!(f, "History encryption: {e}"),
         }
     }
 }
@@ -131,10 +165,15 @@ pub struct Recorded {
 pub struct Store {
     db: Connection,
     blobs: PathBuf,
+    /// The recipient an encrypted History is sealed to; `None` when plain.
+    recipient: Option<String>,
+    /// The key, once an encrypted History is unlocked.
+    key: Option<Key>,
 }
 
 impl Store {
-    /// Open (or create) the History in `dir`, upgrading its schema.
+    /// Open (or create) the History in `dir`, upgrading its schema. An
+    /// encrypted History opens locked: give it its key with [`Store::unlock`].
     pub fn open(dir: &Path) -> Result<Store> {
         private_dir(dir)?;
         let blobs = dir.join("blobs");
@@ -148,11 +187,72 @@ impl Store {
             .open(&path)?;
         std::fs::set_permissions(&path, Permissions::from_mode(0o600))?;
         let mut db = Connection::open(&path)?;
+        // secure_delete: freed pages (deleted Clips, superseded plaintext)
+        // are zeroed rather than left lying in the file. temp_store: the
+        // in-memory search index of an encrypted History never spills.
         db.execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;",
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;
+             PRAGMA secure_delete=ON; PRAGMA temp_store=MEMORY;",
         )?;
         migrate(&mut db)?;
-        Ok(Store { db, blobs })
+        let recipient = db
+            .query_row("SELECT recipient FROM encryption", [], |r| r.get(0))
+            .optional()?;
+        let store = Store {
+            db,
+            blobs,
+            recipient,
+            key: None,
+        };
+        store.sweep_blobs()?;
+        Ok(store)
+    }
+
+    /// Whether the History on disk is encrypted.
+    pub fn is_encrypted(&self) -> bool {
+        self.recipient.is_some()
+    }
+
+    /// Give an encrypted History its key. A plain History ignores it.
+    pub fn unlock(&mut self, key: Key) -> Result<()> {
+        let Some(recipient) = &self.recipient else {
+            return Ok(());
+        };
+        if *recipient != key.recipient() {
+            return Err(Error::WrongKey);
+        }
+        if self.key.is_none() {
+            self.key = Some(key);
+            self.index_in_memory()?;
+        }
+        Ok(())
+    }
+
+    /// Encrypt the History with `key`, sealing everything already in it.
+    /// Already encrypted with `key`, this just unlocks it.
+    pub fn encrypt(&mut self, key: Key) -> Result<()> {
+        if self.is_encrypted() {
+            return self.unlock(key);
+        }
+        self.rewrite(Some(key))
+    }
+
+    /// Decrypt the History back to plain, which needs it unlocked.
+    pub fn decrypt(&mut self) -> Result<()> {
+        if !self.is_encrypted() {
+            return Ok(());
+        }
+        self.sealer()?;
+        self.rewrite(None)
+    }
+
+    /// The key to seal with: `None` for a plain History.
+    fn sealer(&self) -> Result<Option<&Key>> {
+        match (&self.recipient, &self.key) {
+            (None, _) => Ok(None),
+            (Some(_), Some(key)) => Ok(Some(key)),
+            (Some(_), None) => Err(Error::Locked),
+        }
     }
 
     /// Record a Selection change: `reprs` are its `(mime, bytes)` in the
@@ -164,7 +264,9 @@ impl Store {
         source_app: Option<&str>,
         now: i64,
     ) -> Result<Recorded> {
-        let (kind, preview, hash) = clip::describe(reprs);
+        let key = self.sealer()?.cloned();
+        let key = key.as_ref();
+        let (kind, preview, hash) = clip::describe(reprs, key);
         let tx = self.db.transaction()?;
         let now = next_time(&tx, now)?;
         let existing: Option<i64> = tx
@@ -181,27 +283,33 @@ impl Store {
             return Ok(Recorded { id, new: false });
         }
         let size: usize = reprs.iter().map(|(_, d)| d.len()).sum();
+        let (plain_preview, sealed_preview) = match key {
+            Some(key) => ("", Some(key.seal(preview.as_bytes())?)),
+            None => (preview.as_str(), None),
+        };
         tx.execute(
-            "INSERT INTO clips(created_at, last_used_at, source_app, kind, preview, size, hash)
-             VALUES (?1, ?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO clips(created_at, last_used_at, source_app, kind, preview,
+                               preview_sealed, size, hash)
+             VALUES (?1, ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 now,
                 source_app,
                 kind.as_str(),
-                preview,
+                plain_preview,
+                sealed_preview,
                 size as i64,
                 &hash[..]
             ],
         )?;
         let id = tx.last_insert_rowid();
+        if key.is_some() {
+            tx.execute(
+                "INSERT INTO temp.clips_fts(rowid, preview) VALUES (?1, ?2)",
+                params![id, preview],
+            )?;
+        }
         for (ord, (mime, data)) in reprs.iter().enumerate() {
-            let (inline, blob) = if data.len() <= INLINE_MAX {
-                (Some(*data), None)
-            } else {
-                let hash = blake3::hash(data);
-                write_blob(&self.blobs, hash.as_bytes(), data)?;
-                (None, Some(hash.as_bytes().to_vec()))
-            };
+            let (inline, blob) = store_repr(&self.blobs, key, data)?;
             tx.execute(
                 "INSERT INTO reprs(clip_id, ord, mime, inline, blob_hash) VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![id, ord as i64, mime, inline, blob],
@@ -213,6 +321,7 @@ impl Store {
 
     /// Up to `limit` Clips, most recently used first.
     pub fn list(&self, limit: usize) -> Result<Vec<Clip>> {
+        self.sealer()?;
         let mut stmt = self
             .db
             .prepare_cached("SELECT id FROM clips ORDER BY last_used_at DESC, id DESC LIMIT ?1")?;
@@ -226,12 +335,19 @@ impl Store {
 
     /// One Clip's metadata.
     pub fn clip(&self, id: i64) -> Result<Option<Clip>> {
+        let key = self.sealer()?;
+        // An encrypted History's previews come from the in-memory index.
+        let sql = if key.is_some() {
+            "SELECT created_at, last_used_at, pinned, source_app, kind,
+                    (SELECT preview FROM temp.clips_fts WHERE rowid = clips.id), size
+             FROM clips WHERE id = ?1"
+        } else {
+            "SELECT created_at, last_used_at, pinned, source_app, kind, preview, size
+             FROM clips WHERE id = ?1"
+        };
         let clip = self
             .db
-            .prepare_cached(
-                "SELECT created_at, last_used_at, pinned, source_app, kind, preview, size
-                 FROM clips WHERE id = ?1",
-            )?
+            .prepare_cached(sql)?
             .query_row([id], |r| {
                 Ok(Clip {
                     id,
@@ -240,7 +356,7 @@ impl Store {
                     pinned: r.get(2)?,
                     source_app: r.get(3)?,
                     kind: Kind::parse(&r.get::<_, String>(4)?),
-                    preview: r.get(5)?,
+                    preview: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
                     size: r.get::<_, i64>(6)? as u64,
                     types: Vec::new(),
                 })
@@ -259,32 +375,27 @@ impl Store {
 
     /// A Clip's representations, `(mime, bytes)` in the source's order.
     pub fn representations(&self, id: i64) -> Result<Option<Vec<Representation>>> {
-        let rows = self
-            .db
-            .prepare_cached(
-                "SELECT mime, inline, blob_hash FROM reprs WHERE clip_id = ?1 ORDER BY ord",
-            )?
-            .query_map([id], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, Option<Vec<u8>>>(1)?,
-                    r.get::<_, Option<Vec<u8>>>(2)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let key = self.sealer()?;
+        let rows = self.raw_reprs(id)?;
         if rows.is_empty() && self.clip(id)?.is_none() {
             return Ok(None);
         }
         let mut reprs = Vec::with_capacity(rows.len());
-        for (mime, inline, blob) in rows {
-            let data = match (inline, blob) {
-                (Some(data), _) => data,
-                (None, Some(hash)) => std::fs::read(self.blob_path(&hash))?,
-                (None, None) => Vec::new(),
-            };
-            reprs.push((mime, data));
+        for (_, mime, inline, blob) in rows {
+            reprs.push((mime, load_repr(&self.blobs, key, inline, blob)?));
         }
         Ok(Some(reprs))
+    }
+
+    /// `(ord, mime, inline, blob_hash)` of a Clip's representations, as stored.
+    fn raw_reprs(&self, id: i64) -> Result<Vec<RawRepr>> {
+        Ok(self
+            .db
+            .prepare_cached(
+                "SELECT ord, mime, inline, blob_hash FROM reprs WHERE clip_id = ?1 ORDER BY ord",
+            )?
+            .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Mark a Clip used at `now` (a Restore), moving it to the top.
@@ -324,17 +435,214 @@ impl Store {
         }
         tx.commit()?;
         for hash in orphans {
-            match std::fs::remove_file(self.blob_path(&hash)) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
-            }
+            remove(&self.blob_path(&hash))?;
         }
         Ok(n > 0)
     }
 
     fn blob_path(&self, hash: &[u8]) -> PathBuf {
         blob_path(&self.blobs, hash)
+    }
+
+    /// Rebuild the in-memory search index of an unlocked encrypted History
+    /// from its sealed previews. Deleting a Clip by any path drops its entry.
+    fn index_in_memory(&self) -> Result<()> {
+        let Some(key) = self.sealer()? else {
+            return Ok(());
+        };
+        self.db.execute_batch(
+            "DROP TABLE IF EXISTS temp.clips_fts;
+             CREATE VIRTUAL TABLE temp.clips_fts USING fts5(preview, tokenize='trigram');
+             CREATE TEMP TRIGGER IF NOT EXISTS clips_fts_forget AFTER DELETE ON main.clips BEGIN
+                 DELETE FROM clips_fts WHERE rowid = old.id;
+             END;",
+        )?;
+        let mut insert = self
+            .db
+            .prepare("INSERT INTO temp.clips_fts(rowid, preview) VALUES (?1, ?2)")?;
+        let mut sealed = self
+            .db
+            .prepare("SELECT id, preview_sealed FROM clips WHERE preview_sealed IS NOT NULL")?;
+        let mut rows = sealed.query([])?;
+        while let Some(row) = rows.next()? {
+            let id: i64 = row.get(0)?;
+            let preview = key.open(&row.get::<_, Vec<u8>>(1)?)?;
+            insert.execute(params![id, String::from_utf8_lossy(&preview)])?;
+        }
+        Ok(())
+    }
+
+    /// Re-store every Clip sealed with `to` (or plain for `None`), then
+    /// scrub what the old form left behind: superseded blob files, freed
+    /// database pages, the WAL and the on-disk search index.
+    fn rewrite(&mut self, to: Option<Key>) -> Result<()> {
+        let from = self.sealer()?.cloned();
+        let (from, to) = (from.as_ref(), to.as_ref());
+        let mut old_blobs = Vec::new();
+        let tx = self.db.transaction()?;
+        let ids: Vec<i64> = tx
+            .prepare("SELECT id FROM clips")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for id in ids {
+            let rows: Vec<RawRepr> = tx
+                .prepare_cached(
+                    "SELECT ord, mime, inline, blob_hash FROM reprs WHERE clip_id = ?1 ORDER BY ord",
+                )?
+                .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut plain = Vec::with_capacity(rows.len());
+            for (ord, mime, inline, blob) in rows {
+                old_blobs.extend(blob.clone());
+                plain.push((ord, mime, load_repr(&self.blobs, from, inline, blob)?));
+            }
+            for (ord, _, data) in &plain {
+                let (inline, blob) = store_repr(&self.blobs, to, data)?;
+                tx.prepare_cached(
+                    "UPDATE reprs SET inline = ?1, blob_hash = ?2 WHERE clip_id = ?3 AND ord = ?4",
+                )?
+                .execute(params![inline, blob, id, ord])?;
+            }
+            let reprs: Vec<(&str, &[u8])> =
+                plain.iter().map(|(_, m, d)| (m.as_str(), &d[..])).collect();
+            let (_, preview, hash) = clip::describe(&reprs, to);
+            let (plain_preview, sealed_preview) = match to {
+                Some(key) => (String::new(), Some(key.seal(preview.as_bytes())?)),
+                None => (preview, None),
+            };
+            tx.prepare_cached(
+                "UPDATE clips SET preview = ?1, preview_sealed = ?2, hash = ?3 WHERE id = ?4",
+            )?
+            .execute(params![plain_preview, sealed_preview, &hash[..], id])?;
+        }
+        let thumbs: Vec<(i64, Vec<u8>)> = tx
+            .prepare("SELECT clip_id, png FROM thumbs")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        for (id, png) in thumbs {
+            let png = from.map_or(Ok(png.clone()), |k| k.open(&png))?;
+            let png = to.map_or(Ok(png.clone()), |k| k.seal(&png))?;
+            tx.execute(
+                "UPDATE thumbs SET png = ?1 WHERE clip_id = ?2",
+                params![png, id],
+            )?;
+        }
+        tx.execute("DELETE FROM encryption", [])?;
+        let recipient = to.map(Key::recipient);
+        if let Some(recipient) = &recipient {
+            tx.execute(
+                "INSERT INTO encryption(id, recipient) VALUES (1, ?1)",
+                [recipient],
+            )?;
+        }
+        // The on-disk index is rebuilt from `preview`: empty when sealed.
+        tx.execute(
+            "INSERT INTO main.clips_fts(clips_fts) VALUES ('rebuild')",
+            [],
+        )?;
+        tx.commit()?;
+        self.recipient = recipient;
+        self.key = to.cloned();
+        for hash in old_blobs {
+            let users: i64 = self.db.query_row(
+                "SELECT count(*) FROM reprs WHERE blob_hash = ?1",
+                [&hash],
+                |r| r.get(0),
+            )?;
+            if users == 0 {
+                remove(&self.blob_path(&hash))?;
+            }
+        }
+        if self.key.is_some() {
+            self.index_in_memory()?;
+        } else {
+            self.db.execute_batch(
+                "DROP TRIGGER IF EXISTS temp.clips_fts_forget; DROP TABLE IF EXISTS temp.clips_fts;",
+            )?;
+        }
+        // Fold the WAL (which holds the old pages) in, rewrite the file
+        // without its free pages, and empty the WAL again.
+        self.db.execute_batch(
+            "PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE);",
+        )?;
+        Ok(())
+    }
+
+    /// Delete blob files no representation refers to: leftovers of a crash
+    /// between writing a blob and committing, or between an encryption
+    /// change and its clean-up (which could otherwise leave plaintext).
+    fn sweep_blobs(&self) -> Result<()> {
+        let used: std::collections::HashSet<PathBuf> = self
+            .db
+            .prepare("SELECT DISTINCT blob_hash FROM reprs WHERE blob_hash IS NOT NULL")?
+            .query_map([], |r| r.get::<_, Vec<u8>>(0))?
+            .map(|h| h.map(|h| self.blob_path(&h)))
+            .collect::<rusqlite::Result<_>>()?;
+        for entry in std::fs::read_dir(&self.blobs)? {
+            let path = entry?.path();
+            if !used.contains(&path) {
+                remove(&path)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The `inline` and `blob_hash` columns of one representation.
+type StoredRepr = (Option<Vec<u8>>, Option<Vec<u8>>);
+
+/// `(ord, mime, inline, blob_hash)`, as stored.
+type RawRepr = (i64, String, Option<Vec<u8>>, Option<Vec<u8>>);
+
+/// Store one representation, sealed with `key` if given: inline if small,
+/// else as a blob file. Returns the `inline` and `blob_hash` columns.
+fn store_repr(
+    blobs: &Path,
+    key: Option<&Key>,
+    data: &[u8],
+) -> Result<StoredRepr> {
+    // Decided on the plain size, so sealing never moves the line.
+    if data.len() <= INLINE_MAX {
+        let inline = match key {
+            Some(key) => key.seal(data)?,
+            None => data.to_vec(),
+        };
+        return Ok((Some(inline), None));
+    }
+    let hash = crypt::hash(key, data);
+    if !blob_path(blobs, &hash).exists() {
+        match key {
+            Some(key) => write_blob(blobs, &hash, &key.seal(data)?)?,
+            None => write_blob(blobs, &hash, data)?,
+        }
+    }
+    Ok((None, Some(hash.to_vec())))
+}
+
+/// The plain bytes of one stored representation.
+fn load_repr(
+    blobs: &Path,
+    key: Option<&Key>,
+    inline: Option<Vec<u8>>,
+    blob: Option<Vec<u8>>,
+) -> Result<Vec<u8>> {
+    let stored = match (inline, blob) {
+        (Some(data), _) => data,
+        (None, Some(hash)) => std::fs::read(blob_path(blobs, &hash))?,
+        (None, None) => return Ok(Vec::new()),
+    };
+    match key {
+        Some(key) => key.open(&stored),
+        None => Ok(stored),
+    }
+}
+
+/// Remove a file that may already be gone.
+fn remove(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -386,4 +694,44 @@ fn migrate(db: &mut Connection) -> Result<()> {
         tx.commit()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Searches go through `clips_fts`, which under encryption must be the
+    /// in-memory index of the plain previews (the one on disk is empty),
+    /// and must forget Clips however they are deleted.
+    #[test]
+    fn an_unlocked_encrypted_history_stays_searchable_in_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
+        let old = store
+            .record(&[("text/plain", b"the vault code")], None, 1)
+            .unwrap()
+            .id;
+        store.encrypt(Key::generate()).unwrap();
+        let new = store
+            .record(&[("text/plain", b"another vault")], None, 2)
+            .unwrap()
+            .id;
+        let hits = |store: &Store| -> Vec<i64> {
+            store
+                .db
+                .prepare("SELECT rowid FROM clips_fts WHERE clips_fts MATCH 'vault' ORDER BY rowid")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        assert_eq!(hits(&store), [old, new]);
+        // Retention deletes in plain SQL; the index must follow.
+        store
+            .db
+            .execute("DELETE FROM clips WHERE id = ?1", [old])
+            .unwrap();
+        assert_eq!(hits(&store), [new]);
+    }
 }

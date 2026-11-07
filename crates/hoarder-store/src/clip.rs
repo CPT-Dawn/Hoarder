@@ -1,6 +1,8 @@
 //! What a Clip is, judged from its representations alone: its kind, the
 //! canonical representation its identity is hashed from, and a preview.
 
+use crate::crypt::{self, Key};
+
 /// What a Clip holds, by its most telling representation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -53,7 +55,10 @@ const PREVIEW_CHARS: usize = 200;
 
 /// A Clip's kind, preview, and the blake3 hash of its canonical
 /// representation (prefixed by the kind), which is its identity for dedup.
-pub(crate) fn describe(reprs: &[(&str, &[u8])]) -> (Kind, String, [u8; 32]) {
+///
+/// Under encryption the hash is keyed with `key`, so it confirms nothing to
+/// someone guessing at the content.
+pub(crate) fn describe(reprs: &[(&str, &[u8])], key: Option<&Key>) -> (Kind, String, [u8; 32]) {
     let find = |pred: &dyn Fn(&str) -> bool| reprs.iter().find(|(m, _)| pred(m));
     let (kind, canonical) = if let Some(r) =
         find(&|m| m == "text/uri-list").filter(|(_, d)| uris(d).next().is_some())
@@ -81,7 +86,7 @@ pub(crate) fn describe(reprs: &[(&str, &[u8])]) -> (Kind, String, [u8; 32]) {
             .unwrap_or_else(|| mime.to_owned()),
         Kind::Other => mime.to_owned(),
     };
-    let mut hasher = blake3::Hasher::new();
+    let mut hasher = crypt::hasher(key);
     hasher.update(kind.as_str().as_bytes());
     hasher.update(&[0]);
     hasher.update(data);
@@ -155,7 +160,7 @@ mod tests {
     #[test]
     fn a_text_preview_is_one_line_cut_at_200_chars() {
         let text = format!("  first\n\tsecond   {}", "x".repeat(500));
-        let (kind, preview, _) = describe(&[("text/plain", text.as_bytes())]);
+        let (kind, preview, _) = describe(&[("text/plain", text.as_bytes())], None);
         assert_eq!(kind, Kind::Text);
         assert!(preview.starts_with("first second xxx"), "{preview}");
         assert_eq!(preview.chars().count(), 200);
@@ -164,17 +169,20 @@ mod tests {
 
     #[test]
     fn the_same_text_under_different_types_is_one_clip() {
-        let (_, _, a) = describe(&[("UTF8_STRING", b"same".as_slice())]);
-        let (_, _, b) = describe(&[
-            ("text/html", b"<i>x</i>".as_slice()),
-            ("text/plain", b"same"),
-        ]);
+        let (_, _, a) = describe(&[("UTF8_STRING", b"same".as_slice())], None);
+        let (_, _, b) = describe(
+            &[
+                ("text/html", b"<i>x</i>".as_slice()),
+                ("text/plain", b"same"),
+            ],
+            None,
+        );
         assert_eq!(a, b);
     }
 
     #[test]
     fn an_image_that_is_not_png_is_previewed_by_its_type() {
-        let (kind, preview, _) = describe(&[("image/jpeg", b"\xff\xd8".as_slice())]);
+        let (kind, preview, _) = describe(&[("image/jpeg", b"\xff\xd8".as_slice())], None);
         assert_eq!((kind, preview.as_str()), (Kind::Image, "image/jpeg"));
     }
 }
