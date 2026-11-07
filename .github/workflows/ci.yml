@@ -58,7 +58,11 @@ jobs:
     runs-on: ubuntu-latest
     # Arch ships a current Sway (1.11+: ext-data-control, ext-image-copy-capture);
     # Ubuntu's is too old for the protocols Hoarder targets.
-    container: archlinux:latest
+    # Docker's default 64 MB /dev/shm can't hold several 4K SHM frames at
+    # once: Sway then dies with SIGBUS and grim fails (#87).
+    container:
+      image: archlinux:latest
+      options: --shm-size=2g
     env:
       CARGO_HOME: /cargo
     steps:
@@ -90,7 +94,11 @@ jobs:
   budgets:
     name: budgets (headless Sway, release)
     runs-on: ubuntu-latest
-    container: archlinux:latest
+    # Docker's default 64 MB /dev/shm can't hold several 4K SHM frames at
+    # once: Sway then dies with SIGBUS and grim fails (#87).
+    container:
+      image: archlinux:latest
+      options: --shm-size=2g
     defaults:
       run:
         shell: bash
