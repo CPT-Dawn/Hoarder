@@ -39,16 +39,39 @@ use wayland_client::{
 
 use crate::chrome::Fonts;
 use crate::geom::Rect;
-use crate::overlay::OverlayError;
+use crate::overlay::{Options, OverlayError};
 
 /// The ring's diameter in logical pixels.
 const SIZE: u32 = 96;
 /// How long to wait for the compositor to present the cleared ring.
 const CLEAR_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// The ring's colours, as straight (not premultiplied) RGBA.
+///
+/// These are the Overlay's chrome tokens: `surface` behind, `muted` for the
+/// track, `accent` for the time left. They come from the same [`Options`] as
+/// the Overlay, so the ring follows whatever look the Overlay has.
+#[derive(Debug, Clone, Copy)]
+struct RingPalette {
+    surface: [u8; 4],
+    muted: [u8; 4],
+    accent: [u8; 4],
+}
+
+impl RingPalette {
+    fn of(_options: &Options) -> RingPalette {
+        RingPalette {
+            surface: [20, 20, 24, 217],
+            muted: [255, 255, 255, 56],
+            accent: [0x3d, 0x8e, 0xff, 0xff],
+        }
+    }
+}
+
 /// Show the countdown ring for `delay`, then take it off the screen. Returns
 /// once the compositor has presented a frame without it, ready to freeze.
-pub fn run(delay: Duration) -> Result<(), OverlayError> {
+/// `options` are the Overlay's, for its look.
+pub fn run(delay: Duration, options: &Options) -> Result<(), OverlayError> {
     let failed = |e: &dyn std::fmt::Display| OverlayError::Failed(e.to_string());
     let deadline = Instant::now() + delay;
     let conn = Connection::connect_to_env().map_err(|e| failed(&e))?;
@@ -88,6 +111,7 @@ pub fn run(delay: Duration) -> Result<(), OverlayError> {
         shm,
         layer,
         fonts: Fonts::load(),
+        palette: RingPalette::of(options),
         scale: 1,
         configured: false,
         frame_pending: false,
@@ -126,6 +150,7 @@ struct Countdown {
     pool: SlotPool,
     layer: LayerSurface,
     fonts: Fonts,
+    palette: RingPalette,
     /// Buffer scale of the output the ring is on.
     scale: i32,
     configured: bool,
@@ -170,10 +195,18 @@ impl Countdown {
         let left = self.deadline.saturating_duration_since(Instant::now());
         let fraction = left.as_secs_f64() / self.delay.as_secs_f64().max(f64::EPSILON);
         let seconds = left.as_secs_f64().ceil() as u32;
-        let scale = self.scale;
+        let (scale, palette) = (self.scale, self.palette);
         let side = SIZE * scale as u32;
         if let Err(e) = self.commit(qh, side, false, |canvas, fonts| {
-            paint_ring(canvas, side, scale as f64, fraction, seconds, fonts)
+            paint_ring(
+                canvas,
+                side,
+                scale as f64,
+                fraction,
+                seconds,
+                palette,
+                fonts,
+            )
         }) {
             eprintln!("hoarder: cannot draw the countdown: {e}");
         }
@@ -218,6 +251,10 @@ impl Countdown {
     }
 }
 
+fn rgba([r, g, b, a]: [u8; 4]) -> tiny_skia::Color {
+    tiny_skia::Color::from_rgba8(r, g, b, a)
+}
+
 /// Paint the ring into `canvas` (`side`×`side` `Argb8888`): a dark disc, a
 /// faint track, an accent arc for the `fraction` of time left and the
 /// whole `seconds` left in the middle.
@@ -227,9 +264,10 @@ fn paint_ring(
     scale: f64,
     fraction: f64,
     seconds: u32,
+    palette: RingPalette,
     fonts: &mut Fonts,
 ) {
-    use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
+    use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Stroke, Transform};
     let mut pixmap = Pixmap::new(side, side).expect("non-empty ring");
     let s = side as f32;
     let c = s / 2.0;
@@ -237,7 +275,7 @@ fn paint_ring(
         anti_alias: true,
         ..Paint::default()
     };
-    paint.set_color_rgba8(20, 20, 24, 217);
+    paint.set_color(rgba(palette.surface));
     if let Some(disc) = PathBuilder::from_circle(c, c, c - 1.0) {
         pixmap.fill_path(
             &disc,
@@ -254,7 +292,7 @@ fn paint_ring(
         line_cap: tiny_skia::LineCap::Round,
         ..Stroke::default()
     };
-    paint.set_color(Color::from_rgba8(255, 255, 255, 56));
+    paint.set_color(rgba(palette.muted));
     if let Some(track) = PathBuilder::from_circle(c, c, r) {
         pixmap.stroke_path(&track, &paint, &stroke, Transform::identity(), None);
     }
@@ -274,7 +312,7 @@ fn paint_ring(
             }
         }
         if let Some(arc) = pb.finish() {
-            paint.set_color_rgba8(0x3d, 0x8e, 0xff, 0xff);
+            paint.set_color(rgba(palette.accent));
             pixmap.stroke_path(&arc, &paint, &stroke, Transform::identity(), None);
         }
     }

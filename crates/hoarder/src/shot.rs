@@ -59,13 +59,23 @@ pub fn run(
     output: Option<&Path>,
     config: &Config,
 ) -> Result<(), (Exit, String)> {
+    let mut state = State::load();
+    let options = Options {
+        confirm: config.screenshot.confirm,
+        last_region: state.last_region().map(|r| Region {
+            x: r.x,
+            y: r.y,
+            width: r.width,
+            height: r.height,
+        }),
+    };
     if let Some(delay) = when.delay.filter(|d| !d.is_zero()) {
-        countdown::run(delay).map_err(overlay_error)?;
+        countdown::run(delay, &options).map_err(overlay_error)?;
     }
     let started = Instant::now();
     let (image, name) = match target {
         Target::All => (Image::all_outputs(&freeze()?.frames), target.name()),
-        Target::Region => from_overlay(when.live, started, config)?,
+        Target::Region => from_overlay(when.live, started, &options, &mut state)?,
     };
     let image = Arc::new(image);
     // The file is encoded on a worker thread, started before the clipboard
@@ -128,27 +138,18 @@ fn overlay_error(e: OverlayError) -> (Exit, String) {
 fn from_overlay(
     live: bool,
     started: Instant,
-    config: &Config,
+    options: &Options,
+    state: &mut State,
 ) -> Result<(Image, &'static str), (Exit, String)> {
-    let mut state = State::load();
-    let options = Options {
-        confirm: config.screenshot.confirm,
-        last_region: state.last_region().map(|r| Region {
-            x: r.x,
-            y: r.y,
-            width: r.width,
-            height: r.height,
-        }),
-    };
     let (frozen, outcome) = if live {
-        let outcome = overlay::run_live(started, &options).map_err(overlay_error)?;
+        let outcome = overlay::run_live(started, options).map_err(overlay_error)?;
         if outcome == Outcome::Cancelled {
             return Err((Exit::Cancelled, "cancelled".into()));
         }
         (freeze()?, outcome)
     } else {
         let frozen = freeze()?;
-        let outcome = overlay::run(&frozen, started, &options).map_err(overlay_error)?;
+        let outcome = overlay::run(&frozen, started, options).map_err(overlay_error)?;
         (frozen, outcome)
     };
     Ok(match outcome {
