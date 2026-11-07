@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use hoarder_e2e::{Selection, Session};
+use hoarder_e2e::{Reply, Selection, Session};
 use serde_json::{Value, json};
 
 const HOARDER: &str = env!("CARGO_BIN_EXE_hoarder");
@@ -336,4 +336,484 @@ fn a_clipboard_cleared_by_another_tool_is_restored() {
 
     wait_until("the restore", || offered(&session).is_some());
     assert_eq!(paste_type(&session, "text/plain"), b"stubborn");
+}
+
+// ---- The Reader rules, seen through what a Takeover offers -------------------
+
+/// Let `app` offer `offer`, wait for the Daemon to read it, quit the app and
+/// return the types the Daemon took over with (`None` if it did not).
+fn taken_over(
+    session: &Session,
+    daemon: &Daemon,
+    offer: Vec<(&str, Reply)>,
+) -> Option<Vec<String>> {
+    let app = session.client().unwrap();
+    app.set_selection_replying(Selection::Clipboard, offer)
+        .unwrap();
+    daemon.settled();
+    app.exit();
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < deadline {
+        if let Some(types) = offered(session) {
+            return Some(types);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    None
+}
+
+fn now(data: &[u8]) -> Reply {
+    Reply::Now(data.to_vec())
+}
+
+fn after(ms: u64, data: &[u8]) -> Reply {
+    Reply::After(Duration::from_millis(ms), data.to_vec())
+}
+
+#[test]
+fn the_deny_list_is_never_read_or_restored() {
+    let session = Session::start_default().unwrap();
+    let daemon = Daemon::start(
+        &session,
+        &[
+            "--set",
+            r#"clipboard.deny_types=["text/x-secret-sauce", "application/x-local-*"]"#,
+        ],
+    );
+    let junk = b"app-private";
+
+    let kept = taken_over(
+        &session,
+        &daemon,
+        vec![
+            ("text/plain", now(b"keep me")),
+            ("TARGETS", now(junk)),
+            ("SAVE_TARGETS", now(junk)),
+            ("MULTIPLE", now(junk)),
+            ("TIMESTAMP", now(junk)),
+            ("text/x-moz-url", now(junk)),
+            ("x-moz-thing", now(junk)),
+            ("chromium/x-web-custom-data", now(junk)),
+            ("application/x-kde-cutselection", now(junk)),
+            ("image/x-inkscape-svg", now(junk)),
+            ("application/x-qt-image", now(junk)),
+            ("text/x-secret-sauce", now(junk)),
+            ("application/x-local-thing", now(junk)),
+            ("text/html", now(b"<b>keep me</b>")),
+        ],
+    );
+
+    assert_eq!(kept.unwrap(), ["text/plain", "text/html"]);
+    assert_eq!(paste_type(&session, "text/html"), b"<b>keep me</b>");
+}
+
+#[test]
+fn only_png_and_the_first_image_type_are_read() {
+    let session = Session::start_default().unwrap();
+    let daemon = Daemon::start(&session, &[]);
+
+    let kept = taken_over(
+        &session,
+        &daemon,
+        vec![
+            ("image/bmp", now(b"BM")),
+            ("text/plain", now(b"pic")),
+            ("image/png", now(PNG)),
+            ("image/jpeg", now(b"\xff\xd8\xff")),
+            ("image/webp", now(b"RIFF")),
+        ],
+    );
+    assert_eq!(kept.unwrap(), ["image/bmp", "text/plain", "image/png"]);
+
+    let kept = taken_over(
+        &session,
+        &daemon,
+        vec![
+            ("image/png", now(PNG)),
+            ("image/jpeg", now(b"\xff\xd8\xff")),
+        ],
+    );
+    assert_eq!(kept.unwrap(), ["image/png"]);
+}
+
+#[test]
+fn a_type_slower_than_500_ms_is_dropped_and_the_rest_kept() {
+    let session = Session::start_default().unwrap();
+    let daemon = Daemon::start(&session, &[]);
+
+    let kept = taken_over(
+        &session,
+        &daemon,
+        vec![
+            ("text/plain", after(300, b"slow but fine")),
+            ("text/html", after(800, b"too slow")),
+            ("application/json", Reply::Never),
+            ("text/rtf", now(b"{\\rtf1 quick}")),
+        ],
+    );
+
+    assert_eq!(kept.unwrap(), ["text/plain", "text/rtf"]);
+    assert_eq!(paste_type(&session, "text/plain"), b"slow but fine");
+}
+
+#[test]
+fn an_offer_gets_2_s_in_all() {
+    let session = Session::start_default().unwrap();
+    let daemon = Daemon::start(&session, &[]);
+    // Each type is within its own 500 ms, but the fifth would end at 2.25 s.
+    let types = ["text/a", "text/b", "text/c", "text/d", "text/e", "text/f"];
+
+    let started = Instant::now();
+    let kept = taken_over(
+        &session,
+        &daemon,
+        types
+            .iter()
+            .map(|t| (*t, after(450, t.as_bytes())))
+            .collect(),
+    );
+
+    assert_eq!(kept.unwrap(), &types[..4]);
+    assert!(started.elapsed() < Duration::from_secs(4));
+}
+
+#[test]
+fn an_offer_over_64_mb_keeps_the_types_that_fit() {
+    let session = Session::start_default().unwrap();
+    let daemon = Daemon::start(&session, &[]);
+    let huge = vec![0x5a; 65 * 1024 * 1024];
+
+    let kept = taken_over(
+        &session,
+        &daemon,
+        vec![
+            ("text/plain", now(b"small")),
+            ("image/png", Reply::Now(huge)),
+            ("text/html", now(b"<p>small</p>")),
+        ],
+    );
+
+    assert_eq!(kept.unwrap(), ["text/plain", "text/html"]);
+}
+
+#[test]
+fn the_offer_size_limit_follows_the_config() {
+    let session = Session::start_default().unwrap();
+    let daemon = Daemon::start(&session, &["--set", "clipboard.max_offer_mb=1"]);
+    let big = vec![b'x'; 600 * 1024];
+
+    let kept = taken_over(
+        &session,
+        &daemon,
+        vec![
+            ("text/plain", Reply::Now(big.clone())),
+            ("text/html", Reply::Now(big.clone())),
+            ("text/rtf", now(b"tiny")),
+        ],
+    );
+
+    assert_eq!(kept.unwrap(), ["text/plain", "text/rtf"]);
+    assert_eq!(paste_type(&session, "text/plain"), big);
+}
+
+#[test]
+fn a_secret_is_never_kept() {
+    let session = Session::start_default().unwrap();
+    let daemon = Daemon::start(&session, &[]);
+
+    let kept = taken_over(
+        &session,
+        &daemon,
+        vec![
+            ("text/plain", now(b"hunter2")),
+            ("x-kde-passwordManagerHint", now(b"secret")),
+        ],
+    );
+
+    assert_eq!(kept, None);
+}
+
+// ---- Which Selections, and which apps --------------------------------------
+
+#[test]
+fn the_primary_selection_is_ignored_by_default() {
+    let session = Session::start_default().unwrap();
+    let daemon = Daemon::start(&session, &[]);
+    let app = session.client().unwrap();
+    app.set_selection(
+        Selection::Primary,
+        &[("text/plain", b"highlight".as_slice())],
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(daemon.status()["primary"], Value::Null);
+
+    app.exit();
+
+    std::thread::sleep(Duration::from_millis(300));
+    let (code, _) = wl_paste(&session, &["--primary", "--list-types"]);
+    assert_ne!(code, Some(0), "the primary selection was kept");
+}
+
+#[test]
+fn the_primary_selection_persists_when_asked() {
+    let session = Session::start_default().unwrap();
+    let daemon = Daemon::start(&session, &["--set", "clipboard.primary.persist=true"]);
+    let app = session.client().unwrap();
+    app.set_selection(
+        Selection::Primary,
+        &[("text/plain", b"highlight".as_slice())],
+    )
+    .unwrap();
+    wait_until("the primary read", || {
+        daemon.status()["primary"]["kept"] == json!(["text/plain"])
+    });
+
+    app.exit();
+
+    wait_until("Takeover of the primary selection", || {
+        wl_paste(&session, &["--primary", "--list-types"]).0 == Some(0)
+    });
+    let (_, out) = wl_paste(&session, &["--primary", "--no-newline"]);
+    assert_eq!(out, b"highlight");
+}
+
+#[test]
+fn no_takeover_apps_are_left_alone() {
+    let session = Session::start_default().unwrap();
+    let daemon = Daemon::start(
+        &session,
+        &[
+            "--set",
+            r#"clipboard.no_takeover_apps=["org.example.Fussy"]"#,
+        ],
+    );
+
+    let fussy = session.client().unwrap();
+    fussy.open_window("org.example.Fussy").unwrap();
+    fussy
+        .set_selection(Selection::Clipboard, &[("text/plain", b"fussy".as_slice())])
+        .unwrap();
+    daemon.settled();
+    fussy.exit();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(offered(&session), None);
+
+    let easy = session.client().unwrap();
+    easy.open_window("org.example.Easy").unwrap();
+    easy.set_selection(Selection::Clipboard, &[("text/plain", b"easy".as_slice())])
+        .unwrap();
+    daemon.settled();
+    easy.exit();
+    wait_until("Takeover", || offered(&session).is_some());
+    assert_eq!(paste_type(&session, "text/plain"), b"easy");
+}
+
+#[test]
+fn wlr_data_control_is_the_fallback() {
+    let session = Session::start_default().unwrap();
+    let daemon = Daemon::start_with(&session, &[], |cmd| {
+        cmd.env("HOARDER_HIDE_GLOBALS", "ext_data_control_manager_v1");
+    });
+    assert_eq!(daemon.status()["data_control"], "wlr");
+
+    let kept = taken_over(
+        &session,
+        &daemon,
+        vec![
+            ("text/plain", now(b"old school")),
+            ("text/html", now(b"<i>old</i>")),
+        ],
+    );
+
+    assert_eq!(kept.unwrap(), ["text/plain", "text/html"]);
+    assert_eq!(paste_type(&session, "text/plain"), b"old school");
+}
+
+#[test]
+fn without_any_data_control_the_daemon_exits_3() {
+    let session = Session::start_default().unwrap();
+    let out = session
+        .command(HOARDER)
+        .arg("daemon")
+        .env(
+            "HOARDER_HIDE_GLOBALS",
+            "ext_data_control_manager_v1,zwlr_data_control_manager_v1",
+        )
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("data-control"));
+}
+
+// ---- The process ------------------------------------------------------------
+
+#[test]
+fn a_second_daemon_refuses_to_start() {
+    let session = Session::start_default().unwrap();
+    let _daemon = Daemon::start(&session, &[]);
+
+    let out = session.command(HOARDER).arg("daemon").output().unwrap();
+
+    assert_eq!(out.status.code(), Some(4));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("already running"));
+}
+
+#[test]
+fn bad_requests_get_errors_not_silence() {
+    let session = Session::start_default().unwrap();
+    let daemon = Daemon::start(&session, &[]);
+
+    let unknown = daemon.call(json!({"v": 1, "id": 3, "op": "teleport"}));
+    assert_eq!(unknown["id"], 3);
+    assert_eq!(unknown["err"]["code"], "unknown_op");
+
+    let future = daemon.call(json!({"v": 99, "id": 4, "op": "hello"}));
+    assert_eq!(future["err"]["code"], "unsupported_version");
+
+    let mut stream = UnixStream::connect(&daemon.socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    writeln!(stream, "this is not json").unwrap();
+    let mut line = String::new();
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    reader.read_line(&mut line).unwrap();
+    let garbage: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(garbage["err"]["code"], "bad_request");
+
+    // The connection survives a bad line.
+    writeln!(stream, "{}", json!({"v": 1, "id": 5, "op": "hello"})).unwrap();
+    line.clear();
+    reader.read_line(&mut line).unwrap();
+    let hello: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(hello["id"], 5);
+    assert_eq!(hello["ok"]["protocol"], 1);
+}
+
+/// Context switches of every thread of `pid`: each one is a wakeup.
+fn context_switches(pid: u32) -> u64 {
+    let mut total = 0;
+    for task in std::fs::read_dir(format!("/proc/{pid}/task")).unwrap() {
+        let status = std::fs::read_to_string(task.unwrap().path().join("status")).unwrap();
+        total += status
+            .lines()
+            .filter(|l| l.contains("ctxt_switches"))
+            .filter_map(|l| l.split_whitespace().last()?.parse::<u64>().ok())
+            .sum::<u64>();
+    }
+    total
+}
+
+#[test]
+fn an_idle_daemon_never_wakes_up() {
+    let session = Session::start_default().unwrap();
+    let daemon = Daemon::start(&session, &[]);
+    // Something held, so idle includes serving a Takeover.
+    let kept = taken_over(&session, &daemon, vec![("text/plain", now(b"zzz"))]);
+    assert!(kept.is_some());
+    std::thread::sleep(Duration::from_millis(300));
+
+    let before = context_switches(daemon.child.id());
+    std::thread::sleep(Duration::from_secs(3));
+    let after = context_switches(daemon.child.id());
+
+    assert_eq!(after - before, 0, "the idle Daemon woke up");
+}
+
+// ---- `hoarder service` --------------------------------------------------------
+
+/// A `systemctl` stand-in that logs its arguments, so no test touches the
+/// real user manager.
+fn fake_systemctl(session: &Session) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let bin = session.runtime_dir().join("fakebin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let log = session.runtime_dir().join("systemctl.log");
+    let script = bin.join("systemctl");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\ncase \"$*\" in *is-enabled*) echo enabled;; esac\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    (bin, log)
+}
+
+fn with_path(session: &Session, bin: &std::path::Path) -> Command {
+    let mut cmd = session.command(HOARDER);
+    let path = std::env::var("PATH").unwrap_or_default();
+    cmd.env("PATH", format!("{}:{path}", bin.display()));
+    cmd
+}
+
+#[test]
+fn service_enable_installs_and_starts_a_user_unit() {
+    let session = Session::start_default().unwrap();
+    let (bin, log) = fake_systemctl(&session);
+
+    let out = with_path(&session, &bin)
+        .args(["service", "enable"])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let unit = session
+        .runtime_dir()
+        .join("home/.config/systemd/user/hoarder.service");
+    let text = std::fs::read_to_string(&unit).unwrap();
+    assert!(
+        text.contains(&format!("ExecStart=\"{HOARDER}\" daemon")),
+        "{text}"
+    );
+    assert!(text.contains("WantedBy=graphical-session.target"));
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap(),
+        "--user daemon-reload\n--user enable --now hoarder.service\n"
+    );
+
+    let out = with_path(&session, &bin)
+        .args(["service", "disable"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(!unit.exists());
+    assert!(
+        std::fs::read_to_string(&log)
+            .unwrap()
+            .ends_with("--user disable --now hoarder.service\n--user daemon-reload\n")
+    );
+}
+
+#[test]
+fn service_status_says_whether_the_daemon_answers() {
+    let session = Session::start_default().unwrap();
+    let (bin, _) = fake_systemctl(&session);
+
+    let down = with_path(&session, &bin)
+        .args(["service", "status"])
+        .output()
+        .unwrap();
+    assert_eq!(down.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&down.stdout).contains("service: enabled"));
+
+    let daemon = Daemon::start(&session, &[]);
+    let up = with_path(&session, &bin)
+        .args(["service", "status"])
+        .output()
+        .unwrap();
+    assert!(up.status.success());
+    let stdout = String::from_utf8_lossy(&up.stdout);
+    assert!(
+        stdout.contains(&format!("running (pid {}", daemon.child.id())),
+        "{stdout}"
+    );
 }

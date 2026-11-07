@@ -205,9 +205,11 @@ impl Watcher {
     /// Ask the source of `offer` for `mime_type`. Returns the non-blocking
     /// read end of the pipe the data arrives on; it ends at EOF.
     pub fn receive(&mut self, offer: &Offer, mime_type: &str) -> Result<OwnedFd> {
-        use rustix::pipe::PipeFlags;
-        let (read, write) = rustix::pipe::pipe_with(PipeFlags::CLOEXEC | PipeFlags::NONBLOCK)
+        let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
             .map_err(std::io::Error::from)?;
+        // Only our end is non-blocking: `O_NONBLOCK` on both would make the
+        // source's writes fail as soon as the pipe fills up.
+        rustix::io::ioctl_fionbio(&read, true).map_err(std::io::Error::from)?;
         offer.proxy.receive(mime_type, write.as_fd());
         drop(write);
         self.flush()?;
