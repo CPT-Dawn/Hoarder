@@ -1,6 +1,11 @@
 # Hoarder socket API (v1)
 
-Every Front end (the `hoarder` CLI, the Picker, Zenith's `clipboard` module and anything you write) talks to the Daemon over one public, versioned protocol: JSON lines on a Unix socket ([ADR-0004](adr/0004-json-lines-socket-public-api.md), [PLAN §11](PLAN.md#11-ipc-api-v1)). This page is the contract. Rust programs can use the [`hoarder-ipc`](../crates/hoarder-ipc) crate, which holds these types and a blocking client.
+Every Front end (the `hoarder` CLI, the Picker, Zenith's `clipboard` module and anything you write) talks to the Daemon over one public, versioned protocol: JSON lines on a Unix socket ([ADR-0004](adr/0004-json-lines-socket-public-api.md), [PLAN §11](PLAN.md#11-ipc-api-v1)). This page is the contract. Rust programs can use the [`hoarder-ipc`](../crates/hoarder-ipc) crate, which holds these types and a blocking client. It is not on crates.io; depend on it by git, pinned to a release tag:
+
+```toml
+[dependencies]
+hoarder-ipc = { git = "https://github.com/CPT-Dawn/Hoarder", tag = "v1.0.0" }
+```
 
 The `sh` examples here are run against a real Daemon by the test suite (`the_documented_examples_run` in `crates/hoarder/tests/e2e_ipc.rs`), so they work as written. They need [`socat`](http://www.dest-unreach.org/socat/) and [`jq`](https://jqlang.org/). The conformance suite in the same file has a test for every op and event below.
 
@@ -32,7 +37,7 @@ echo '{"v":1,"id":1,"op":"hello"}' \
 
 - The Daemon ignores request fields it does not know, and Front ends must ignore response and event fields they do not know.
 - Additive changes (a new op, event, field, error code, `state` or `owner` value) keep `v: 1`. Front ends must treat unknown events, error codes and enum values as unknown, not as errors.
-- Breaking changes bump `v` and the `hoarder-ipc` major version. `hello` says which versions a Daemon speaks; a request in any other version fails with `unsupported_version`.
+- Breaking changes bump `v`. `hello` says which versions a Daemon speaks; a request in any other version fails with `unsupported_version`. A `hoarder-ipc` pinned to an older tag keeps working against a newer Daemon as long as it speaks that tag's `v`.
 - Times are RFC 3339 strings in UTC (`2026-11-08T12:00:00.123Z`).
 
 ## Errors

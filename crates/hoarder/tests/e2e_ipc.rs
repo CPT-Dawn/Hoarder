@@ -773,6 +773,42 @@ fn reload_rereads_the_config_or_says_why_not() {
     assert_eq!(wire.ok(json!({"op": "status"}))["persist"], false, "kept");
 }
 
+/// An in-place save truncates the file and only then writes it, so for a
+/// moment it is empty; and a save may simply be broken. Live reload must
+/// keep the config in force through both, not fall back to the defaults.
+#[test]
+fn live_reload_keeps_the_last_good_config_through_an_empty_or_broken_save() {
+    let session = Session::start_default().unwrap();
+    let daemon = Daemon::start(&session, &[]);
+    let mut wire = daemon.connect();
+    let path = config_path(&session);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "[clipboard]\npersist = false\n").unwrap();
+    assert_eq!(wire.ok(json!({"op": "reload"})), Value::Null);
+
+    let persist_holds = |wire: &mut Wire, what: &str| {
+        let until = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < until {
+            let status = wire.ok(json!({"op": "status"}));
+            assert_eq!(status["persist"], false, "{what}: {}", log_of(&session));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    // Truncated and left empty: the first half of an in-place save.
+    let half = std::fs::File::create(&path).unwrap();
+    persist_holds(&mut wire, "an empty file");
+    drop(half);
+    std::fs::write(&path, "[clipboard]\npersist = \"maybe\"\n").unwrap();
+    persist_holds(&mut wire, "a broken file");
+
+    let response = wire.call(json!({"op": "reload"}));
+    assert_eq!(response["err"]["code"], "failed", "{response}");
+    std::fs::write(&path, "").unwrap();
+    let response = wire.call(json!({"op": "reload"}));
+    assert_eq!(response["err"]["code"], "failed", "empty: {response}");
+    persist_holds(&mut wire, "an explicit reload of an empty file");
+}
+
 #[test]
 fn malformed_requests_get_coded_errors_and_the_connection_lives_on() {
     let session = Session::start_default().unwrap();

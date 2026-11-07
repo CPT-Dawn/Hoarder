@@ -1,10 +1,10 @@
 # Changelog
 
-All notable changes to `hoarder-ipc`. The crate follows the versioning policy in its README: additive protocol changes are minor releases, breaking ones bump the protocol `v` and the major version.
+All notable changes to `hoarder-ipc`. The crate is versioned with Hoarder and fetched by git from a release tag (it is not on crates.io); the compatibility policy in its README holds: additive protocol changes keep `v: 1`, breaking ones bump the protocol `v`.
 
 ## Unreleased
 
-First published release, protocol v1.
+First release, protocol v1, from tag `v1.0.0`.
 
 - Ops: `hello`, `status`, `reload`, `subscribe`, `list`, `search`, `get`, `thumb`, `restore`, `delete`, `pin`, `unpin`, `clear_history`, `pause`, `resume`, `clear`, `offer`, `paste`.
 - Events: `selection`, `clip_added`, `clip_removed`, `state`.

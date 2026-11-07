@@ -13,12 +13,12 @@ repository = "https://github.com/CPT-Dawn/Hoarder"
 authors = ["Swastik Patel <CPT-Dawn@users.noreply.github.com>"]
 
 [workspace.dependencies]
-hoarder-config = { path = "crates/hoarder-config", version = "0.1.0" }
+hoarder-config = { path = "crates/hoarder-config" }
 hoarder-e2e = { path = "crates/hoarder-e2e" }
-hoarder-ipc = { path = "crates/hoarder-ipc", version = "0.1.0" }
-hoarder-store = { path = "crates/hoarder-store", version = "0.1.0" }
-hoarder-ui = { path = "crates/hoarder-ui", version = "0.1.0" }
-hoarder-wayland = { path = "crates/hoarder-wayland", version = "0.1.0" }
+hoarder-ipc = { path = "crates/hoarder-ipc" }
+hoarder-store = { path = "crates/hoarder-store" }
+hoarder-ui = { path = "crates/hoarder-ui" }
+hoarder-wayland = { path = "crates/hoarder-wayland" }
 
 # Encryption at rest (PLAN.md §5.3): the age format, X25519 identities only.
 # 0.11: 0.12 adds P-256/ML-KEM plugin recipients (and crypto-bigint 0.5) we never use.
@@ -75,7 +75,7 @@ all = { level = "warn", priority = -1 }
 opt-level = 3
 
 # What releases and packages ship: the release build, linked whole and stripped
-# (PLAN.md section 12 budgets the stripped binary at under 8 MB).
+# (PLAN.md section 12 tracks its size for regressions).
 [profile.dist]
 inherits = "release"
 lto = "fat"

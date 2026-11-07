@@ -55,11 +55,13 @@ Hoarder replaces grim, slurp, grimblast/Hyprshot, hyprpicker, wl-clipboard, wl-c
 | Crate | Responsibility |
 |---|---|
 | `hoarder` | Binary, CLI (clap), subcommand wiring, notifications (zbus) |
-| `hoarder-ipc` | Request/response/event types plus a framing codec. Versioned and **published to crates.io** for Zenith and third parties. |
+| `hoarder-ipc` | Request/response/event types plus a framing codec. Versioned with the protocol `v`; Zenith and third parties depend on it **by git, pinned to a release tag** (`tag = "v1.0.0"`). |
 | `hoarder-wayland` | Protocol bindings (`wayland-protocols` `staging`, `-wlr`, vendored Hyprland XML), capture, data-control, the virtual keyboard, and the window-geometry providers (Hyprland/Sway IPC) |
 | `hoarder-store` | SQLite schema and migrations, blobs, dedup, retention, FTS search |
 | `hoarder-ui` | Shared SCTK layer-shell plumbing, tiny-skia drawing, cosmic-text, widgets (list, text field, loupe, toast), theme tokens ([ADR-0007](adr/0007-custom-ui-stack-no-toolkit.md)) |
 | `hoarder-config` | Typed schema (serde), defaults, `toml_edit` writes, validation with line numbers, live reload |
+
+No crate is published to crates.io (every crate has `publish = false`): Hoarder ships through the AUR and the GitHub release tarballs only.
 
 Rust 2024 edition; MSRV is the current stable minus two releases.
 
@@ -393,7 +395,7 @@ Filtering by kind (the Picker's `img:` and similar prefixes) happens in the Fron
 
 **Concealed Clips** show up in `list` only when it asks with `"concealed":true`, among History's Clips by time: negative ids, `"sensitivity":"concealed"`, an `expires` time and a masked preview. Their text comes only through `get`, so a Front end keeps them masked until the user asks (the Picker: while `Alt` is held). `restore` and `delete` take their ids too; `restore` with `"plain":true` serves only the plain text (Shift+Enter).
 
-**Compatibility:** additive changes keep `v:1`; breaking changes bump `v` and the `hoarder-ipc` major version.
+**Compatibility:** additive changes keep `v:1`; breaking changes bump `v`. Clients pin `hoarder-ipc` to a release tag; `v` is what keeps an older pin working against a newer Daemon.
 
 The full reference, with every op, event and error code and runnable `socat`/`jq` examples, is [docs/ipc.md](ipc.md).
 
@@ -402,13 +404,13 @@ The full reference, with every op, event and error code and runnable `socat`/`jq
 | Metric | Budget |
 |---|---|
 | Daemon idle CPU | 0 wakeups/s (no timers except the hourly retention run) |
-| Daemon RSS (idle, 1,000 Clips) | < 12 MB |
+| Daemon RSS (idle, 1,000 Clips) | Tracked for regressions only (about 14.5 MB on 2026-11-08) |
 | Key press → Overlay visible (4K) | < 60 ms |
 | Release → PNG on clipboard (4K) | < 150 ms |
 | Picker first frame | < 50 ms |
-| Stripped binary | < 8 MB |
+| Stripped binary | Tracked for regressions only (about 14.3 MB on 2026-11-08) |
 
-The budgets are checked in CI with a benchmark job on the headless Sway session. A regression of more than 20% fails the job.
+The budgets are checked in CI with a benchmark job on the headless Sway session. A regression of more than 20% fails the job. The binary size and the Daemon's memory have no fixed ceiling: the earlier 8 MB and 12 MB targets were dropped (2026-11-08) as acceptable at their current figures, and only that 20%-against-the-base check holds them.
 
 ## 13. Testing
 
@@ -445,7 +447,7 @@ Daemon skeleton (calloop, service) · IPC server and `hoarder-ipc` crate · Sele
 hoarder-ui widgets (list, text field) · Picker layout and search · preview pane · keys and quick restore · auto-paste through the virtual keyboard · theming (`zenith` follower plus built-ins) · Zenith `clipboard` module PR.
 
 ### M4: Ship v1.0
-`hoarder doctor` · `hoarder setup <wm>` · completions and man pages (clap_mangen) · systemd unit · README, docs site and GIF demos · CONTRIBUTING and issue templates · release workflow (git-cliff, crates.io, GitHub release artefacts) · AUR packages `hoarder`, `hoarder-bin`, `hoarder-git`, `hoarder-wl-compat` · release checklist pass.
+`hoarder doctor` · `hoarder setup <wm>` · completions and man pages (clap_mangen) · systemd unit · README, docs site and GIF demos · CONTRIBUTING and issue templates · release workflow (git-cliff, GitHub release artefacts; nothing on crates.io) · AUR packages `hoarder`, `hoarder-bin`, `hoarder-git`, `hoarder-wl-compat` · release checklist pass.
 
 ### v1.1
 In-place annotation in Refine (arrow, box, text, highlighter, numbered steps, blur/pixelate) · Picker transforms · OCR (optional `tesseract`) · QR decode · `text-input-v3` IME in the Picker.

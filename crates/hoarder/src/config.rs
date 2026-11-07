@@ -181,24 +181,18 @@ fn watch_value(
         watcher.wait().map_err(io)?;
         // A file that changed while it was read may be half written: let it
         // settle and read it again.
-        let text = loop {
-            let text = read_settled(path).map_err(|e| (Exit::Io, e))?;
+        let reread = loop {
+            let reread = reread(path, overrides);
             if !watcher.changed().map_err(io)? {
-                break text;
+                break reread;
             }
             watcher.settle().map_err(io)?;
         };
-        let Some(text) = text else { continue };
-        let config = match hoarder_config::parse(&text) {
-            Ok(_) => match hoarder_config::with_overrides(&text, overrides) {
-                Ok(config) => config,
-                Err(e) => {
-                    eprintln!("hoarder: {e}");
-                    continue;
-                }
-            },
-            Err(d) => {
-                eprintln!("hoarder: {}:{d}", path.display());
+        let config = match reread {
+            Reread::Apply(config) => config,
+            Reread::Empty => continue,
+            Reread::Broken(e) => {
+                eprintln!("hoarder: {e}");
                 continue;
             }
         };
@@ -211,13 +205,85 @@ fn watch_value(
     }
 }
 
-/// The text live reload should apply: `""` (the defaults) if the file is
-/// gone, `None` if it is empty, which is far more likely an in-place save
-/// caught halfway than a wish for the defaults.
-fn read_settled(path: &Path) -> Result<Option<String>, String> {
-    if !path.exists() {
-        return Ok(Some(String::new()));
+/// What a reload of `config.toml` found. Only [`Reread::Apply`] may replace
+/// the config in force; anything else keeps the last good one.
+#[derive(Debug)]
+pub enum Reread {
+    /// A valid file (or none at all, which means the defaults), with the
+    /// `--set` overrides applied.
+    Apply(Box<Config>),
+    /// An empty file: far more likely an in-place save caught between its
+    /// truncate and its write than a wish for the defaults.
+    Empty,
+    /// A file that cannot be read or does not parse, or an override that no
+    /// longer applies; the message says why, naming the file and line.
+    Broken(String),
+}
+
+/// Re-read the config file for live reload. Every reload path (the
+/// Daemon's `reload` op and its inotify watch, `config get --watch`) goes
+/// through here, so none of them trades a half-saved file for the defaults.
+pub fn reread(path: &Path, overrides: &[(String, String)]) -> Reread {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) if text.trim().is_empty() => return Reread::Empty,
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Reread::Broken(format!("cannot read {}: {e}", path.display())),
+    };
+    if let Err(d) = hoarder_config::parse(&text) {
+        return Reread::Broken(format!("{}:{d}", path.display()));
     }
-    let text = read(path)?;
-    Ok((!text.trim().is_empty()).then_some(text))
+    match hoarder_config::with_overrides(&text, overrides) {
+        Ok(config) => Reread::Apply(Box::new(config)),
+        Err(e) => Reread::Broken(format!("--set {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reread_text(text: Option<&str>) -> Reread {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        if let Some(text) = text {
+            std::fs::write(&path, text).unwrap();
+        }
+        reread(&path, &[])
+    }
+
+    #[test]
+    fn an_empty_file_is_a_save_in_progress_not_the_defaults() {
+        assert!(matches!(reread_text(Some("")), Reread::Empty));
+        assert!(matches!(reread_text(Some(" \n\n")), Reread::Empty));
+    }
+
+    #[test]
+    fn a_broken_file_says_where() {
+        let Reread::Broken(why) = reread_text(Some("[clipboard]\npersist = \"maybe\"\n")) else {
+            panic!("a broken file must not apply");
+        };
+        assert!(why.contains("config.toml:2"), "{why}");
+    }
+
+    #[test]
+    fn a_good_file_applies_and_a_missing_one_means_the_defaults() {
+        let Reread::Apply(config) = reread_text(Some("[clipboard]\npersist = false\n")) else {
+            panic!("a good file applies");
+        };
+        assert!(!config.clipboard.persist);
+        let Reread::Apply(config) = reread_text(None) else {
+            panic!("no file is the defaults");
+        };
+        assert_eq!(*config, Config::default());
+    }
+
+    #[test]
+    fn an_override_that_no_longer_applies_keeps_the_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[clipboard]\npersist = false\n").unwrap();
+        let overrides = [("clipboard.nope".to_owned(), "1".to_owned())];
+        assert!(matches!(reread(&path, &overrides), Reread::Broken(_)));
+    }
 }
