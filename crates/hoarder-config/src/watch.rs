@@ -34,7 +34,13 @@ impl Watcher {
         let inotify = Inotify::init()?;
         inotify.watches().add(
             dir,
-            WatchMask::CLOSE_WRITE | WatchMask::MOVED_TO | WatchMask::CREATE | WatchMask::DELETE,
+            // MODIFY too, so a writer still busy in place (truncate, then
+            // write) keeps the file from looking settled.
+            WatchMask::CLOSE_WRITE
+                | WatchMask::MODIFY
+                | WatchMask::MOVED_TO
+                | WatchMask::CREATE
+                | WatchMask::DELETE,
         )?;
         Ok(Watcher {
             inotify,
@@ -69,6 +75,12 @@ impl Watcher {
     /// caught halfway.
     pub fn wait(&mut self) -> io::Result<()> {
         while !self.poll(None)? {}
+        self.settle()
+    }
+
+    /// Block until the file has been quiet for [`SETTLE`]. Call it after
+    /// [`Watcher::changed`] reports that the file moved under a read.
+    pub fn settle(&mut self) -> io::Result<()> {
         while self.poll(Some(SETTLE))? {}
         Ok(())
     }
