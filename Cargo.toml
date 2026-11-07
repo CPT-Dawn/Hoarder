@@ -23,6 +23,9 @@ hoarder-wayland = { path = "crates/hoarder-wayland", version = "0.1.0" }
 blake3 = "1.8.7"
 calloop = "0.14"
 clap = { version = "4.6", features = ["derive"] }
+# `hoarder completions` and the man pages `hoarder dist` writes for packages.
+clap_complete = "4.6"
+clap_mangen = "0.3"
 cosmic-text = "0.19"
 futures-util = { version = "0.3", default-features = false }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "avif", "qoi", "rayon"] }
