@@ -18,7 +18,7 @@ use futures_util::StreamExt as _;
 use zbus::zvariant::Variant;
 
 use crate::Exit;
-use crate::after::Delivered;
+use crate::after::{Delivered, on_path, run_detached};
 
 /// The hidden subcommand the notifying child runs.
 pub const SUBCOMMAND: &str = "notify-capture";
@@ -248,27 +248,6 @@ async fn show_in_folder(conn: &zbus::Connection, path: &Path, uri: &str) {
     };
     if !shown && let Some(dir) = path.parent() {
         run_detached("xdg-open", &[dir.as_os_str()]);
-    }
-}
-
-fn on_path(name: &str) -> bool {
-    std::env::var_os("PATH")
-        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(name).is_file()))
-}
-
-fn run_detached(program: &str, args: &[&std::ffi::OsStr]) {
-    match Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()
-    {
-        Ok(mut child) => {
-            std::thread::spawn(move || child.wait());
-        }
-        Err(e) => eprintln!("hoarder: cannot run {program}: {e}"),
     }
 }
 
