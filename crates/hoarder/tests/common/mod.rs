@@ -2,6 +2,7 @@
 
 #![allow(dead_code)]
 
+use std::io::Read;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
@@ -119,26 +120,40 @@ impl Overlay {
         Overlay { child: Some(child) }
     }
 
-    /// Wait (at most 10 s) for hoarder to exit.
+    /// Wait (at most 10 s) for hoarder to exit. Its output is drained
+    /// meanwhile, so a PNG bigger than a pipe buffer cannot stall it.
     pub fn finish(mut self) -> Finished {
         let mut child = self.child.take().expect("still running");
+        let drain = |r: Option<Box<dyn Read + Send>>| {
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                if let Some(mut r) = r {
+                    let _ = r.read_to_end(&mut buf);
+                }
+                buf
+            })
+        };
+        let stdout = drain(child.stdout.take().map(|r| Box::new(r) as _));
+        let stderr = drain(child.stderr.take().map(|r| Box::new(r) as _));
         let deadline = Instant::now() + Duration::from_secs(10);
-        while child.try_wait().unwrap().is_none() {
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
             if Instant::now() > deadline {
                 let _ = child.kill();
-                let out = child.wait_with_output().unwrap();
+                let _ = child.wait();
                 panic!(
                     "hoarder did not exit: {}",
-                    String::from_utf8_lossy(&out.stderr)
+                    String::from_utf8_lossy(&stderr.join().unwrap())
                 );
             }
             std::thread::sleep(Duration::from_millis(10));
-        }
-        let out = child.wait_with_output().unwrap();
+        };
         Finished {
-            status: out.status,
-            stdout: out.stdout,
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            status,
+            stdout: stdout.join().unwrap(),
+            stderr: String::from_utf8_lossy(&stderr.join().unwrap()).into_owned(),
         }
     }
 }
