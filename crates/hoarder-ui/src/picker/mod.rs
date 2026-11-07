@@ -49,14 +49,14 @@ use wayland_client::{
 use crate::chrome::Fonts;
 use crate::overlay::{OverlayError, timing};
 use crate::theme::Theme;
+pub use hoarder_ipc::Kind;
 use model::Model;
 
 /// One Clip as the Picker lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Entry {
+pub struct Clip {
     pub id: i64,
-    /// `text`, `image`, `files` or `other`.
-    pub kind: String,
+    pub kind: Kind,
     /// A line of text, an image's size or the file names; for a
     /// Concealed Clip, only dots.
     pub preview: String,
@@ -73,7 +73,7 @@ pub struct Entry {
 pub trait History {
     /// Every Clip, most recently used first. Called once, when the panel
     /// is about to draw its first frame, so it can be fetched meanwhile.
-    fn clips(&mut self) -> Result<Vec<Entry>, String>;
+    fn clips(&mut self) -> Result<Vec<Clip>, String>;
 
     /// The ids of Clips whose whole text contains `query`, most recently
     /// used first (full-text search, for long text whose match lies past
@@ -90,10 +90,10 @@ pub trait History {
     /// Alt, for the Concealed Clips on screen.
     fn reveal(&mut self, id: i64) -> Option<String>;
 
-    /// What the preview pane shows for `entry`, a Clip that is not
+    /// What the preview pane shows for `clip`, a Clip that is not
     /// Concealed. Called once the first frame is up, as the selection
     /// moves.
-    fn detail(&mut self, entry: &Entry) -> Detail;
+    fn detail(&mut self, clip: &Clip) -> Detail;
 }
 
 /// A Clip in full, for the preview pane.
@@ -333,13 +333,13 @@ impl App {
         if !self.shown || self.outcome.is_some() {
             return;
         }
-        let Some(entry) = model.selected().filter(|e| !e.concealed) else {
+        let Some(clip) = model.selected().filter(|e| !e.concealed) else {
             return;
         };
-        if self.detail.as_ref().is_some_and(|(id, _)| *id == entry.id) {
+        if self.detail.as_ref().is_some_and(|(id, _)| *id == clip.id) {
             return;
         }
-        self.detail = Some((entry.id, history.detail(entry)));
+        self.detail = Some((clip.id, history.detail(clip)));
         self.dirty = true;
     }
 
@@ -373,9 +373,9 @@ impl App {
         match event.keysym {
             Keysym::Escape => self.outcome = Some(None),
             Keysym::Return | Keysym::KP_Enter => {
-                if let Some(entry) = model.selected() {
+                if let Some(clip) = model.selected() {
                     self.outcome = Some(Some(Pick {
-                        id: entry.id,
+                        id: clip.id,
                         plain: mods.shift,
                     }));
                 }
@@ -396,9 +396,9 @@ impl App {
             }
             sym if ctrl && quick_row(sym).is_some() => {
                 let n = quick_row(sym).unwrap_or_default();
-                if let Some(entry) = model.row(n, rows as usize) {
+                if let Some(clip) = model.row(n, rows as usize) {
                     self.outcome = Some(Some(Pick {
-                        id: entry.id,
+                        id: clip.id,
                         plain: mods.shift,
                     }));
                 }

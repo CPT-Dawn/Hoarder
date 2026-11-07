@@ -253,10 +253,20 @@ struct SwayWindowProperties {
     class: Option<String>,
 }
 
+/// What a node of Sway's tree is; only windows matter here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SwayNodeType {
+    Con,
+    FloatingCon,
+    #[serde(other)]
+    Other,
+}
+
 #[derive(Debug, Deserialize)]
 struct SwayNode {
     #[serde(rename = "type")]
-    kind: String,
+    kind: SwayNodeType,
     name: Option<String>,
     app_id: Option<String>,
     window_properties: Option<SwayWindowProperties>,
@@ -277,7 +287,7 @@ impl SwayNode {
     /// The windows in this subtree, in paint order.
     fn leaves<'a>(&'a self, out: &mut Vec<&'a SwayNode>) {
         if self.nodes.is_empty() && self.floating_nodes.is_empty() {
-            if matches!(self.kind.as_str(), "con" | "floating_con") {
+            if matches!(self.kind, SwayNodeType::Con | SwayNodeType::FloatingCon) {
                 out.push(self);
             }
             return;

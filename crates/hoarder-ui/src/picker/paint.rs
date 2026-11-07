@@ -8,8 +8,8 @@ use cosmic_text::{
 };
 use tiny_skia::{FillRule, Paint, Pixmap, PixmapPaint, Rect, Transform};
 
-use super::Detail;
 use super::model::{MASK, Model};
+use super::{Detail, Kind};
 use crate::chrome::{Fonts, installed_family, rounded_rect};
 use crate::theme::Theme;
 
@@ -182,10 +182,10 @@ pub(crate) fn paint(
         );
     }
     let mut selected_entry = None;
-    for (n, (entry, selected)) in rows.into_iter().enumerate() {
+    for (n, (clip, selected)) in rows.into_iter().enumerate() {
         let y = SEARCH_H + PAD / 2.0 + n as f32 * ROW_H;
         if selected {
-            selected_entry = Some(entry);
+            selected_entry = Some(clip);
             paint.set_color(with_alpha(theme.accent, 48));
             let row = rounded_rect(
                 (LIST_W - PAD) * s,
@@ -209,13 +209,13 @@ pub(crate) fn paint(
         }
         let text_y = y + (ROW_H - TEXT * 1.3) / 2.0;
         let tag_y = y + (ROW_H - SMALL * 1.3) / 2.0;
-        let tag_colour = if entry.pinned {
+        let tag_colour = if clip.pinned {
             theme.accent
         } else {
             theme.muted
         };
         pen.text(
-            kind_tag(&entry.kind, entry.concealed),
+            kind_tag(clip.kind, clip.concealed),
             family,
             PAD + 6.0,
             tag_y,
@@ -225,7 +225,7 @@ pub(crate) fn paint(
         );
         let x = PAD + 44.0;
         pen.text(
-            model.line(entry),
+            model.line(clip),
             family,
             x,
             text_y,
@@ -234,7 +234,7 @@ pub(crate) fn paint(
             theme.text,
         );
         pen.text(
-            &meta(entry.app.as_deref(), entry.at_ms, extra.now_ms),
+            &meta(clip.app.as_deref(), clip.at_ms, extra.now_ms),
             family,
             LIST_W - META_W + 4.0,
             tag_y,
@@ -245,7 +245,7 @@ pub(crate) fn paint(
     }
 
     // The preview pane.
-    if let Some(entry) = selected_entry {
+    if let Some(clip) = selected_entry {
         let pane = Pane {
             x: LIST_W + PAD,
             y: SEARCH_H + PAD,
@@ -253,8 +253,8 @@ pub(crate) fn paint(
             h: footer_y - SEARCH_H - 2.0 * PAD - SMALL * 1.3 - 8.0,
         };
         let detail = extra.detail;
-        if entry.concealed {
-            match model.revealed(entry.id) {
+        if clip.concealed {
+            match model.revealed(clip.id) {
                 Some(text) => pen.block(text, mono, &pane, theme.text),
                 None => {
                     pen.text(MASK, family, pane.x, pane.y, TEXT, pane.w, theme.text);
@@ -309,16 +309,16 @@ pub(crate) fn paint(
                 }
                 // Not arrived yet, or nothing to show beyond the preview.
                 Some(Detail::Nothing) | None => {
-                    pen.block(&entry.preview, family, &pane, theme.text);
+                    pen.block(&clip.preview, family, &pane, theme.text);
                 }
             }
         }
-        let mut about = meta(entry.app.as_deref(), entry.at_ms, extra.now_ms);
-        if entry.pinned {
+        let mut about = meta(clip.app.as_deref(), clip.at_ms, extra.now_ms);
+        if clip.pinned {
             about.push_str(" · pinned");
         }
-        if entry.concealed {
-            about.push_str(match model.revealed(entry.id) {
+        if clip.concealed {
+            about.push_str(match model.revealed(clip.id) {
                 Some(_) => " · concealed",
                 None => " · concealed, hold Alt to reveal",
             });
@@ -366,13 +366,13 @@ pub(crate) fn paint(
 }
 
 /// A short label for a Clip's kind.
-fn kind_tag(kind: &str, concealed: bool) -> &'static str {
+fn kind_tag(kind: Kind, concealed: bool) -> &'static str {
     match kind {
         _ if concealed => "HIDE",
-        "text" => "TXT",
-        "image" => "IMG",
-        "files" => "FILE",
-        _ => "BIN",
+        Kind::Text => "TXT",
+        Kind::Image => "IMG",
+        Kind::Files => "FILE",
+        Kind::Other => "BIN",
     }
 }
 

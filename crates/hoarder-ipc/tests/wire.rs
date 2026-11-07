@@ -3,7 +3,7 @@
 //! promise.
 
 use hoarder_ipc::{
-    ClipSummary, ErrorCode, Event, EventLine, Op, Recording, Request, Selection, Sensitivity,
+    ClipSummary, ErrorCode, Event, EventLine, Kind, Op, Recording, Request, Selection, Sensitivity,
     State, encode, parse_request,
 };
 use serde_json::{Value, json};
@@ -165,7 +165,7 @@ fn broken_requests_get_the_documented_error_codes() {
 fn clip() -> ClipSummary {
     ClipSummary {
         id: 412,
-        kind: "text".into(),
+        kind: Kind::Text,
         preview: "hoard me".into(),
         app: Some("foot".into()),
         at: "2026-11-08T12:00:01Z".into(),
@@ -278,4 +278,19 @@ fn newer_states_and_error_codes_decode_as_unknown() {
     assert_eq!(state.state, State::Unknown);
     let code: ErrorCode = serde_json::from_str(r#""on_fire""#).unwrap();
     assert_eq!(code, ErrorCode::Unknown);
+}
+
+#[test]
+fn every_kind_keeps_its_wire_name_and_unknown_ones_read_as_other() {
+    for (kind, name) in [
+        (Kind::Text, "text"),
+        (Kind::Image, "image"),
+        (Kind::Files, "files"),
+        (Kind::Other, "other"),
+    ] {
+        assert_eq!(serde_json::to_value(kind).unwrap(), json!(name));
+        assert_eq!(serde_json::from_value::<Kind>(json!(name)).unwrap(), kind);
+    }
+    let future = serde_json::from_value::<Kind>(json!("hologram")).unwrap();
+    assert_eq!(future, Kind::Other);
 }

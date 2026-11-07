@@ -6,9 +6,9 @@ use std::io::Read as _;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-use hoarder_ipc::{ClipSummary, Connection, Failure};
+use hoarder_ipc::{ClipSummary, Connection, Failure, Kind};
 use hoarder_ui::OverlayError;
-use hoarder_ui::picker::{self, Detail, Entry, Options};
+use hoarder_ui::picker::{self, Clip, Detail, Options};
 
 use crate::Exit;
 
@@ -84,7 +84,7 @@ impl Daemon {
 }
 
 impl picker::History for Daemon {
-    fn clips(&mut self) -> Result<Vec<Entry>, String> {
+    fn clips(&mut self) -> Result<Vec<Clip>, String> {
         let Daemon::Listing(listing) = self else {
             return Err("History was already read".into());
         };
@@ -101,7 +101,7 @@ impl picker::History for Daemon {
         *self = Daemon::Ready(connection, types);
         Ok(clips
             .into_iter()
-            .map(|c| Entry {
+            .map(|c| Clip {
                 id: c.id,
                 kind: c.kind,
                 at_ms: c
@@ -141,14 +141,14 @@ impl picker::History for Daemon {
         Some(String::from_utf8_lossy(&bytes).into_owned())
     }
 
-    fn detail(&mut self, entry: &Entry) -> Detail {
+    fn detail(&mut self, clip: &Clip) -> Detail {
         let Daemon::Ready(connection, types) = self else {
             return Detail::Nothing;
         };
-        let types = types.get(&entry.id).map_or(&[][..], Vec::as_slice);
+        let types = types.get(&clip.id).map_or(&[][..], Vec::as_slice);
         let find = |want: &dyn Fn(&str) -> bool| types.iter().find(|m| want(m)).cloned();
         let mut read = |mime: String, max: u64| -> Option<Vec<u8>> {
-            let (got, pipe) = connection.get(entry.id, Some(mime)).ok()?.ok()?;
+            let (got, pipe) = connection.get(clip.id, Some(mime)).ok()?.ok()?;
             // Too big to decode, and never worth streaming whole.
             if got.size > MAX_IMAGE {
                 return None;
@@ -157,8 +157,8 @@ impl picker::History for Daemon {
             pipe.take(max).read_to_end(&mut bytes).ok()?;
             Some(bytes)
         };
-        let detail = match entry.kind.as_str() {
-            "image" => find(&|m| m == "image/png")
+        let detail = match clip.kind {
+            Kind::Image => find(&|m| m == "image/png")
                 .or_else(|| find(&|m| m.starts_with("image/")))
                 .and_then(|m| read(m, MAX_IMAGE))
                 .and_then(|bytes| image::load_from_memory(&bytes).ok())
@@ -170,14 +170,14 @@ impl picker::History for Daemon {
                         rgba: rgba.into_raw(),
                     }
                 }),
-            "files" => find(&|m| m == "text/uri-list")
+            Kind::Files => find(&|m| m == "text/uri-list")
                 .and_then(|m| read(m, MAX_TEXT))
                 .map(|bytes| Detail::Files(file_paths(&String::from_utf8_lossy(&bytes)))),
-            "text" => find(&|m| m.starts_with("text/plain") || m == "UTF8_STRING")
+            Kind::Text => find(&|m| m.starts_with("text/plain") || m == "UTF8_STRING")
                 .or_else(|| find(&|m| m.starts_with("text/")))
                 .and_then(|m| read(m, MAX_TEXT))
                 .map(|bytes| Detail::Text(String::from_utf8_lossy(&bytes).into_owned())),
-            _ => None,
+            Kind::Other => None,
         };
         detail.unwrap_or(Detail::Nothing)
     }

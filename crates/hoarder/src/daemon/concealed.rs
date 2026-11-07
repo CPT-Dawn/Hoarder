@@ -6,7 +6,7 @@ use std::io::Write as _;
 use std::os::fd::OwnedFd;
 use std::sync::Arc;
 
-use hoarder_ipc::{ClipSummary, ErrorCode, Failure, Got, Sensitivity, Value};
+use hoarder_ipc::{ClipSummary, ErrorCode, Failure, Got, Kind, Sensitivity, Value};
 use hoarder_wayland::clipboard::Selection;
 use zeroize::Zeroize as _;
 
@@ -315,19 +315,19 @@ fn summary(c: Listed) -> ClipSummary {
             .unwrap_or_default()
     };
     let kind = if c.types.iter().any(|m| m.starts_with("image/")) {
-        "image"
+        Kind::Image
     } else if c
         .types
         .iter()
         .any(|m| m.starts_with("text/") || super::is_plain_text(m))
     {
-        "text"
+        Kind::Text
     } else {
-        "other"
+        Kind::Other
     };
     ClipSummary {
         id: ipc_id(c.id),
-        kind: kind.into(),
+        kind,
         preview: MASK.into(),
         app: c.app,
         at: time(c.at_ms),

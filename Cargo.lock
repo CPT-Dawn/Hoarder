@@ -1463,6 +1463,7 @@ version = "0.1.0"
 dependencies = [
  "cosmic-text",
  "hoarder-config",
+ "hoarder-ipc",
  "hoarder-wayland",
  "nucleo-matcher",
  "rustix",

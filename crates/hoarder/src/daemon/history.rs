@@ -538,6 +538,16 @@ fn restore(
     Ok((summary(&meta), reprs))
 }
 
+/// A Store kind as the wire names it.
+fn kind(kind: hoarder_store::Kind) -> hoarder_ipc::Kind {
+    match kind {
+        hoarder_store::Kind::Text => hoarder_ipc::Kind::Text,
+        hoarder_store::Kind::Image => hoarder_ipc::Kind::Image,
+        hoarder_store::Kind::Files => hoarder_ipc::Kind::Files,
+        hoarder_store::Kind::Other => hoarder_ipc::Kind::Other,
+    }
+}
+
 pub(super) fn summary(clip: &Clip) -> ClipSummary {
     let time = |ms: i64| {
         jiff::Timestamp::from_millisecond(ms)
@@ -546,7 +556,7 @@ pub(super) fn summary(clip: &Clip) -> ClipSummary {
     };
     ClipSummary {
         id: clip.id,
-        kind: clip.kind.to_string(),
+        kind: kind(clip.kind),
         preview: clip.preview.clone(),
         app: clip.source_app.clone(),
         at: time(clip.last_used_at),
