@@ -89,7 +89,7 @@ jobs:
         run: >-
           runuser -u tester -- env HOARDER_BUDGET_SCALE="$HOARDER_BUDGET_SCALE"
           cargo test --release --locked -p hoarder
-          --test e2e_shot_clipboard --test e2e_overlay
+          --test e2e_shot_clipboard --test e2e_overlay --test e2e_picker
           -- 150_ms budget --nocapture
 
   deny:

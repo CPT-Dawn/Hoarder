@@ -229,6 +229,15 @@ impl Daemon {
             }
             Op::Clear { selection } => self.clear(client, id, super::from_ipc(selection)),
             Op::List { limit } => self.ask_history(client, id, Job::List { client, id, limit }),
+            Op::Search { query, limit } => {
+                let job = Job::Search {
+                    client,
+                    id,
+                    query,
+                    limit,
+                };
+                self.ask_history(client, id, job);
+            }
             Op::Get { clip, mime } => {
                 let Some(pipe) = self.take_fd(client, id, "get streams into a pipe") else {
                     return;

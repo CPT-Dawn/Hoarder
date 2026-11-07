@@ -12,6 +12,7 @@ authors.workspace = true
 cosmic-text.workspace = true
 hoarder-config.workspace = true
 hoarder-wayland.workspace = true
+nucleo-matcher.workspace = true
 rustix.workspace = true
 smithay-client-toolkit.workspace = true
 tiny-skia.workspace = true

@@ -3,6 +3,8 @@
 //!
 //! [`overlay::run`] shows the Overlay over the Frozen Frames and returns the
 //! Target the user picked, a clicked Window included (PLAN.md §4.2).
+//! [`picker::run`] shows the Picker over History and returns the Clip the
+//! user picked (PLAN.md §6).
 
 mod chrome;
 pub mod countdown;
@@ -10,6 +12,7 @@ mod geom;
 mod layers;
 mod loupe;
 pub mod overlay;
+pub mod picker;
 mod select;
 mod snap;
 mod sprite;

@@ -11,6 +11,7 @@ mod image;
 mod notify;
 mod pause;
 mod pick;
+mod picker;
 mod save;
 mod setup;
 mod shot;
@@ -93,6 +94,9 @@ enum Command {
     Config(config::ConfigCommand),
     /// Empty the clipboard, and keep the Daemon from restoring it.
     Clear,
+    /// Search History in a panel; Enter makes the selected Clip the
+    /// clipboard again, Esc closes (needs the Daemon).
+    Picker,
     /// List, read, restore, delete, pin and clear Clips in History (needs
     /// the Daemon).
     #[command(subcommand)]
@@ -219,6 +223,7 @@ fn main() -> ExitCode {
         Some(Command::NotifyCapture(args)) => notify::serve_child(args),
         Some(Command::Config(command)) => config::run(command, &cli.overrides),
         Some(Command::Clear) => daemon::clear(hoarder_wayland::clipboard::Selection::Clipboard),
+        Some(Command::Picker) => picker::run(&cli.overrides),
         Some(Command::History(command)) => history::run(command),
         Some(Command::Pause { duration, json }) => pause::pause(duration, json.json),
         Some(Command::Resume { json }) => pause::resume(json.json),

@@ -158,7 +158,7 @@ impl std::fmt::Display for OverlayError {
 impl std::error::Error for OverlayError {}
 
 /// With [`TIMINGS_ENV`] set, print how long `stage` took to reach since `started`.
-fn timing(started: Instant, stage: &str) {
+pub(crate) fn timing(started: Instant, stage: &str) {
     if std::env::var_os(TIMINGS_ENV).is_some() {
         eprintln!(
             "hoarder: timing {stage}_ms={:.1}",

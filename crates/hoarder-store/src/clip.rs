@@ -48,12 +48,25 @@ const TEXT_TYPES: [&str; 5] = [
 
 const EMPTY: (&str, &[u8]) = ("", &[]);
 
+/// How much of a text Clip search indexes; the trigram index costs a few
+/// times the text it covers.
+pub(crate) const SEARCH_BYTES: usize = 64 * 1024;
+
 /// Previews are cut to this many characters.
 const PREVIEW_CHARS: usize = 200;
 
 /// A Clip's kind, preview, and the blake3 hash of its canonical
 /// representation (prefixed by the kind), which is its identity for dedup.
+#[cfg(test)]
 pub(crate) fn describe(reprs: &[(&str, &[u8])]) -> (Kind, String, [u8; 32]) {
+    let (kind, preview, hash, _) = describe_with_text(reprs);
+    (kind, preview, hash)
+}
+
+/// [`describe`], plus the text a search looks through: the start of the
+/// whole text (up to [`SEARCH_BYTES`]) for a text Clip, the preview for
+/// any other.
+pub(crate) fn describe_with_text(reprs: &[(&str, &[u8])]) -> (Kind, String, [u8; 32], String) {
     let find = |pred: &dyn Fn(&str) -> bool| reprs.iter().find(|(m, _)| pred(m));
     let (kind, canonical) = if let Some(r) =
         find(&|m| m == "text/uri-list").filter(|(_, d)| uris(d).next().is_some())
@@ -85,7 +98,11 @@ pub(crate) fn describe(reprs: &[(&str, &[u8])]) -> (Kind, String, [u8; 32]) {
     hasher.update(kind.as_str().as_bytes());
     hasher.update(&[0]);
     hasher.update(data);
-    (kind, preview, *hasher.finalize().as_bytes())
+    let text = match kind {
+        Kind::Text => String::from_utf8_lossy(&data[..data.len().min(SEARCH_BYTES)]).into_owned(),
+        _ => preview.clone(),
+    };
+    (kind, preview, *hasher.finalize().as_bytes(), text)
 }
 
 /// The first line-ish of text, whitespace collapsed, cut short.
