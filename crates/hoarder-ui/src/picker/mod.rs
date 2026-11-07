@@ -14,7 +14,7 @@ mod paint;
 use std::time::Instant;
 
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState},
+    compositor::CompositorHandler,
     delegate_registry,
     dispatch2::Dispatch2,
     output::{OutputHandler, OutputState},
@@ -27,15 +27,13 @@ use smithay_client_toolkit::{
     shell::{
         WaylandSurface,
         wlr_layer::{
-            KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
-            LayerSurfaceConfigure,
+            KeyboardInteractivity, Layer, LayerShellHandler, LayerSurface, LayerSurfaceConfigure,
         },
     },
     shm::{Shm, ShmHandler, slot::SlotPool},
 };
 use wayland_client::{
     Connection, QueueHandle,
-    globals::registry_queue_init,
     protocol::{
         wl_callback::{self, WlCallback},
         wl_keyboard::WlKeyboard,
@@ -47,7 +45,7 @@ use wayland_client::{
 };
 
 use crate::chrome::Fonts;
-use crate::overlay::{OverlayError, timing};
+use crate::surface::{self, Error, Layered, failed, timing};
 use crate::theme::Theme;
 pub use hoarder_ipc::Kind;
 use model::Model;
@@ -135,23 +133,18 @@ pub struct Options {
 
 /// Show the Picker and wait for the user. Returns what they picked, or
 /// `None` if they closed it; either way the panel is off the screen by then.
-pub fn run(history: &mut dyn History, options: &Options) -> Result<Option<Pick>, OverlayError> {
+pub fn run(history: &mut dyn History, options: &Options) -> Result<Option<Pick>, Error> {
     // The fonts take the longest; they load while everything else gets ready.
     let fonts = Fonts::load();
-    let failed = |e: &dyn std::fmt::Display| OverlayError::Failed(e.to_string());
-    let conn = Connection::connect_to_env().map_err(|e| failed(&e))?;
-    let (globals, mut queue) = registry_queue_init::<App>(&conn).map_err(|e| failed(&e))?;
-    let qh = queue.handle();
-    let missing = |what: &str, e: &dyn std::fmt::Display| {
-        OverlayError::Unsupported(format!(
-            "the compositor does not offer {what}, which the Picker needs: {e}"
-        ))
-    };
-    let compositor =
-        CompositorState::bind(&globals, &qh).map_err(|e| missing("wl_compositor", &e))?;
-    let layer_shell =
-        LayerShell::bind(&globals, &qh).map_err(|e| missing("wlr-layer-shell", &e))?;
-    let shm = Shm::bind(&globals, &qh).map_err(|e| missing("wl_shm", &e))?;
+    let Layered {
+        conn,
+        globals,
+        mut queue,
+        qh,
+        compositor,
+        layer_shell,
+        shm,
+    } = surface::connect::<App>("Picker")?;
 
     // No anchors and no output: the compositor centres it on the output
     // the user is on.

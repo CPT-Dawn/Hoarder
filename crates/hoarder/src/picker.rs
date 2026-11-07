@@ -7,7 +7,7 @@ use std::thread::JoinHandle;
 use std::time::Instant;
 
 use hoarder_ipc::{ClipSummary, Connection, Failure, Kind};
-use hoarder_ui::OverlayError;
+use hoarder_ui::Error as UiError;
 use hoarder_ui::picker::{self, Clip, Detail, Options};
 
 use crate::Exit;
@@ -47,8 +47,8 @@ pub fn run(overrides: &[(String, String)]) -> Result<(), Fail> {
     };
     let mut history = Daemon::Listing(Some(listing));
     let picked = picker::run(&mut history, &options).map_err(|e| match e {
-        OverlayError::Unsupported(m) => (Exit::Unsupported, m),
-        OverlayError::Failed(m) => (Exit::Io, m),
+        UiError::Unsupported(m) => (Exit::Unsupported, m),
+        UiError::Failed(m) => (Exit::Io, m),
     })?;
     let Some(pick) = picked else {
         return Err((Exit::Cancelled, "cancelled".into()));

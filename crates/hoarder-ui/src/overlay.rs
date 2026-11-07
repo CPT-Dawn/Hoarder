@@ -48,8 +48,7 @@ use smithay_client_toolkit::{
     subcompositor::SubcompositorState,
 };
 use wayland_client::{
-    Connection, EventQueue, QueueHandle, delegate_noop,
-    globals::registry_queue_init,
+    Connection, QueueHandle, delegate_noop,
     protocol::{
         wl_buffer::WlBuffer, wl_callback::WlCallback, wl_keyboard::WlKeyboard, wl_output::WlOutput,
         wl_pointer::WlPointer, wl_seat::WlSeat, wl_shm, wl_shm_pool::WlShmPool,
@@ -67,10 +66,10 @@ use crate::geom::Rect;
 use crate::layers::{Context, Layers, ViewLayers};
 use crate::select::{Action, Key, Selector};
 use crate::snap::Hover;
+use crate::surface::{self, Error, Layered, failed, timing};
 use crate::theme::Theme;
 
-/// Set to print how long the Overlay took to become visible.
-pub const TIMINGS_ENV: &str = "HOARDER_TIMINGS";
+pub use crate::surface::TIMINGS_ENV;
 
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
@@ -137,40 +136,6 @@ pub struct Options {
     pub pick: bool,
 }
 
-/// Everything that can stop the Overlay.
-#[derive(Debug)]
-pub enum OverlayError {
-    /// The compositor lacks a protocol the Overlay needs.
-    Unsupported(String),
-    /// The Wayland connection failed.
-    Failed(String),
-}
-
-impl std::fmt::Display for OverlayError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            OverlayError::Unsupported(m) => f.write_str(m),
-            OverlayError::Failed(m) => write!(f, "overlay failed: {m}"),
-        }
-    }
-}
-
-impl std::error::Error for OverlayError {}
-
-/// With [`TIMINGS_ENV`] set, print how long `stage` took to reach since `started`.
-pub(crate) fn timing(started: Instant, stage: &str) {
-    if std::env::var_os(TIMINGS_ENV).is_some() {
-        eprintln!(
-            "hoarder: timing {stage}_ms={:.1}",
-            started.elapsed().as_secs_f64() * 1000.0
-        );
-    }
-}
-
-fn failed(e: impl std::fmt::Display) -> OverlayError {
-    OverlayError::Failed(e.to_string())
-}
-
 /// How long to wait for the compositor to present the hidden Overlay before
 /// capturing anyway.
 const HIDE_TIMEOUT: Duration = Duration::from_millis(500);
@@ -179,7 +144,7 @@ const HIDE_TIMEOUT: Duration = Duration::from_millis(500);
 /// cancel, drawn in `options.theme`. `started` is when the user asked for the
 /// Capture; with [`TIMINGS_ENV`] set, the time until the Overlay is visible is
 /// printed.
-pub fn run(frozen: &Frozen, started: Instant, options: &Options) -> Result<Outcome, OverlayError> {
+pub fn run(frozen: &Frozen, started: Instant, options: &Options) -> Result<Outcome, Error> {
     timing(started, "frozen");
     show(Some(frozen), started, options)
 }
@@ -187,7 +152,7 @@ pub fn run(frozen: &Frozen, started: Instant, options: &Options) -> Result<Outco
 /// Show the Overlay over the live desktop (`--live`) and wait for the user to
 /// pick a Target or cancel. On return the compositor has presented a frame
 /// without the Overlay, so the desktop can be captured as the user sees it.
-pub fn run_live(started: Instant, options: &Options) -> Result<Outcome, OverlayError> {
+pub fn run_live(started: Instant, options: &Options) -> Result<Outcome, Error> {
     show(None, started, options)
 }
 
@@ -204,26 +169,19 @@ struct Screen<'a> {
     frame: Option<&'a FrozenFrame>,
 }
 
-fn show(
-    frozen: Option<&Frozen>,
-    started: Instant,
-    options: &Options,
-) -> Result<Outcome, OverlayError> {
-    let conn = Connection::connect_to_env().map_err(failed)?;
-    let (globals, mut queue): (_, EventQueue<App>) = registry_queue_init(&conn).map_err(failed)?;
-    let qh = queue.handle();
-    fn missing(what: &'static str) -> impl Fn(wayland_client::globals::BindError) -> OverlayError {
-        move |e| {
-            OverlayError::Unsupported(format!(
-                "the compositor does not offer {what}, which the Overlay needs: {e}"
-            ))
-        }
-    }
-    let compositor = CompositorState::bind(&globals, &qh).map_err(missing("wl_compositor"))?;
+fn show(frozen: Option<&Frozen>, started: Instant, options: &Options) -> Result<Outcome, Error> {
+    let Layered {
+        globals,
+        mut queue,
+        qh,
+        compositor,
+        layer_shell,
+        shm,
+        ..
+    } = surface::connect::<App>("Overlay")?;
+    let missing = |what: &'static str| move |e| surface::missing("Overlay", what, e);
     let subcompositor = SubcompositorState::bind(compositor.wl_compositor().clone(), &globals, &qh)
         .map_err(missing("wl_subcompositor"))?;
-    let layer_shell = LayerShell::bind(&globals, &qh).map_err(missing("wlr-layer-shell"))?;
-    let shm = Shm::bind(&globals, &qh).map_err(missing("wl_shm"))?;
     let viewporter: WpViewporter = globals
         .bind(&qh, 1..=1, ())
         .map_err(missing("wp_viewporter"))?;
@@ -280,7 +238,7 @@ fn show(
                     frame: Some(frame),
                 })
             })
-            .collect::<Result<_, OverlayError>>()?,
+            .collect::<Result<_, Error>>()?,
         None => {
             // xdg-output's logical geometry arrives a roundtrip later.
             queue.roundtrip(&mut app).map_err(failed)?;

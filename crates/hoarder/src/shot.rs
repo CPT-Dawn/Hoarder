@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use clap::ValueEnum;
 use hoarder_config::{Config, MixedScale, Screenshot, State, StoredRegion, WindowSource};
-use hoarder_ui::{Options, Outcome, OverlayError, Region, Theme, countdown, overlay};
+use hoarder_ui::{Error as UiError, Options, Outcome, Region, Theme, countdown, overlay};
 use hoarder_wayland::{CaptureError, Frozen, Window};
 
 use crate::Exit;
@@ -245,10 +245,10 @@ pub(crate) fn freeze() -> Result<Frozen, (Exit, String)> {
     })
 }
 
-pub(crate) fn overlay_error(e: OverlayError) -> (Exit, String) {
+pub(crate) fn overlay_error(e: UiError) -> (Exit, String) {
     let code = match e {
-        OverlayError::Unsupported(_) => Exit::Unsupported,
-        OverlayError::Failed(_) => Exit::Io,
+        UiError::Unsupported(_) => Exit::Unsupported,
+        UiError::Failed(_) => Exit::Io,
     };
     (code, e.to_string())
 }

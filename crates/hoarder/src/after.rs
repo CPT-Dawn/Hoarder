@@ -42,11 +42,11 @@ pub fn run(captures: &[Delivered], settings: &Screenshot) {
 pub fn flash(settings: &Screenshot) -> Option<Flash> {
     settings
         .flash
-        .then(|| Flash(Some(std::thread::spawn(hoarder_wayland::flash::flash))))
+        .then(|| Flash(Some(std::thread::spawn(hoarder_ui::flash::flash))))
 }
 
 #[derive(Debug)]
-pub struct Flash(Option<std::thread::JoinHandle<Result<(), String>>>);
+pub struct Flash(Option<std::thread::JoinHandle<Result<(), hoarder_ui::Error>>>);
 
 impl Drop for Flash {
     fn drop(&mut self) {
