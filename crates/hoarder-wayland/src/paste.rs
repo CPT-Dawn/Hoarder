@@ -176,18 +176,15 @@ fn focused(
     state: &mut State,
 ) -> Result<Option<Option<String>>, ClipboardError> {
     let deadline = Instant::now() + FOCUS_WAIT;
-    // The first roundtrip lists the toplevels, the second their details.
+    // The roundtrip lists the toplevels; their details, and a focus change,
+    // arrive as events, which we sleep on rather than poll for.
     queue.roundtrip(state).map_err(failed)?;
-    loop {
-        queue.roundtrip(state).map_err(failed)?;
-        if let Some(id) = &state.focused {
-            return Ok(Some(state.toplevels.get(id).and_then(|t| t.app_id.clone())));
-        }
-        if Instant::now() >= deadline {
-            return Ok(None);
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    let found = crate::wait::dispatch_until(queue, state, deadline, |s| s.focused.is_some())
+        .map_err(failed)?;
+    Ok(found.then(|| {
+        let id = state.focused.as_ref().expect("focused, as waited for");
+        state.toplevels.get(id).and_then(|t| t.app_id.clone())
+    }))
 }
 
 #[derive(Debug, Default)]

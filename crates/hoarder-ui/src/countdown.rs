@@ -122,15 +122,17 @@ pub fn run(delay: Duration, options: &Options) -> Result<(), Error> {
         delay,
         deadline,
     };
-    let ticking = crate::wait::dispatch_until(&mut queue, &mut app, deadline, |_| false);
+    let ticking = hoarder_wayland::wait::dispatch_until(&mut queue, &mut app, deadline, |_| false);
     ticking.map_err(|e| failed(&e))?;
 
     app.clear(&qh).map_err(|e| failed(&e))?;
-    let shown =
-        crate::wait::dispatch_until(&mut queue, &mut app, Instant::now() + CLEAR_TIMEOUT, |a| {
-            a.cleared == Cleared::Shown || !a.configured
-        })
-        .map_err(|e| failed(&e))?;
+    let shown = hoarder_wayland::wait::dispatch_until(
+        &mut queue,
+        &mut app,
+        Instant::now() + CLEAR_TIMEOUT,
+        |a| a.cleared == Cleared::Shown || !a.configured,
+    )
+    .map_err(|e| failed(&e))?;
     if !shown {
         eprintln!("hoarder: the compositor did not confirm the countdown was hidden");
     }

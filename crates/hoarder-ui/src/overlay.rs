@@ -295,7 +295,7 @@ fn show(frozen: Option<&Frozen>, started: Instant, options: &Options) -> Result<
         }
         // Sleep until the compositor speaks or a layer's timer is due.
         let deadline = app.layers.deadline(now);
-        crate::wait::dispatch_once(&mut queue, deadline).map_err(failed)?;
+        hoarder_wayland::wait::dispatch_once(&mut queue, deadline).map_err(failed)?;
     }
     options.cursor.set(app.layers.cursor);
     for view in &mut app.views {
@@ -306,7 +306,7 @@ fn show(frozen: Option<&Frozen>, started: Instant, options: &Options) -> Result<
         // The caller captures the live desktop next: it must not see us.
         app.hide(&qh).map_err(failed)?;
         let deadline = Instant::now() + HIDE_TIMEOUT;
-        let hidden = crate::wait::dispatch_until(&mut queue, &mut app, deadline, |a| {
+        let hidden = hoarder_wayland::wait::dispatch_until(&mut queue, &mut app, deadline, |a| {
             a.views.iter().all(|v| v.hidden == Hidden::Shown)
         })
         .map_err(failed)?;

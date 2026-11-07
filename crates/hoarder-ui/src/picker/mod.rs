@@ -184,7 +184,7 @@ pub fn run(history: &mut dyn History, options: &Options) -> Result<Option<Pick>,
     };
 
     while app.outcome.is_none() {
-        crate::wait::dispatch_once(&mut queue, None).map_err(|e| failed(&e))?;
+        hoarder_wayland::wait::dispatch_once(&mut queue, None).map_err(|e| failed(&e))?;
         queue.dispatch_pending(&mut app).map_err(|e| failed(&e))?;
         if app.configured && app.model.is_none() {
             timing(app.started, "picker_configured");

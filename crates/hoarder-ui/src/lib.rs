@@ -19,7 +19,6 @@ mod snap;
 mod sprite;
 mod surface;
 pub mod theme;
-mod wait;
 
 pub use overlay::{Options, Outcome, Region};
 pub use surface::{Error, TIMINGS_ENV};

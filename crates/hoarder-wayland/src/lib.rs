@@ -15,6 +15,7 @@ mod hyprland;
 pub mod paste;
 pub mod probe;
 pub mod toplevel;
+pub mod wait;
 pub mod watch;
 pub mod windows;
 
