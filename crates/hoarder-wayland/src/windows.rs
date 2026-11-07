@@ -76,6 +76,11 @@ pub trait WindowGeometry: std::fmt::Debug + Send {
     /// The windows on screen right now, topmost first: of the windows
     /// containing a point, the first one is the one the user sees there.
     fn windows(&self) -> Result<Vec<Window>, GeometryError>;
+
+    /// Where the geometry comes from, for `hoarder doctor`.
+    fn name(&self) -> &'static str {
+        "none"
+    }
 }
 
 /// The provider for the compositor this process runs under, picked from
@@ -189,6 +194,10 @@ impl SwayIpc {
 impl WindowGeometry for SwayIpc {
     fn windows(&self) -> Result<Vec<Window>, GeometryError> {
         SwayIpc::parse_tree(&self.request(SWAY_GET_TREE)?)
+    }
+
+    fn name(&self) -> &'static str {
+        "Sway IPC"
     }
 }
 
@@ -344,6 +353,10 @@ impl HyprlandIpc {
 }
 
 impl WindowGeometry for HyprlandIpc {
+    fn name(&self) -> &'static str {
+        "Hyprland IPC"
+    }
+
     fn windows(&self) -> Result<Vec<Window>, GeometryError> {
         let monitors = self.request("j/monitors")?;
         let clients = self.request("j/clients")?;
