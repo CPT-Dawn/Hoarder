@@ -48,39 +48,12 @@ pub fn assert_within(what: &str, measured: Duration, plan: Duration) {
     }
 }
 
-/// Print `measured` bytes against the PLAN budget `plan` (in bytes, never
-/// scaled) and fail if it is over. Debug builds carry more code and keep
-/// more around, so they only print, like the latency budgets.
-pub fn assert_memory_within(what: &str, measured: u64, plan: u64) {
-    let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
+/// Print `measured` bytes as a `budget:` line for the budgets job, which
+/// fails a change that grows it by more than 20% over its base. Memory has no
+/// fixed ceiling (PLAN.md section 12), so this never fails on its own.
+pub fn report_memory(what: &str, measured: u64) {
     eprintln!(
-        "budget: {what}: measured {:.2} MB, budget {:.2} MB (PLAN, not scaled)",
-        mb(measured),
-        mb(plan),
-    );
-    if !cfg!(debug_assertions) {
-        assert!(
-            measured < plan,
-            "{what}: {:.2} MB is over the {:.2} MB budget",
-            mb(measured),
-            mb(plan),
-        );
-    }
-}
-
-/// Print `measured` bytes against the PLAN budget `plan` in the same
-/// `budget:` line as [`assert_memory_within`], for the budgets job to track,
-/// without failing when it is over.
-pub fn report_memory(what: &str, measured: u64, plan: u64) {
-    let mb = |b: u64| b as f64 / (1024.0 * 1024.0);
-    let over = if measured < plan {
-        ""
-    } else {
-        ", OVER (reported only)"
-    };
-    eprintln!(
-        "budget: {what}: measured {:.2} MB, budget {:.2} MB (PLAN, not scaled){over}",
-        mb(measured),
-        mb(plan),
+        "budget: {what}: measured {:.2} MB, tracked for regressions only",
+        measured as f64 / (1024.0 * 1024.0),
     );
 }

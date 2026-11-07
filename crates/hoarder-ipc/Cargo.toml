@@ -7,8 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+# Shipped through the AUR and release tarballs, never crates.io.
+publish = false
 homepage = "https://github.com/CPT-Dawn/Hoarder"
-documentation = "https://docs.rs/hoarder-ipc"
 readme = "README.md"
 keywords = ["clipboard", "wayland", "ipc", "json-lines", "hoarder"]
 categories = ["api-bindings", "os::linux-apis"]

@@ -25,18 +25,28 @@ fn main() -> std::io::Result<()> {
 }
 ```
 
-Linux only (Unix sockets and `SCM_RIGHTS` fd passing via `rustix`). [`Connection`](https://docs.rs/hoarder-ipc/latest/hoarder_ipc/struct.Connection.html) is blocking; an async Front end can use the types with its own socket and [`encode`](https://docs.rs/hoarder-ipc/latest/hoarder_ipc/fn.encode.html) for framing.
+Linux only (Unix sockets and `SCM_RIGHTS` fd passing via `rustix`). `Connection` is blocking; an async Front end can use the types with its own socket and `encode` for framing. `cargo doc -p hoarder-ipc --open` in your project shows the API.
 
-## Versioning
+## Getting it
 
-The wire protocol carries a version, `v`, now `1`. The crate's version follows it:
+`hoarder-ipc` is not on crates.io. Depend on it by git, pinned to a Hoarder release tag:
 
-- **Additive protocol changes** (a new op, event, field, error code or enum value) keep `v: 1` and come out as a **minor** release. Older crates keep working against newer Daemons: unknown fields are ignored, and unknown events, error codes, states and owners decode as `Unknown`. The enums that grow (`Op`, `Event`, `ErrorCode`, `State`, `Owner`) are `#[non_exhaustive]`, so match them with a wildcard arm.
-- **Breaking protocol changes** bump `v` and the crate's **major** version. `Op::Hello` tells you which versions a Daemon speaks.
-- Response structs (`Status`, `ClipSummary`, …) may gain public fields in a minor release. Reading them is covered by this policy; building them with struct literals (to implement a Daemon) is not.
-- While the crate is 0.x, Cargo treats each 0.minor as breaking, so additive releases bump 0.minor. 1.0.0 marks protocol v1 as frozen.
+```toml
+[dependencies]
+hoarder-ipc = { git = "https://github.com/CPT-Dawn/Hoarder", tag = "v1.0.0" }
+```
 
-The minimum supported Rust version is in `Cargo.toml` (`rust-version`) and moves only in minor releases.
+The crate is versioned with Hoarder: tag `vX.Y.Z` holds `hoarder-ipc` X.Y.Z. Move the tag forward when you want newer ops or fields.
+
+## Compatibility
+
+The wire protocol carries a version, `v`, now `1`. That is the promise, not the crate's version:
+
+- **Additive protocol changes** (a new op, event, field, error code or enum value) keep `v: 1`. A client pinned to an older tag keeps working against a newer Daemon: unknown fields are ignored, and unknown events, error codes, states and owners decode as `Unknown`. The enums that grow (`Op`, `Event`, `ErrorCode`, `State`, `Owner`) are `#[non_exhaustive]`, so match them with a wildcard arm.
+- **Breaking protocol changes** bump `v`. `Op::Hello` tells you which versions a Daemon speaks.
+- Response structs (`Status`, `ClipSummary`, …) may gain public fields in any release. Reading them is covered by this policy; building them with struct literals (to implement a Daemon) is not.
+
+The minimum supported Rust version is in `Cargo.toml` (`rust-version`).
 
 ## License
 

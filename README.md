@@ -12,7 +12,7 @@ Arch Linux (AUR): `hoarder` (from source), `hoarder-bin` (prebuilt), `hoarder-gi
 systemctl --user enable --now hoarder   # or: hoarder service enable
 ```
 
-Elsewhere: `cargo install hoarder`, or a tarball from [Releases](https://github.com/CPT-Dawn/Hoarder/releases). `hoarder completions bash|zsh|fish` prints a completion script.
+Elsewhere: a tarball from [Releases](https://github.com/CPT-Dawn/Hoarder/releases), or build a tag with `cargo install --locked --git https://github.com/CPT-Dawn/Hoarder --tag v1.0.0 hoarder`. Nothing is published to crates.io. `hoarder completions bash|zsh|fish` prints a completion script.
 
 ## Development
 

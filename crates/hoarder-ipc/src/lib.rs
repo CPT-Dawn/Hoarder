@@ -38,11 +38,12 @@
 //!
 //! Unknown fields are ignored on both sides, and events, error codes and
 //! enum values newer than this crate decode as `Unknown`, so additive
-//! protocol changes keep `v: 1` and arrive in minor releases of this crate
-//! (the enums that grow are `#[non_exhaustive]`). Breaking protocol changes
-//! bump [`PROTOCOL`] and this crate's major version (ADR-0004). Building the
-//! response structs yourself (to write a Daemon) is not covered: they may
-//! gain fields in a minor release. See the crate's README for the policy.
+//! protocol changes keep `v: 1` (the enums that grow are
+//! `#[non_exhaustive]`), and a client pinned to an older release tag keeps
+//! working against a newer Daemon. Breaking protocol changes bump
+//! [`PROTOCOL`] (ADR-0004). Building the response structs yourself (to write
+//! a Daemon) is not covered: they may gain fields in any release. See the
+//! crate's README for the policy.
 //!
 //! [Hoarder]: https://github.com/CPT-Dawn/Hoarder
 //! [docs/ipc.md]: https://github.com/CPT-Dawn/Hoarder/blob/main/docs/ipc.md

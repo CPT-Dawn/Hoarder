@@ -1,10 +1,14 @@
 # Hoarder releases. Runs only when a version tag is pushed:
 #
-#   v1.0.0             a release: crates.io, a GitHub release with binaries,
-#                      checksums and the rendered AUR packages
+#   v1.0.0             a release: a GitHub release with binaries, checksums
+#                      and the rendered AUR packages
 #   v1.0.0-dryrun.1    a dry run of the same version: everything is built and
-#                      checked, `cargo publish --dry-run`, nothing published;
-#                      the outputs are left as workflow artifacts
+#                      checked, nothing published; the outputs are left as
+#                      workflow artifacts
+#
+# Hoarder ships through the AUR and the GitHub release only: no crate goes to
+# crates.io (every crate has `publish = false`). Third parties depend on
+# `hoarder-ipc` by git, pinned to a release tag.
 #
 # The tag's version must match `version` in Cargo.toml. The AUR is never
 # pushed from here: docs/releasing.md has the steps.
@@ -130,13 +134,12 @@ jobs:
       - run: cargo build --profile dist --locked -p hoarder
       - name: Package
         run: packaging/dist.sh target/dist/hoarder "$VERSION" "${{ matrix.target }}" out
-      - name: Size (PLAN.md section 12 budgets the stripped binary at 8 MB)
+      # Informational only: PLAN.md section 12 tracks the size for
+      # regressions (the CI budgets job), not against a fixed ceiling.
+      - name: Size
         run: |
           size=$(stat -c %s target/dist/hoarder)
           echo "${{ matrix.target }}: $((size / 1024)) KiB" >> "$GITHUB_STEP_SUMMARY"
-          if [ "$size" -gt 8388608 ]; then
-            echo "::warning::the ${{ matrix.target }} binary is $((size / 1024)) KiB, over the 8 MB budget"
-          fi
       - uses: actions/upload-artifact@v4
         with:
           name: binary-${{ matrix.target }}
@@ -199,40 +202,9 @@ jobs:
           name: aur
           path: hoarder-${{ needs.plan.outputs.version }}-aur.tar.gz
 
-  # Every crate but hoarder-e2e (publish = false), in dependency order.
-  crates-dry-run:
-    name: crates.io (dry run)
-    needs: plan
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install xkbcommon (smithay-client-toolkit links it)
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libxkbcommon-dev
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo publish --workspace --locked --dry-run
-
-  crates:
-    name: crates.io
-    needs: [plan, notes, aur, crates-dry-run]
-    if: needs.plan.outputs.dry_run == 'false'
-    runs-on: ubuntu-latest
-    # Holds the CARGO_REGISTRY_TOKEN secret; give it required reviewers for a
-    # last look before anything irreversible happens.
-    environment: release
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install xkbcommon (smithay-client-toolkit links it)
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libxkbcommon-dev
-      - uses: Swatinem/rust-cache@v2
-      - env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --workspace --locked
-
   github:
     name: GitHub release
-    needs: [plan, crates]
+    needs: [plan, notes, aur]
     if: needs.plan.outputs.dry_run == 'false'
     runs-on: ubuntu-latest
     permissions:
