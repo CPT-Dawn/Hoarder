@@ -19,6 +19,7 @@ enum Command {
     /// Take a Capture.
     Shot {
         /// What to capture.
+        #[arg(default_value = "region")]
         target: shot::Target,
         /// Write the image to PATH, or to stdout with `-`.
         #[arg(short = 'o', long = "output", value_name = "PATH")]
@@ -30,6 +31,8 @@ enum Command {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exit {
     Success = 0,
+    /// The user cancelled (Esc or right-click in the Overlay).
+    Cancelled = 1,
     /// Unsupported compositor or protocol.
     Unsupported = 3,
     Io = 4,

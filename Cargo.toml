@@ -21,9 +21,12 @@ hoarder-ui = { path = "crates/hoarder-ui", version = "0.1.0" }
 hoarder-wayland = { path = "crates/hoarder-wayland", version = "0.1.0" }
 
 clap = { version = "4.6", features = ["derive"] }
+cosmic-text = "0.19"
 png = "0.18"
 rustix = { version = "1.1", features = ["event", "fs", "pipe"] }
+smithay-client-toolkit = { version = "0.21", default-features = false, features = ["xkbcommon"] }
 tempfile = "3.27"
+tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
