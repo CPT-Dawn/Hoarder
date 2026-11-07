@@ -23,7 +23,10 @@ enum Command {
         target: shot::Target,
         /// Write the image to PATH, or to stdout with `-`.
         #[arg(short = 'o', long = "output", value_name = "PATH")]
-        output: PathBuf,
+        output: Option<PathBuf>,
+        /// Leave the clipboard alone.
+        #[arg(long)]
+        no_copy: bool,
     },
     /// Copy stdin or text to the clipboard (accepts every wl-copy flag).
     Copy(clipboard::CopyArgs),
@@ -54,7 +57,11 @@ impl From<Exit> for ExitCode {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
-        Some(Command::Shot { target, output }) => shot::run(target, &output),
+        Some(Command::Shot {
+            target,
+            output,
+            no_copy,
+        }) => shot::run(target, output.as_deref(), !no_copy),
         Some(Command::Copy(args)) => clipboard::copy(args),
         Some(Command::Paste(args)) => clipboard::paste(args),
         Some(Command::ServeOffer(args)) => clipboard::serve_child(args),

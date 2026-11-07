@@ -16,7 +16,7 @@ pub enum Target {
     All,
 }
 
-pub fn run(target: Target, output: &Path) -> Result<(), (Exit, String)> {
+pub fn run(target: Target, output: Option<&Path>, copy: bool) -> Result<(), (Exit, String)> {
     let frozen = hoarder_wayland::freeze().map_err(|e| {
         let code = match e {
             CaptureError::NoWayland(_) | CaptureError::Unsupported(_) => Exit::Unsupported,
@@ -27,13 +27,21 @@ pub fn run(target: Target, output: &Path) -> Result<(), (Exit, String)> {
     let image = match target {
         Target::All => Image::all_outputs(&frozen.frames),
     };
-    deliver(&image, output)
-        .map_err(|e| (Exit::Io, format!("cannot write {}: {e}", output.display())))
+    let mut png = Vec::new();
+    image
+        .write_png(&mut png)
+        .map_err(|e| (Exit::Io, format!("cannot encode the Capture: {e}")))?;
+    if copy {
+        crate::clipboard::copy_capture(&png)?;
+    }
+    match output {
+        Some(output) => deliver(png, output)
+            .map_err(|e| (Exit::Io, format!("cannot write {}: {e}", output.display()))),
+        None => Ok(()),
+    }
 }
 
-fn deliver(image: &Image, output: &Path) -> std::io::Result<()> {
-    let mut buf = Vec::new();
-    image.write_png(&mut buf).map_err(std::io::Error::other)?;
+fn deliver(buf: Vec<u8>, output: &Path) -> std::io::Result<()> {
     if output == Path::new("-") {
         let mut stdout = std::io::stdout().lock();
         stdout.write_all(&buf)?;

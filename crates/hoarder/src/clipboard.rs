@@ -291,6 +291,36 @@ impl Offer {
     }
 }
 
+/// Put a Capture's PNG on the clipboard so it stays pasteable after
+/// `hoarder shot` exits. Until the Daemon can take it (#76), a serving child
+/// holds it, and with no Daemon running the user hears once that History is off.
+pub fn copy_capture(png: &[u8]) -> Result<(), (Exit, String)> {
+    if !daemon_running() {
+        eprintln!(
+            "hoarder: History is off (no Daemon running); the Capture is on the clipboard \
+             but will not be kept. Run `hoarder service enable` to keep Captures."
+        );
+    }
+    let offer = Offer {
+        which: Selection::Clipboard,
+        mime_types: vec!["image/png".into()],
+        sensitive: false,
+        serve: Serve::UntilReplaced,
+        seat: None,
+    };
+    offer.serve_in_background(png)
+}
+
+/// Whether something answers on the Daemon's socket (PLAN.md §11).
+fn daemon_running() -> bool {
+    std::env::var_os("XDG_RUNTIME_DIR").is_some_and(|dir| {
+        std::os::unix::net::UnixStream::connect(
+            std::path::Path::new(&dir).join("hoarder/hoarder.sock"),
+        )
+        .is_ok()
+    })
+}
+
 /// The hidden subcommand the background child runs.
 pub const SERVE_SUBCOMMAND: &str = "serve-offer";
 
