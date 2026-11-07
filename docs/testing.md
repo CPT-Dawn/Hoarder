@@ -16,6 +16,7 @@ The end-to-end tests need these on `PATH` (Arch: `sway grim wl-clipboard libavif
 | `grim` | Independent oracle for "what the user sees" (`Session::screenshot`). |
 | `wl-copy`, `wl-paste` | Independent oracle for Selections, and the reference the `hoarder copy`/`paste` parity suite (`crates/hoarder/tests/e2e_clipboard.rs`) runs every case against, in every copier/paster pairing. |
 | `avifdec` | Independent AVIF decoder for the saved-format tests (`libavif`). |
+| `socat`, `jq` | Optional: run the examples in docs/ipc.md (skipped without them). |
 | `dbus-daemon` | A private session bus per notification test (`crates/hoarder/tests/bus/`, used by `e2e_notify.rs` and `e2e_pick.rs`), with a stand-in notification server on it, so no test ever reaches your real desktop. |
 
 Latency budgets (4K shot-to-clipboard under 150 ms) are `#[ignore]`d in debug builds, since timing unoptimised code proves nothing. Run them with `cargo test --release -p hoarder --test e2e_shot_clipboard`; see [Timings and budgets](#timings-and-budgets) for scaling them with `HOARDER_BUDGET_SCALE`.
@@ -89,6 +90,15 @@ It is also handy for bug reports: a user can check whether a capture problem fol
 ## The Daemon (`crates/hoarder/tests/e2e_daemon.rs`)
 
 The Daemon tests start `hoarder daemon` in the session and judge it only by what a user or Front end can see: `wl-paste` after the source app exits (Takeover and the Reader rules), the source still owning its Selection, socket responses, `/proc` context switches for idle wakeups, and exit codes. The `status` op's `reading` flag tells a test when the Daemon has finished reading an Offer, so a source is never quit mid-read by accident. `hoarder service` runs against a stand-in `systemctl` placed first on `PATH`, so no test touches your real user manager.
+
+## The socket API (`crates/hoarder/tests/e2e_ipc.rs`)
+
+The conformance suite for [docs/ipc.md](ipc.md): one test per op and per event, speaking raw JSON lines (and passing fds with `sendmsg`) to a Daemon in the session, so it checks the wire rather than the `hoarder-ipc` types. Tests wait on events from a subscribed connection instead of polling. Two tests need more than the usual tools:
+
+- `the_documented_examples_run` runs every `sh` block in docs/ipc.md with `bash -euo pipefail`. It needs `socat` and `jq` and skips (with a note) without them.
+- `connections_from_another_uid_are_refused` opens the socket's directory to everyone and has a second user try to connect, so only the `SO_PEERCRED` check stands in the way. Set `HOARDER_TEST_INTRUDER` to a user that `sudo -n -u USER` works for; it skips when unset. CI creates an `intruder` user for it.
+
+The wire format of every type is pinned separately in `crates/hoarder-ipc/tests/wire.rs`.
 
 ## History (`crates/hoarder/tests/e2e_history.rs`)
 

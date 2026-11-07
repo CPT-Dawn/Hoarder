@@ -50,6 +50,10 @@ struct Client {
     pending: Vec<u8>,
     /// Whether it gets events (`subscribe`).
     subscribed: bool,
+    /// Requests it is still owed a response to.
+    awaiting: usize,
+    /// It has sent all it will (`echo … | socat`): answer, then hang up.
+    eof: bool,
 }
 
 /// Create `$XDG_RUNTIME_DIR/hoarder` (mode 0700) and listen on its socket.
@@ -145,6 +149,8 @@ impl Daemon {
                     fds: VecDeque::new(),
                     pending: Vec::new(),
                     subscribed: false,
+                    awaiting: 0,
+                    eof: false,
                 },
             );
         }
@@ -174,9 +180,17 @@ impl Daemon {
                     let n = msg.bytes;
                     client.buf.extend_from_slice(&chunk[..n]);
                     let flooded = client.buf.len() > MAX_LINE && !client.buf.contains(&b'\n');
-                    if n == 0 || flooded || client.fds.len() > MAX_FDS {
+                    if flooded || client.fds.len() > MAX_FDS {
                         self.clients.open.remove(&id);
                         return PostAction::Remove;
+                    }
+                    if n == 0 {
+                        // A last line may lack its newline.
+                        client.eof = true;
+                        if !client.buf.is_empty() {
+                            client.buf.push(b'\n');
+                        }
+                        break;
                     }
                 }
                 Err(Errno::AGAIN) => break,
@@ -190,10 +204,25 @@ impl Daemon {
         while let Some(line) = self.take_line(id) {
             self.request(id, &line);
         }
-        if self.clients.open.contains_key(&id) {
-            PostAction::Continue
-        } else {
-            PostAction::Remove
+        match self.clients.open.get(&id) {
+            Some(client) if !client.eof => PostAction::Continue,
+            // Nothing more to read; the connection lives on for its answers.
+            Some(_) => {
+                self.hang_up_if_done(id);
+                PostAction::Remove
+            }
+            None => PostAction::Remove,
+        }
+    }
+
+    /// Drop a client that has stopped sending once it has had every answer
+    /// it is owed. A subscriber stays until a write to it fails.
+    fn hang_up_if_done(&mut self, id: u64) {
+        let done = self.clients.open.get(&id).is_some_and(|c| {
+            c.eof && c.buf.is_empty() && c.awaiting == 0 && c.pending.is_empty() && !c.subscribed
+        });
+        if done {
+            self.clients.open.remove(&id);
         }
     }
 
@@ -207,6 +236,9 @@ impl Daemon {
     fn request(&mut self, client: u64, line: &str) {
         if line.is_empty() {
             return;
+        }
+        if let Some(c) = self.clients.open.get_mut(&client) {
+            c.awaiting += 1;
         }
         let request = match hoarder_ipc::parse_request(line) {
             Ok(r) => r,
@@ -226,6 +258,16 @@ impl Daemon {
             Op::Status => {
                 let status = self.status();
                 self.reply(client, id, Ok(to_value(&status)));
+            }
+            Op::Reload => {
+                let result = self
+                    .reload()
+                    .map(|()| Value::Null)
+                    .map_err(|message| Failure {
+                        code: ErrorCode::Failed,
+                        message,
+                    });
+                self.reply(client, id, result);
             }
             Op::Clear { selection } => self.clear(client, id, super::from_ipc(selection)),
             Op::List { limit, concealed } => {
@@ -350,6 +392,8 @@ impl Daemon {
                     };
                     self.send_event(client, &event);
                 }
+                let state = hoarder_ipc::Event::State(self.recording());
+                self.send_event(client, &state);
             }
             Op::Pin { clip } | Op::Unpin { clip } => {
                 let pinned = matches!(request.op, Op::Pin { .. });
@@ -375,6 +419,16 @@ impl Daemon {
                 let recording = self.resume();
                 self.reply(client, id, Ok(to_value(&recording)));
             }
+            // `parse_request` only yields ops this crate knows, and this
+            // Daemon handles them all; a newer hoarder-ipc is caught here.
+            _ => self.reply(
+                client,
+                id,
+                Err(Failure {
+                    code: ErrorCode::UnknownOp,
+                    message: "this Daemon does not handle that op yet".into(),
+                }),
+            ),
         }
     }
 
@@ -436,7 +490,11 @@ impl Daemon {
     }
 
     fn send_response(&mut self, client: u64, response: &Response) {
+        if let Some(c) = self.clients.open.get_mut(&client) {
+            c.awaiting = c.awaiting.saturating_sub(1);
+        }
         self.send_line(client, &hoarder_ipc::encode(response));
+        self.hang_up_if_done(client);
     }
 
     fn send_line(&mut self, client: u64, line: &str) {
@@ -493,6 +551,7 @@ impl Daemon {
             Ok(n) => {
                 c.pending.drain(..n);
                 if c.pending.is_empty() {
+                    self.hang_up_if_done(client);
                     PostAction::Remove
                 } else {
                     PostAction::Continue

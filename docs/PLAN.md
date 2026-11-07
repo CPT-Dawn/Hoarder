@@ -374,19 +374,25 @@ Exit codes: 0 on success, 1 when cancelled by the user, 2 for usage errors, 3 fo
 One JSON object per line, sent over `$XDG_RUNTIME_DIR/hoarder/hoarder.sock`. The directory has mode 0700, and the peer's uid is checked with `SO_PEERCRED`.
 
 ```jsonc
-→ {"v":1,"id":7,"op":"list","limit":10,"filter":"img:"}
-← {"v":1,"id":7,"ok":[{"id":412,"kind":"image","preview":"1920×1080","app":"firefox","at":"…","pinned":false,"sensitivity":"normal"}]}
+→ {"v":1,"id":7,"op":"list","limit":10}
+← {"v":1,"id":7,"ok":[{"id":412,"kind":"image","preview":"1920×1080","app":"firefox","at":"…","created":"…","pinned":false,"size":48213,"types":["image/png"]}]}
 → {"v":1,"id":8,"op":"subscribe"}
 ← {"v":1,"event":"clip_added","clip":{…}}
 ← {"v":1,"event":"state","state":"paused","until":"…"}
 ← {"v":1,"event":"selection","selection":"clipboard","types":["text/plain",…]}
 ```
 
-**Ops:** `hello` (version negotiation), `status`, `list`, `get` (the representation is streamed over a passed fd), `thumb`, `restore`, `offer` (Capture or `copy` data in a passed memfd), `paste` (the current Selection, streamed from its source into a passed pipe; what `paste --watch` reads through), `delete`, `pin`, `unpin`, `clear` (the clipboard), `clear_history`, `pause`, `resume`, `subscribe`, `reload`.
+**Ops:** `hello` (version negotiation), `status`, `list`, `search`, `get` (the representation is streamed over a passed fd), `thumb`, `restore`, `offer` (Capture or `copy` data in a passed memfd), `paste` (the current Selection, streamed from its source into a passed pipe; what `paste --watch` reads through), `delete`, `pin`, `unpin`, `clear` (the clipboard), `clear_history`, `pause`, `resume`, `subscribe`, `reload`.
+
+**Events:** `selection`, `clip_added`, `clip_removed`, `state`.
+
+Filtering by kind (the Picker's `img:` and similar prefixes) happens in the Front end over `list`; the Daemon offers only `search` for text.
 
 **Concealed Clips** show up in `list` only when it asks with `"concealed":true`, among History's Clips by time: negative ids, `"sensitivity":"concealed"`, an `expires` time and a masked preview. Their text comes only through `get`, so a Front end keeps them masked until the user asks (the Picker: while `Alt` is held). `restore` and `delete` take their ids too; `restore` with `"plain":true` serves only the plain text (Shift+Enter).
 
 **Compatibility:** additive changes keep `v:1`; breaking changes bump `v` and the `hoarder-ipc` major version.
+
+The full reference, with every op, event and error code and runnable `socat`/`jq` examples, is [docs/ipc.md](ipc.md).
 
 ## 12. Budgets
 

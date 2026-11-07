@@ -788,6 +788,11 @@ impl Daemon {
                 clip,
                 reprs,
             } => self.restore(client, id, clip, reprs),
+            history::Done::Changed(events) => {
+                for event in &events {
+                    self.broadcast(event);
+                }
+            }
         }
     }
 
@@ -811,7 +816,9 @@ impl Daemon {
         slot.take_over_after_read = false;
         let types: Vec<String> = slot.kept.iter().map(|(m, _)| m.clone()).collect();
         self.watcher.serve(which, &types);
-        self.reply_when_synced(client, id, history::to_value(&clip));
+        let answer = history::to_value(&clip);
+        self.broadcast(&hoarder_ipc::Event::ClipAdded { clip });
+        self.reply_when_synced(client, id, answer);
     }
 
     fn status(&self) -> Status {
@@ -853,40 +860,42 @@ impl Daemon {
         if !matches!(watch.changed(), Ok(true)) {
             return;
         }
+        if let Err(e) = self.reload() {
+            eprintln!("hoarder: {e}");
+        }
+    }
+
+    /// Re-read `config.toml` (the `reload` op, or a change noticed). A
+    /// broken file keeps the config in force and says why.
+    fn reload(&mut self) -> Result<(), String> {
         let path = hoarder_config::path();
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(e) if e.kind() == ErrorKind::NotFound => String::new(),
-            Err(e) => {
-                eprintln!("hoarder: cannot read {}: {e}", path.display());
-                return;
-            }
+            Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
         };
         if let Err(d) = hoarder_config::parse(&text) {
-            eprintln!(
-                "hoarder: {}:{d}; keeping the previous config",
+            return Err(format!(
+                "{}:{d}; keeping the previous config",
                 path.display()
-            );
-            return;
+            ));
         }
-        match hoarder_config::with_overrides(&text, &self.overrides) {
-            Ok(config) => {
-                if config.history.encrypt != self.config.history.encrypt {
-                    let _ = self
-                        .history
-                        .send(history::Job::Encrypt(config.history.encrypt));
-                }
-                self.classifier = classifier(&config);
-                self.config = config;
-                self.retain();
-                for which in SELECTIONS {
-                    if !self.watched(which) {
-                        self.stop_reading(which);
-                        self.slots[which as usize] = Slot::default();
-                    }
-                }
+        let config = hoarder_config::with_overrides(&text, &self.overrides)
+            .map_err(|e| format!("--set {e}"))?;
+        if config.history.encrypt != self.config.history.encrypt {
+            let _ = self
+                .history
+                .send(history::Job::Encrypt(config.history.encrypt));
+        }
+        self.classifier = classifier(&config);
+        self.config = config;
+        self.retain();
+        for which in SELECTIONS {
+            if !self.watched(which) {
+                self.stop_reading(which);
+                self.slots[which as usize] = Slot::default();
             }
-            Err(e) => eprintln!("hoarder: --set {e}"),
         }
+        Ok(())
     }
 }

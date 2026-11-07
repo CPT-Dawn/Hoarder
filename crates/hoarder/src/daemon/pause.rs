@@ -39,7 +39,9 @@ impl Daemon {
                         // This timer is done; dropping it is calloop's job.
                         pause.timer = None;
                     }
-                    daemon.end_pause();
+                    if daemon.end_pause() {
+                        daemon.announce_state();
+                    }
                     TimeoutAction::Drop
                 },
             );
@@ -52,22 +54,36 @@ impl Daemon {
             self.slots[which as usize].record = false;
         }
         self.pause = Some(pause);
+        self.announce_state();
         self.recording()
     }
 
     /// Record again.
     pub(super) fn resume(&mut self) -> Recording {
-        self.end_pause();
+        if self.end_pause() {
+            self.announce_state();
+        }
         self.recording()
     }
 
-    fn end_pause(&mut self) {
-        if let Some(Pause {
-            timer: Some(token), ..
-        }) = self.pause.take()
-        {
-            self.handle.remove(token);
+    /// End any Pause; whether there was one.
+    fn end_pause(&mut self) -> bool {
+        match self.pause.take() {
+            Some(Pause {
+                timer: Some(token), ..
+            }) => {
+                self.handle.remove(token);
+                true
+            }
+            Some(_) => true,
+            None => false,
         }
+    }
+
+    /// Tell subscribers the recording state.
+    fn announce_state(&mut self) {
+        let event = hoarder_ipc::Event::State(self.recording());
+        self.broadcast(&event);
     }
 
     pub(super) fn recording(&self) -> Recording {
