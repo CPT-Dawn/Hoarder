@@ -5,6 +5,7 @@
 //! Region the user dragged out (PLAN.md §4.2).
 
 mod chrome;
+pub mod countdown;
 mod geom;
 pub mod overlay;
 mod wait;

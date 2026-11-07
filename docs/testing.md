@@ -82,7 +82,9 @@ It is also handy for bug reports: a user can check whether a capture problem fol
 
 ## Timings and budgets
 
-With `HOARDER_TIMINGS` set, `hoarder shot` prints stage timings on stderr, measured from the start of `shot`: `frozen_ms`, `surfaces_created_ms` and `overlay_visible_ms` (the first frame callback of every Overlay surface).
+With `HOARDER_TIMINGS` set, `hoarder shot` prints stage timings on stderr, measured from the start of `shot`: `frozen_ms`, `surfaces_created_ms` and `overlay_visible_ms` (the first frame callback of every Overlay surface). With `--live` there is no `frozen_ms`; `overlay_hidden_ms` marks the frame callback of the transparent Overlay, after which the desktop is captured. With `--delay`, timings start when the countdown ends.
+
+`--delay` and `--live` are covered by `e2e_delay.rs` and `e2e_live.rs`. Large Captures there go to a file with `-o PATH`: `Overlay::finish` reads stdout only after exit, so a PNG bigger than a pipe buffer would deadlock.
 
 `budget_overlay_visible_on_4k` (in `e2e_overlay.rs`) checks the "key press → Overlay visible on 4K < 60 ms" budget (PLAN.md §12). The test only enforces it in optimised builds:
 

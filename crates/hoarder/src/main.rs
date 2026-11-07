@@ -38,6 +38,9 @@ enum Command {
         /// is when the selection ends.
         #[arg(long)]
         live: bool,
+        /// Count down SECONDS (decimals allowed) before freezing.
+        #[arg(long, value_name = "SECONDS", value_parser = shot::parse_delay)]
+        delay: Option<std::time::Duration>,
     },
     /// Copy stdin or text to the clipboard (accepts every wl-copy flag).
     Copy(clipboard::CopyArgs),
@@ -79,9 +82,10 @@ fn main() -> ExitCode {
             output,
             no_copy,
             live,
+            delay,
         }) => config::effective(&cli.overrides).and_then(|mut config| {
             config.screenshot.copy &= !no_copy;
-            let when = shot::When { live };
+            let when = shot::When { live, delay };
             shot::run(target, when, output.as_deref(), &config)
         }),
         Some(Command::Copy(args)) => clipboard::copy(args),

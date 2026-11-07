@@ -2,11 +2,11 @@
 
 use std::io::Write as _;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use clap::ValueEnum;
 use hoarder_config::Config;
-use hoarder_ui::{Outcome, OverlayError, Region, overlay};
+use hoarder_ui::{Outcome, OverlayError, Region, countdown, overlay};
 use hoarder_wayland::{CaptureError, Frozen};
 
 use crate::Exit;
@@ -37,6 +37,17 @@ pub struct When {
     /// `--live`: no freeze; the Region is cut from the desktop as it is when
     /// the selection ends.
     pub live: bool,
+    /// `--delay`: count down this long before the freeze.
+    pub delay: Option<Duration>,
+}
+
+/// Parse `--delay`: non-negative seconds, decimals allowed.
+pub fn parse_delay(s: &str) -> Result<Duration, String> {
+    let secs: f64 = s
+        .parse()
+        .map_err(|_| format!("`{s}` is not a number of seconds"))?;
+    Duration::try_from_secs_f64(secs)
+        .map_err(|_| format!("`{s}` is not a non-negative number of seconds"))
 }
 
 /// Capture `target`. `output` (`-o`) replaces saving to `screenshot.dir`.
@@ -46,6 +57,9 @@ pub fn run(
     output: Option<&Path>,
     config: &Config,
 ) -> Result<(), (Exit, String)> {
+    if let Some(delay) = when.delay.filter(|d| !d.is_zero()) {
+        countdown::run(delay).map_err(overlay_error)?;
+    }
     let started = Instant::now();
     let image = match target {
         Target::All => Image::all_outputs(&freeze()?.frames),
@@ -93,14 +107,16 @@ fn picked(outcome: Result<Outcome, OverlayError>) -> Result<Region, (Exit, Strin
     match outcome {
         Ok(Outcome::Region(region)) => Ok(region),
         Ok(Outcome::Cancelled) => Err((Exit::Cancelled, "cancelled".into())),
-        Err(e) => {
-            let code = match e {
-                OverlayError::Unsupported(_) => Exit::Unsupported,
-                OverlayError::Failed(_) => Exit::Io,
-            };
-            Err((code, e.to_string()))
-        }
+        Err(e) => Err(overlay_error(e)),
     }
+}
+
+fn overlay_error(e: OverlayError) -> (Exit, String) {
+    let code = match e {
+        OverlayError::Unsupported(_) => Exit::Unsupported,
+        OverlayError::Failed(_) => Exit::Io,
+    };
+    (code, e.to_string())
 }
 
 fn deliver(image: &Image, output: &Path) -> std::io::Result<()> {
