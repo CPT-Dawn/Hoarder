@@ -100,6 +100,9 @@ pub enum Outcome {
     WindowBuffer(Window),
     /// `A`.
     AllOutputs,
+    /// With [`Options::pick`], a click: physical pixel `(x, y)` of the
+    /// upright Frozen Frame of the Output named `output`.
+    Pixel { output: String, x: u32, y: u32 },
     /// Esc or right-click.
     Cancelled,
 }
@@ -128,6 +131,10 @@ pub struct Options {
     /// as a [`WindowGeometry`](hoarder_wayland::WindowGeometry) gives them.
     /// Empty without a provider: no highlighting.
     pub windows: Vec<Window>,
+    /// Pick a pixel (`hoarder pick`): the Loupe always shows, a click ends
+    /// the Overlay with [`Outcome::Pixel`], and there is no selection. Only
+    /// Esc and right-click do anything else (they cancel).
+    pub pick: bool,
 }
 
 /// Everything that can stop the Overlay.
@@ -241,10 +248,14 @@ fn show(
         pointer_at: None,
         hover: Hover::new(options.windows.clone()),
         outcome: None,
+        pick: options.pick,
         started,
         visible_reported: false,
         single_pixel,
     };
+    if options.pick {
+        app.layers.pin_loupe();
+    }
     // Learn the outputs' names so each Frozen Frame lands on its own output.
     queue.roundtrip(&mut app).map_err(failed)?;
 
@@ -700,6 +711,8 @@ pub(crate) struct App {
     pointer_at: Option<(f64, f64)>,
     hover: Hover,
     outcome: Option<Outcome>,
+    /// [`Options::pick`].
+    pick: bool,
     started: Instant,
     visible_reported: bool,
     single_pixel: Option<WpSinglePixelBufferManagerV1>,
@@ -790,6 +803,12 @@ impl App {
 
     /// A key went down (or up, for `released`).
     fn key_event(&mut self, keysym: Keysym, released: bool, qh: &QueueHandle<App>) {
+        if self.pick {
+            if keysym == Keysym::Escape && !released {
+                self.outcome = Some(Outcome::Cancelled);
+            }
+            return;
+        }
         if matches!(keysym, Keysym::w | Keysym::W) {
             if !released {
                 self.hover.cycle();
@@ -919,6 +938,32 @@ impl App {
         Some(Highlight { index, rect, label })
     }
 
+    /// A pointer event while picking a pixel on view `i`.
+    fn pick_event(&mut self, i: usize, event: &PointerEvent) {
+        match event.kind {
+            PointerEventKind::Enter { serial } => {
+                if let Some(device) = &self.cursor_device {
+                    device.set_shape(serial, Shape::Crosshair);
+                }
+            }
+            PointerEventKind::Release {
+                button: BTN_LEFT, ..
+            } => {
+                let view = &self.views[i];
+                let (x, y) = crate::loupe::pixel_under(event.position, view.scale().0, view.size);
+                self.outcome = Some(Outcome::Pixel {
+                    output: view.output.clone(),
+                    x,
+                    y,
+                });
+            }
+            PointerEventKind::Press {
+                button: BTN_RIGHT, ..
+            } => self.outcome = Some(Outcome::Cancelled),
+            _ => {}
+        }
+    }
+
     fn pointer_event(&mut self, event: &PointerEvent, qh: &QueueHandle<App>) {
         let Some(i) = self.view_of(&event.surface) else {
             return;
@@ -932,6 +977,9 @@ impl App {
             }
             PointerEventKind::Leave { .. } => self.layers.pointer_left(i),
             _ => {}
+        }
+        if self.pick {
+            return self.pick_event(i, event);
         }
         match event.kind {
             PointerEventKind::Enter { serial } => {

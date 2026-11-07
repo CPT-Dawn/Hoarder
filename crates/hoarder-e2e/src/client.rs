@@ -183,6 +183,15 @@ impl Client {
         })
     }
 
+    /// Every MIME type pasted from this client's Selections so far, in
+    /// order: who read what the app offered, and how often.
+    pub fn pasted(&self) -> Result<Vec<String>> {
+        self.call(|w| {
+            w.roundtrip()?;
+            Ok(w.state.pasted.clone())
+        })
+    }
+
     /// Disconnect from the compositor, as if the app had quit.
     ///
     /// Everything the client owned (surfaces, Selections) goes away with it.
@@ -258,6 +267,8 @@ pub(crate) struct State {
     owned: [Option<ObjectId>; 2],
     /// Pipes of [`Reply::Never`] pastes, held open until the client exits.
     stalled: Vec<OwnedFd>,
+    /// Every MIME type anyone has pasted from this client, in order.
+    pasted: Vec<String>,
     input: input::InputState,
 }
 
@@ -733,6 +744,7 @@ impl Dispatch<ExtDataControlSourceV1, ()> for State {
     ) {
         match event {
             ext_data_control_source_v1::Event::Send { mime_type, fd } => {
+                state.pasted.push(mime_type.clone());
                 let data = state.sources.get(&source.id()).and_then(|offer| {
                     offer
                         .iter()

@@ -262,6 +262,30 @@ impl Daemon {
             }
             Op::Restore { clip } => self.ask_history(client, id, Job::Restore { client, id, clip }),
             Op::Delete { clip } => self.ask_history(client, id, Job::Delete { client, id, clip }),
+            Op::Pin { clip } | Op::Unpin { clip } => {
+                let pinned = matches!(request.op, Op::Pin { .. });
+                self.ask_history(
+                    client,
+                    id,
+                    Job::Pin {
+                        client,
+                        id,
+                        clip,
+                        pinned,
+                    },
+                );
+            }
+            Op::ClearHistory { pinned } => {
+                self.ask_history(client, id, Job::Clear { client, id, pinned })
+            }
+            Op::Pause { secs } => {
+                let recording = self.pause(secs);
+                self.reply(client, id, Ok(to_value(&recording)));
+            }
+            Op::Resume => {
+                let recording = self.resume();
+                self.reply(client, id, Ok(to_value(&recording)));
+            }
         }
     }
 

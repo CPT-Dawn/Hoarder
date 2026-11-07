@@ -286,10 +286,16 @@ fn budget_picker_first_frame_with_1000_clips() {
     {
         let dir = session.runtime_dir().join("home/.local/share/hoarder");
         let mut store = hoarder_store::Store::open(&dir).unwrap();
+        // Recent, or retention would evict them as soon as the Daemon starts.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            - 60_000;
         for n in 0..1000 {
             let text = format!("Clip number {n}: {}", "some words to fill a row ".repeat(4));
             store
-                .record(&[("text/plain", text.as_bytes())], Some("kitty"), n)
+                .record(&[("text/plain", text.as_bytes())], Some("kitty"), now + n)
                 .unwrap();
         }
     }

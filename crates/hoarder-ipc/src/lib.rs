@@ -86,6 +86,56 @@ pub enum Op {
     Restore { clip: i64 },
     /// Remove a Clip from History.
     Delete { clip: i64 },
+    /// Exempt a Clip from expiry and eviction; answered with its
+    /// [`ClipSummary`].
+    Pin { clip: i64 },
+    /// Make a pinned Clip ordinary again; answered with its [`ClipSummary`].
+    Unpin { clip: i64 },
+    /// Empty History, keeping pinned Clips unless `pinned`; answered with
+    /// [`Cleared`]. (`clear` empties the clipboard.)
+    ClearHistory {
+        #[serde(default)]
+        pinned: bool,
+    },
+    /// Stop recording into History, for `secs` seconds or until `resume`.
+    /// Persistence and Takeover go on. Answered with [`Recording`].
+    Pause {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        secs: Option<u64>,
+    },
+    /// Record again after a Pause; answered with [`Recording`].
+    Resume,
+}
+
+/// The `ok` of [`Op::ClearHistory`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Cleared {
+    /// How many Clips went.
+    pub deleted: u64,
+}
+
+/// Whether the Daemon records into History; the `ok` of [`Op::Pause`] and
+/// [`Op::Resume`], and part of [`Status`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Recording {
+    #[serde(default)]
+    pub state: State,
+    /// When a timed Pause ends (RFC 3339); absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
+}
+
+/// The Daemon's recording state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum State {
+    /// Recording every Normal copy.
+    #[default]
+    Active,
+    /// Paused: nothing is recorded.
+    Paused,
+    #[serde(other)]
+    Unknown,
 }
 
 /// One Clip, as `list` shows it.
@@ -192,6 +242,9 @@ pub struct Status {
     pub data_control: String,
     /// Whether Takeover is on (`clipboard.persist`).
     pub persist: bool,
+    /// Whether copies are recorded (Pause).
+    #[serde(flatten)]
+    pub recording: Recording,
     pub clipboard: SelectionStatus,
     /// `None` while the primary selection is ignored (`clipboard.primary`).
     pub primary: Option<SelectionStatus>,
@@ -207,6 +260,23 @@ pub struct SelectionStatus {
     pub kept: Vec<String>,
     /// Whether the Daemon is still reading the current Offer.
     pub reading: bool,
+    /// How private the current Selection is; `normal` until a read shows
+    /// otherwise.
+    #[serde(default)]
+    pub sensitivity: Sensitivity,
+}
+
+/// How private a Selection change is (ADR-0006).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Sensitivity {
+    /// Stored in History.
+    #[default]
+    Normal,
+    /// Looks private: held in locked memory only, masked, short-lived.
+    Concealed,
+    /// Marked by a password manager: never read, stored or restored.
+    Secret,
 }
 
 /// Who serves a Selection.
@@ -386,6 +456,34 @@ impl Connection {
     /// [`Op::Restore`], decoded.
     pub fn restore(&mut self, clip: i64) -> std::io::Result<Result<ClipSummary, Failure>> {
         self.typed(Op::Restore { clip })
+    }
+
+    /// [`Op::Pin`] or [`Op::Unpin`], decoded.
+    pub fn pin(
+        &mut self,
+        clip: i64,
+        pinned: bool,
+    ) -> std::io::Result<Result<ClipSummary, Failure>> {
+        self.typed(if pinned {
+            Op::Pin { clip }
+        } else {
+            Op::Unpin { clip }
+        })
+    }
+
+    /// [`Op::ClearHistory`], decoded.
+    pub fn clear_history(&mut self, pinned: bool) -> std::io::Result<Result<Cleared, Failure>> {
+        self.typed(Op::ClearHistory { pinned })
+    }
+
+    /// [`Op::Pause`], decoded.
+    pub fn pause(&mut self, secs: Option<u64>) -> std::io::Result<Result<Recording, Failure>> {
+        self.typed(Op::Pause { secs })
+    }
+
+    /// [`Op::Resume`], decoded.
+    pub fn resume(&mut self) -> std::io::Result<Result<Recording, Failure>> {
+        self.typed(Op::Resume)
     }
 
     /// Wait for the response to request `id`.

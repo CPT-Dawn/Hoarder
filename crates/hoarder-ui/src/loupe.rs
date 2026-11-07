@@ -23,6 +23,14 @@ pub(crate) struct Picture {
     pub pixels: Vec<u8>,
 }
 
+/// The physical pixel under view-local logical `at` on an output `scale`
+/// physical pixels per logical pixel and `size` physical pixels big: the one
+/// the Loupe centres on, and the one `hoarder pick` reports.
+pub(crate) fn pixel_under(at: (f64, f64), scale: f64, (w, h): (u32, u32)) -> (u32, u32) {
+    let along = |v: f64, len: u32| ((v * scale).floor().max(0.0) as u32).min(len.saturating_sub(1));
+    (along(at.0, w), along(at.1, h))
+}
+
 /// The colour of a Frozen Frame pixel as 8-bit RGB, rounded like a display
 /// would show a 10-bit value.
 pub(crate) fn rgb8(frame: &FrozenFrame, x: u32, y: u32) -> [u8; 3] {
