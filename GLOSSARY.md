@@ -26,6 +26,26 @@ _Avoid_: item, entry, record
 The ordered, bounded collection of Clips the user can browse and restore.
 _Avoid_: log, ring, database
 
+**Takeover**:
+The moment the Daemon becomes the owner of a Selection because its source app went away.
+_Avoid_: re-offer, hijack, persist (as a verb for this moment)
+
+**Restore**:
+Making a Clip from History the current Selection again.
+_Avoid_: paste, recall, re-copy
+
+**Pinned Clip**:
+A Clip the user marked to be exempt from expiry and eviction.
+_Avoid_: favourite, starred, snippet
+
+**Sensitivity**:
+The tier assigned to every Selection change: **Secret** (marked by a password manager; never touched), **Concealed** (looks private; memory-only, masked, short-lived) or **Normal**.
+_Avoid_: private, hidden, incognito (for a tier)
+
+**Pause**:
+A period during which the Daemon records nothing to History.
+_Avoid_: incognito mode, private mode
+
 ### Capture
 
 **Capture**:

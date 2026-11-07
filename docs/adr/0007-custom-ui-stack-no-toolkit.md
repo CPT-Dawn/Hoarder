@@ -1,0 +1,3 @@
+# Custom UI stack (SCTK + tiny-skia + cosmic-text), no GUI toolkit
+
+The Overlay and the Picker are drawn by Hoarder itself: smithay-client-toolkit layer-shell surfaces, tiny-skia CPU rasterisation into SHM, cosmic-text for text, and Frozen Frames shown on viewporter subsurfaces so the compositor does the expensive blending. GTK4 (what Zenith uses) was rejected despite free IME and accessibility, because it costs tens of MB of resident memory and noticeable startup for a surface that must appear instantly; iced, wgpu and vello were rejected for the same reason. The price is owning a small widget set and the Picker's text input, with `text-input-v3` (IME) support deferred.
