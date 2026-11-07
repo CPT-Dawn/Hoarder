@@ -509,6 +509,7 @@ dependencies = [
  "image",
  "jiff",
  "png",
+ "tempfile",
  "webp",
 ]
 

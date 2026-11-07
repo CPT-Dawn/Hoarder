@@ -2,6 +2,7 @@
 
 use std::io::Write as _;
 use std::path::Path;
+use std::sync::Arc;
 
 use clap::ValueEnum;
 use hoarder_config::{Config, Screenshot};
@@ -26,19 +27,23 @@ pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(),
         };
         (code, e.to_string())
     })?;
-    let image = match target {
+    let image = Arc::new(match target {
         Target::All => Image::all_outputs(&frozen.frames),
-    };
-    match output {
-        Some(output) => deliver(&image, output, &config.screenshot)
-            .map_err(|e| (Exit::Io, format!("cannot write {}: {e}", output.display()))),
-        None if config.screenshot.save => {
-            let path = crate::save::save(&image, "all", None, &config.screenshot)?;
-            println!("{}", path.display());
-            Ok(())
-        }
-        None => Ok(()),
+    });
+    if let Some(output) = output {
+        return deliver(&image, output, &config.screenshot)
+            .map_err(|e| (Exit::Io, format!("cannot write {}: {e}", output.display())));
     }
+    // The file is encoded on a worker thread, so a slow format never delays
+    // the clipboard copy, which happens here, between the two.
+    let saving = config
+        .screenshot
+        .save
+        .then(|| crate::save::spawn(image.clone(), "all", None, config.screenshot.clone()));
+    if let Some(saving) = saving {
+        println!("{}", saving.wait()?.display());
+    }
+    Ok(())
 }
 
 fn deliver(image: &Image, output: &Path, settings: &Screenshot) -> std::io::Result<()> {

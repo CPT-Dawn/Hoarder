@@ -3,11 +3,38 @@
 
 use std::io::Write as _;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use hoarder_config::{NameFields, Screenshot};
 
 use crate::Exit;
 use crate::image::Image;
+
+/// A [`save`] running on its own thread.
+#[derive(Debug)]
+pub struct Saving(std::thread::JoinHandle<Result<PathBuf, (Exit, String)>>);
+
+impl Saving {
+    /// Wait for the file; returns its path.
+    pub fn wait(self) -> Result<PathBuf, (Exit, String)> {
+        self.0
+            .join()
+            .unwrap_or_else(|_| Err((Exit::Io, "the saving thread panicked".into())))
+    }
+}
+
+/// Start saving `image` on a worker thread and return at once, so slow formats
+/// (AVIF takes seconds at 4K) never hold up the clipboard copy.
+pub fn spawn(
+    image: Arc<Image>,
+    target: &'static str,
+    app: Option<String>,
+    settings: Screenshot,
+) -> Saving {
+    Saving(std::thread::spawn(move || {
+        save(&image, target, app.as_deref(), &settings)
+    }))
+}
 
 /// Encode `image` and write it to a new file in `settings.dir`; returns its path.
 /// A name that is already taken gets `_1`, `_2`, … rather than overwriting.
@@ -55,4 +82,38 @@ pub fn save(
         }
     }
     unreachable!("ran out of file names")
+}
+
+#[cfg(test)]
+mod tests {
+    use hoarder_config::{Format, Screenshot};
+
+    use super::*;
+    use crate::image::Depth;
+
+    /// The saved-file encode runs off the calling thread, so the clipboard copy
+    /// that follows it in `shot` is never kept waiting (PLAN.md §4.1 step 7).
+    #[test]
+    fn spawn_returns_before_the_file_is_encoded() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = Screenshot {
+            dir: dir.path().to_str().unwrap().into(),
+            format: Format::Avif,
+            ..Screenshot::default()
+        };
+        let image = Image::new(320, 240, Depth::Eight);
+
+        let start = std::time::Instant::now();
+        let saving = spawn(std::sync::Arc::new(image), "all", None, settings);
+        let returned = start.elapsed();
+        let path = saving.wait().unwrap();
+        let saved = start.elapsed();
+
+        assert!(
+            returned * 10 < saved,
+            "spawn took {returned:?} of the {saved:?} the save took"
+        );
+        assert_eq!(path.extension().unwrap(), "avif");
+        assert!(std::fs::metadata(&path).unwrap().len() > 0);
+    }
 }

@@ -22,7 +22,7 @@ pub struct Image {
 }
 
 impl Image {
-    fn new(width: u32, height: u32, depth: Depth) -> Self {
+    pub(crate) fn new(width: u32, height: u32, depth: Depth) -> Self {
         Image {
             width,
             height,
