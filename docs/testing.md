@@ -99,6 +99,10 @@ History is judged through `hoarder history … --json`, `history get` bytes, `wl
 
 `crates/hoarder/tests/common` has `Overlay::start`, which spawns `hoarder shot …` and returns once grim sees every listed output change (the Overlay is up), so input sent next reaches it. `finish()` waits for the exit and hands back the status, stdout and stderr. Overlay visuals are checked with `Session::screenshot`.
 
+The hint bar retires after 20 uses, counted in `$XDG_STATE_HOME/hoarder/state.toml` under the session's fresh `HOME`, so every test starts with it showing. Tests that look at the bottom of an output should allow for it, or seed `hint_bar_uses = 20`.
+
+**The cursor.** Once any client has asked headless Sway for a capture *with* cursors (`grim -c`, or `paint_cursors`), Sway keeps drawing a software cursor into every later capture of that session, including ones that ask for none. So never take a `grim -c` oracle in the session under test: `e2e_cursor.rs` takes it from a twin session set up the same way.
+
 ## Timings and budgets
 
 With `HOARDER_TIMINGS` set, `hoarder shot` prints stage timings on stderr, measured from the start of `shot`: `frozen_ms`, `surfaces_created_ms` and `overlay_visible_ms` (the first frame callback of every Overlay surface). With `--live` there is no `frozen_ms`; `overlay_hidden_ms` marks the frame callback of the transparent Overlay, after which the desktop is captured. With `--delay`, timings start when the countdown ends.
@@ -117,6 +121,7 @@ Recorded results (headless Sway 1.12, pixman, one 3840×2160 output, release bui
 |---|---|---|---|
 | 2026-11-07 | #61, first cut: full Argb8888 chrome painted before the first frame | 59.5 ms | |
 | 2026-11-07 | #61: idle chrome is one `wp_single_pixel_buffer_v1` pixel stretched by the viewporter | 39.9 ms | freeze 14, Overlay surfaces and frame upload 11, compositor's first frame 13 |
+| 2026-11-07 | #63, merged with everything up to #64 and #66: the freeze also takes the cursor (cursor session); Loupe, hint bar and cursor layer are subsurfaces drawn after the first frame | 46.0 ms | freeze 15 |
 
 This is within budget, so ADR-0007 stands. The next easy win is giving the freeze's memfd to the Overlay instead of copying the 33 MB frame (about 8 ms).
 

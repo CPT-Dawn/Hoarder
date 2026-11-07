@@ -73,16 +73,24 @@ pub fn run(
         // Both decided in `from_overlay`, for the moment the Overlay shows.
         clamp_to_output: false,
         windows: Vec::new(),
+        hint_bar: state.hint_bar_due(),
+        cursor: config.screenshot.cursor.into(),
     };
     if let Some(delay) = when.delay.filter(|d| !d.is_zero()) {
         countdown::run(delay, &options).map_err(overlay_error)?;
     }
     let started = Instant::now();
     let (cut, name) = match target {
-        Target::All => (
-            cut::cut(&freeze()?.frames, None, &config.screenshot),
-            target.name(),
-        ),
+        Target::All => {
+            let mut frozen = freeze()?;
+            if config.screenshot.cursor {
+                composite_cursor(&mut frozen);
+            }
+            (
+                cut::cut(&frozen.frames, None, &config.screenshot),
+                target.name(),
+            )
+        }
         Target::Region => from_overlay(when.live, started, &options, &mut state, config)?,
     };
     // Also on stderr, for runs that end up in a pipe rather than a notification.
@@ -233,7 +241,7 @@ fn from_overlay(
     config: &Config,
 ) -> Result<(cut::Cut, &'static str), (Exit, String)> {
     let settings = &config.screenshot;
-    let (frozen, outcome) = if live {
+    let (mut frozen, outcome, cursor) = if live {
         // No Frozen Frames yet to judge the scales by: the Overlay clamps only
         // if the live outputs it covers turn out to differ in scale.
         // The windows as they are now, on the desktop the Overlay goes over.
@@ -242,11 +250,13 @@ fn from_overlay(
             windows: windows(),
             ..options.clone()
         };
-        let outcome = overlay::run_live(started, &options).map_err(overlay_error)?;
+        let outcome = overlay::run_live(started, &options);
+        count_hint_bar(&options, state);
+        let outcome = outcome.map_err(overlay_error)?;
         if outcome == Outcome::Cancelled {
             return Err((Exit::Cancelled, "cancelled".into()));
         }
-        (freeze()?, outcome)
+        (freeze()?, outcome, options.cursor.get())
     } else {
         // Ask where the windows are while the outputs freeze, so both
         // describe the same moment.
@@ -257,9 +267,18 @@ fn from_overlay(
             windows: windows.join().unwrap_or_default(),
             ..options.clone()
         };
-        let outcome = overlay::run(&frozen, started, &options).map_err(overlay_error)?;
-        (frozen, outcome)
+        let outcome = overlay::run(&frozen, started, &options);
+        count_hint_bar(&options, state);
+        (
+            frozen,
+            outcome.map_err(overlay_error)?,
+            options.cursor.get(),
+        )
     };
+    // The user's last word on the cursor layer (PLAN.md §4.1 step 6).
+    if cursor {
+        composite_cursor(&mut frozen);
+    }
     Ok(match outcome {
         Outcome::Region(r) => {
             state.set_last_region(StoredRegion {
@@ -268,12 +287,7 @@ fn from_overlay(
                 width: r.width,
                 height: r.height,
             });
-            if let Err(e) = state.save() {
-                eprintln!(
-                    "hoarder: cannot remember the Region in {}: {e}",
-                    hoarder_config::state_path().display()
-                );
-            }
+            save_state(state);
             (cut::cut(&frozen.frames, Some(&r), settings), "region")
         }
         Outcome::Output(name) => {
@@ -306,6 +320,31 @@ fn from_overlay(
         Outcome::AllOutputs => (cut::cut(&frozen.frames, None, settings), "all"),
         Outcome::Cancelled => return Err((Exit::Cancelled, "cancelled".into())),
     })
+}
+
+/// One more showing of the hint bar, if the Overlay showed it.
+fn count_hint_bar(options: &Options, state: &mut State) {
+    if options.hint_bar {
+        state.record_hint_bar_use();
+        save_state(state);
+    }
+}
+
+/// Write `state.toml`; losing it costs a convenience, never the Capture.
+fn save_state(state: &State) {
+    if let Err(e) = state.save() {
+        eprintln!(
+            "hoarder: cannot write {}: {e}",
+            hoarder_config::state_path().display()
+        );
+    }
+}
+
+/// Put the cursor layer into the Frozen Frames.
+fn composite_cursor(frozen: &mut Frozen) {
+    for frame in &mut frozen.frames {
+        frame.composite_cursor();
+    }
 }
 
 fn deliver(image: &Image, output: &Path, settings: &Screenshot) -> std::io::Result<()> {

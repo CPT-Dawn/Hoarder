@@ -258,9 +258,14 @@ fn hovering_tints_the_window_under_the_pointer_and_names_it() {
         "a title label in the middle of the window"
     );
 
-    // Off the windows, the highlight goes.
+    // Off the windows, the highlight goes. (Only the window is compared: the
+    // hint bar fades and the Loupe follows the pointer meanwhile.)
     input.move_to(out, 600.0, 450.0).unwrap();
-    screenshot_when(&session, "HEADLESS-1", |s| s == &idle);
+    screenshot_when(&session, "HEADLESS-1", |s| {
+        [(110, 70), (99, 59), (150, 120), (200, 120)]
+            .iter()
+            .all(|&(x, y)| s.pixel(x, y) == idle.pixel(x, y))
+    });
     input.tap(keys::KEY_ESC).unwrap();
     assert_eq!(overlay.finish().status.code(), Some(1));
 }
