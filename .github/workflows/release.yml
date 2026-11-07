@@ -149,6 +149,9 @@ jobs:
     needs: [plan, source, build]
     runs-on: ubuntu-latest
     container: archlinux:latest
+    defaults:
+      run:
+        shell: bash
     env:
       VERSION: ${{ needs.plan.outputs.version }}
     steps:
@@ -165,21 +168,21 @@ jobs:
         run: |
           useradd --create-home builder
           chown -R builder: "$GITHUB_WORKSPACE"
-          runuser -u builder -- packaging/aur/render.sh "$VERSION" artifacts aur
+          runuser -u builder -- env HOME=/home/builder packaging/aur/render.sh "$VERSION" artifacts aur
       - name: Build and lint
         run: >-
-          runuser -u builder -- packaging/aur/check.sh aur artifacts packages
+          runuser -u builder -- env HOME=/home/builder packaging/aur/check.sh aur artifacts packages
           hoarder hoarder-bin
       # With hoarder-bin installed, namcap can follow the shims' symlinks; and
       # the shims must actually be wl-copy and wl-paste.
       - name: Build and lint the Compat shims against an installed hoarder
         run: |
           pacman -U --noconfirm packages/hoarder-bin-*.pkg.tar*
-          runuser -u builder -- packaging/aur/check.sh aur artifacts packages hoarder-wl-compat
+          runuser -u builder -- env HOME=/home/builder packaging/aur/check.sh aur artifacts packages hoarder-wl-compat
           pacman -U --noconfirm packages/hoarder-wl-compat-*.pkg.tar*
           wl-copy --version
-          wl-paste --help | grep -q -- --watch
-          hoarder --version | grep -qx "hoarder $VERSION"
+          wl-paste --help > wl-paste.help && grep -q -- --watch wl-paste.help
+          [ "$(hoarder --version)" = "hoarder $VERSION" ]
       # hoarder-git builds the default branch from GitHub; here it builds the
       # tagged commit from this checkout instead, so pkgver() sees the tag.
       - name: Build and lint the -git package from this checkout
@@ -188,8 +191,7 @@ jobs:
           cp -r aur/hoarder-git vcs/
           sed -i "s|^source=.*|source=(\"\$_pkgname::git+file://$GITHUB_WORKSPACE#tag=$GITHUB_REF_NAME\")|" vcs/hoarder-git/PKGBUILD
           chown -R builder: vcs
-          runuser -u builder -- git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          runuser -u builder -- packaging/aur/check.sh vcs artifacts packages hoarder-git
+          runuser -u builder -- env HOME=/home/builder packaging/aur/check.sh vcs artifacts packages hoarder-git
       - name: Bundle the AUR repositories
         run: tar -C aur -czf "hoarder-$VERSION-aur.tar.gz" .
       - uses: actions/upload-artifact@v4
