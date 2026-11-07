@@ -19,7 +19,7 @@ use crate::LogicalRect;
 const IPC_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// A window as the compositor lays it out.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Window {
     /// The window's content (no borders or title bar), in global logical
     /// coordinates.
@@ -27,6 +27,17 @@ pub struct Window {
     pub title: String,
     /// The Wayland app_id, or the X11 class for Xwayland windows.
     pub app_id: String,
+    /// Its `ext-foreign-toplevel-list-v1` identifier, when the provider
+    /// knows it (Sway), for capturing its own buffer.
+    pub toplevel: Option<String>,
+    /// Its Hyprland address, which `hyprland_toplevel_mapping_v1` ties to
+    /// a toplevel.
+    pub address: Option<u64>,
+    /// The scale of the output it is on, if known.
+    pub scale: Option<f64>,
+    /// Its own buffer may be old: on Hyprland, a window on a workspace no
+    /// monitor shows is not redrawn.
+    pub may_be_stale: bool,
 }
 
 impl Window {
@@ -81,6 +92,12 @@ pub trait WindowGeometry: std::fmt::Debug + Send {
     fn name(&self) -> &'static str {
         "none"
     }
+
+    /// Every window, also those on workspaces no output shows; the ones
+    /// on screen first.
+    fn all_windows(&self) -> Result<Vec<Window>, GeometryError> {
+        self.windows()
+    }
 }
 
 /// The provider for the compositor this process runs under, picked from
@@ -134,16 +151,32 @@ impl SwayIpc {
 
     /// The windows in a `get_tree` reply, topmost first.
     pub fn parse_tree(json: &[u8]) -> Result<Vec<Window>, GeometryError> {
+        Ok(SwayIpc::parse(json)?
+            .into_iter()
+            .filter(|(_, visible)| *visible)
+            .map(|(w, _)| w)
+            .collect())
+    }
+
+    /// Every window in a `get_tree` reply, on screen or not (other
+    /// workspaces, the scratchpad); those on screen come first, topmost
+    /// first.
+    pub fn parse_tree_all(json: &[u8]) -> Result<Vec<Window>, GeometryError> {
+        let mut all = SwayIpc::parse(json)?;
+        all.sort_by_key(|(_, visible)| !visible);
+        Ok(all.into_iter().map(|(w, _)| w).collect())
+    }
+
+    /// Every window, topmost first, and whether it is on screen.
+    fn parse(json: &[u8]) -> Result<Vec<(Window, bool)>, GeometryError> {
         let root: SwayNode = serde_json::from_slice(json)?;
         // Paint order, bottom first; reversed at the end.
         let mut normal = Vec::new();
         let mut fullscreen = Vec::new();
         let mut global = Vec::new();
-        for output in root
-            .nodes
-            .iter()
-            .filter(|o| o.name.as_deref() != Some("__i3"))
-        {
+        for output in &root.nodes {
+            // The scratchpad (`__i3`) has no scale: its windows show nowhere.
+            let scale = output.scale.filter(|s| *s > 0.0);
             for workspace in &output.nodes {
                 let mut tiled = Vec::new();
                 for n in &workspace.nodes {
@@ -154,10 +187,13 @@ impl SwayIpc {
                     n.leaves(&mut floating);
                 }
                 for leaf in tiled.into_iter().chain(floating) {
+                    let shown =
+                        output.name.as_deref() != Some("__i3") && leaf.visible == Some(true);
+                    let at = (leaf, scale, shown);
                     match leaf.fullscreen_mode {
-                        Some(2) => global.push(leaf),
-                        Some(1) => fullscreen.push(leaf),
-                        _ => normal.push(leaf),
+                        Some(2) => global.push(at),
+                        Some(1) => fullscreen.push(at),
+                        _ => normal.push(at),
                     }
                 }
             }
@@ -167,8 +203,7 @@ impl SwayIpc {
             .chain(fullscreen)
             .chain(global)
             .rev()
-            .filter(|n| n.visible == Some(true))
-            .filter_map(SwayNode::window)
+            .filter_map(|(leaf, scale, shown)| Some((leaf.window(scale)?, shown)))
             .collect())
     }
 
@@ -198,6 +233,10 @@ impl WindowGeometry for SwayIpc {
 
     fn name(&self) -> &'static str {
         "Sway IPC"
+    }
+
+    fn all_windows(&self) -> Result<Vec<Window>, GeometryError> {
+        SwayIpc::parse_tree_all(&self.request(SWAY_GET_TREE)?)
     }
 }
 
@@ -229,6 +268,9 @@ struct SwayNode {
     nodes: Vec<SwayNode>,
     #[serde(default)]
     floating_nodes: Vec<SwayNode>,
+    foreign_toplevel_identifier: Option<String>,
+    /// Outputs only.
+    scale: Option<f64>,
 }
 
 impl SwayNode {
@@ -245,7 +287,7 @@ impl SwayNode {
         }
     }
 
-    fn window(&self) -> Option<Window> {
+    fn window(&self, scale: Option<f64>) -> Option<Window> {
         // `window_rect` is the content, relative to `rect` (which adds the
         // borders; the title bar sits above it in `deco_rect`).
         let content = self.window_rect.as_ref()?;
@@ -265,6 +307,10 @@ impl SwayNode {
                 .clone()
                 .or_else(|| self.window_properties.as_ref()?.class.clone())
                 .unwrap_or_default(),
+            toplevel: self.foreign_toplevel_identifier.clone(),
+            address: None,
+            scale,
+            may_be_stale: false,
         })
     }
 }
@@ -298,6 +344,16 @@ impl HyprlandIpc {
     /// floating over tiled windows, and among equals the most recently
     /// focused first.
     pub fn parse(clients: &[u8], monitors: &[u8]) -> Result<Vec<Window>, GeometryError> {
+        Ok(HyprlandIpc::parse_all(clients, monitors)?
+            .into_iter()
+            .filter(|w| !w.may_be_stale)
+            .collect())
+    }
+
+    /// Every mapped window in `j/clients`: those on screen first, as by
+    /// [`parse`](Self::parse), then the rest, which [may be
+    /// stale](Window::may_be_stale).
+    pub fn parse_all(clients: &[u8], monitors: &[u8]) -> Result<Vec<Window>, GeometryError> {
         let clients: Vec<HyprClient> = serde_json::from_slice(clients)?;
         let monitors: Vec<HyprMonitor> = serde_json::from_slice(monitors)?;
         let shown: Vec<i64> = monitors
@@ -311,14 +367,19 @@ impl HyprlandIpc {
             })
             .flatten()
             .collect();
-        let mut on_screen: Vec<HyprClient> = clients
+        let on_screen = |c: &HyprClient| {
+            !c.hidden
+                && c.visible.unwrap_or(true)
+                && c.workspace.id.is_some_and(|id| shown.contains(&id))
+        };
+        let mut mapped: Vec<HyprClient> = clients
             .into_iter()
-            .filter(|c| c.mapped && !c.hidden && c.visible.unwrap_or(true))
-            .filter(|c| c.workspace.id.is_some_and(|id| shown.contains(&id)))
+            .filter(|c| c.mapped)
             .filter(|c| c.size[0] > 0 && c.size[1] > 0)
             .collect();
-        on_screen.sort_by_key(|c| {
+        mapped.sort_by_key(|c| {
             (
+                !on_screen(c),
                 std::cmp::Reverse(c.workspace.id.is_some_and(|id| id < 0)),
                 std::cmp::Reverse(c.pinned),
                 std::cmp::Reverse(c.fullscreen.is_real()),
@@ -326,7 +387,7 @@ impl HyprlandIpc {
                 c.focus_history_id.unwrap_or(i64::MAX),
             )
         });
-        Ok(on_screen
+        Ok(mapped
             .into_iter()
             .map(|c| Window {
                 rect: LogicalRect {
@@ -335,6 +396,17 @@ impl HyprlandIpc {
                     width: c.size[0] as u32,
                     height: c.size[1] as u32,
                 },
+                may_be_stale: !on_screen(&c),
+                address: c
+                    .address
+                    .as_deref()
+                    .and_then(|a| u64::from_str_radix(a.trim_start_matches("0x"), 16).ok()),
+                scale: monitors
+                    .iter()
+                    .find(|m| m.id.is_some() && m.id == c.monitor)
+                    .and_then(|m| m.scale)
+                    .filter(|s| *s > 0.0),
+                toplevel: None,
                 title: c.title,
                 app_id: c.class,
             })
@@ -362,6 +434,12 @@ impl WindowGeometry for HyprlandIpc {
         let clients = self.request("j/clients")?;
         HyprlandIpc::parse(&clients, &monitors)
     }
+
+    fn all_windows(&self) -> Result<Vec<Window>, GeometryError> {
+        let monitors = self.request("j/monitors")?;
+        let clients = self.request("j/clients")?;
+        HyprlandIpc::parse_all(&clients, &monitors)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -372,6 +450,9 @@ struct HyprWorkspace {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct HyprClient {
+    /// `0x…`, in hex.
+    address: Option<String>,
+    monitor: Option<i64>,
     #[serde(default)]
     mapped: bool,
     #[serde(default)]
@@ -422,6 +503,8 @@ impl HyprFullscreen {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct HyprMonitor {
+    id: Option<i64>,
+    scale: Option<f64>,
     active_workspace: Option<HyprWorkspace>,
     special_workspace: Option<HyprWorkspace>,
     #[serde(default)]

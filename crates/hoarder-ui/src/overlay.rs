@@ -95,6 +95,9 @@ pub enum Outcome {
     Output(String),
     /// A click on the highlighted window.
     Window(Window),
+    /// A Shift+click on the highlighted window: its own buffer, not what
+    /// the Frozen Frame shows of it.
+    WindowBuffer(Window),
     /// `A`.
     AllOutputs,
     /// Esc or right-click.
@@ -954,7 +957,12 @@ impl App {
             } => match self.selector.release(at, self.pixel_at(at)) {
                 // A click: the highlighted window, if any, else the Output.
                 Some(Action::OutputAt(_)) if let Some(w) = self.hover.current() => {
-                    self.outcome = Some(Outcome::Window(self.hover.window(w).clone()));
+                    let window = self.hover.window(w).clone();
+                    self.outcome = Some(if self.selector.shift_held() {
+                        Outcome::WindowBuffer(window)
+                    } else {
+                        Outcome::Window(window)
+                    });
                 }
                 Some(action) => self.act(action),
                 None => self.update(qh),

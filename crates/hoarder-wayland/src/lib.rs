@@ -11,7 +11,9 @@
 pub mod capture;
 pub mod clipboard;
 pub mod flash;
+mod hyprland;
 pub mod probe;
+pub mod toplevel;
 pub mod watch;
 pub mod windows;
 

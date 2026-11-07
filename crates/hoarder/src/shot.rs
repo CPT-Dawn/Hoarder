@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::ValueEnum;
-use hoarder_config::{Config, MixedScale, Screenshot, State, StoredRegion};
+use hoarder_config::{Config, MixedScale, Screenshot, State, StoredRegion, WindowSource};
 use hoarder_ui::{Options, Outcome, OverlayError, Region, Theme, countdown, overlay};
 use hoarder_wayland::{CaptureError, Frozen, Window};
 
@@ -20,6 +20,8 @@ use crate::image::Image;
 pub enum Target {
     /// A rectangle dragged out on the Overlay; it may span outputs.
     Region,
+    /// A window: picked on the Overlay, or by title with `--list`.
+    Window,
     /// Every output, as one image laid out like the desktop.
     All,
 }
@@ -29,6 +31,7 @@ impl Target {
     fn name(self) -> &'static str {
         match self {
             Target::Region => "region",
+            Target::Window => "window",
             Target::All => "all",
         }
     }
@@ -53,13 +56,25 @@ pub fn parse_delay(s: &str) -> Result<Duration, String> {
         .map_err(|_| format!("`{s}` is not a non-negative number of seconds"))
 }
 
-/// Capture `target`. `output` (`-o`) replaces saving to `screenshot.dir`.
+/// Capture `target`. `list` is `--list` and its TITLE, if given. `output`
+/// (`-o`) replaces saving to `screenshot.dir`.
 pub fn run(
     target: Target,
+    list: Option<Option<&str>>,
     when: When,
     output: Option<&Path>,
     config: &Config,
 ) -> Result<(), (Exit, String)> {
+    if list.is_some() && target != Target::Window {
+        return Err((
+            Exit::Usage,
+            "`--list` picks a window: use `hoarder shot window --list`".into(),
+        ));
+    }
+    if list == Some(None) {
+        crate::window::by_title(None, &config.screenshot)?;
+        return Ok(());
+    }
     let mut state = State::load();
     let options = Options {
         confirm: config.screenshot.confirm,
@@ -80,8 +95,12 @@ pub fn run(
         countdown::run(delay, &options).map_err(overlay_error)?;
     }
     let started = Instant::now();
-    let (cut, name) = match target {
-        Target::All => {
+    let (cut, name) = match (target, list) {
+        (_, Some(title)) => (
+            crate::window::by_title(title, &config.screenshot)?.expect("a title picks a window"),
+            target.name(),
+        ),
+        (Target::All, None) => {
             let mut frozen = freeze()?;
             if config.screenshot.cursor {
                 composite_cursor(&mut frozen);
@@ -91,7 +110,9 @@ pub fn run(
                 target.name(),
             )
         }
-        Target::Region => from_overlay(when.live, started, &options, &mut state, config)?,
+        (Target::Region | Target::Window, None) => {
+            from_overlay(when.live, started, &options, &mut state, config)?
+        }
     };
     // Also on stderr, for runs that end up in a pipe rather than a notification.
     for badge in cut.badges.labels() {
@@ -187,6 +208,7 @@ fn explain(badge: &str) -> &'static str {
     match badge {
         "mixed scale" => "lower-scale outputs were enlarged by nearest neighbour",
         "HDR" => "taken from an HDR output without tone mapping",
+        "may be stale" => "the window is on a hidden workspace, where it may not have been redrawn",
         _ => "",
     }
 }
@@ -304,22 +326,39 @@ fn from_overlay(
             };
             (cut::cut(&frozen.frames, Some(&whole), settings), "output")
         }
+        Outcome::WindowBuffer(window) => (window_buffer(&frozen, &window, settings), "window"),
+        Outcome::Window(window) if settings.window_source == WindowSource::Toplevel => {
+            (window_buffer(&frozen, &window, settings), "window")
+        }
         Outcome::Window(window) => {
             // What you saw: the window's rectangle cut from the Frozen Frames,
             // popups and anything over it included, under the same mixed-scale
             // and depth policies as any Region.
-            let r = window.rect;
-            let region = Region {
-                x: r.x as f64,
-                y: r.y as f64,
-                width: r.width as f64,
-                height: r.height as f64,
-            };
+            let region = window_region(&window);
             (cut::cut(&frozen.frames, Some(&region), settings), "window")
         }
         Outcome::AllOutputs => (cut::cut(&frozen.frames, None, settings), "all"),
         Outcome::Cancelled => return Err((Exit::Cancelled, "cancelled".into())),
     })
+}
+
+/// `window`'s own buffer; if the compositor cannot give it, say why and
+/// fall back to what the Frozen Frames show of it.
+fn window_buffer(frozen: &Frozen, window: &Window, settings: &Screenshot) -> cut::Cut {
+    crate::window::own_buffer(window, settings).unwrap_or_else(|e| {
+        eprintln!("hoarder: taking the window as shown instead of its own buffer: {e}");
+        cut::cut(&frozen.frames, Some(&window_region(window)), settings)
+    })
+}
+
+fn window_region(window: &Window) -> Region {
+    let r = window.rect;
+    Region {
+        x: r.x as f64,
+        y: r.y as f64,
+        width: r.width as f64,
+        height: r.height as f64,
+    }
 }
 
 /// One more showing of the hint bar, if the Overlay showed it.

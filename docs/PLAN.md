@@ -347,7 +347,7 @@ terminal_apps = ["kitty", "foot", "Alacritty", "org.wezfurlong.wezterm", "com.mi
 
 ```
 hoarder                         status, plus an offer to enable the service if it isn't running
-hoarder shot [region|window|output|all|last] [--list] [--delay N] [--cursor] [--live]
+hoarder shot [region|window|output|all|last] [--list [TITLE]] [--delay N] [--cursor] [--live]
              [--confirm] [--format F] [-o PATH|-] [--no-save] [--no-copy] [--no-notify]
 hoarder pick [--format hex|rgb|hsl]
 hoarder copy [wl-copy flags]    hoarder paste [wl-paste flags]

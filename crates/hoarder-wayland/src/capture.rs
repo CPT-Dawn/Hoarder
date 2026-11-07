@@ -110,7 +110,7 @@ pub enum ShmFormat {
 
 impl ShmFormat {
     /// In order of preference when a compositor offers several.
-    const ALL: [ShmFormat; 8] = [
+    pub(crate) const ALL: [ShmFormat; 8] = [
         ShmFormat::Xrgb2101010,
         ShmFormat::Xbgr2101010,
         ShmFormat::Argb2101010,
@@ -204,7 +204,7 @@ pub enum Transform {
 }
 
 impl Transform {
-    fn from_wl(t: WEnum<wl_output::Transform>) -> Self {
+    pub(crate) fn from_wl(t: WEnum<wl_output::Transform>) -> Self {
         use wl_output::Transform as T;
         match t {
             WEnum::Value(T::_90) => Transform::Rotate90,

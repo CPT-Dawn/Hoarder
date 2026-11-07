@@ -248,6 +248,11 @@ impl Selector {
         self.shift = held;
     }
 
+    /// Whether Shift is held.
+    pub fn shift_held(&self) -> bool {
+        self.shift
+    }
+
     /// Left button pressed at `at`.
     pub fn press(&mut self, at: (f64, f64)) {
         match &mut self.state {

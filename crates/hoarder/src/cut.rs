@@ -17,15 +17,22 @@ pub struct Badges {
     pub mixed_scale: bool,
     /// Pixels came from an HDR output and were not tone mapped.
     pub hdr: bool,
+    /// A window's own buffer that the compositor may not have redrawn
+    /// lately (on Hyprland, one on a hidden workspace).
+    pub stale: bool,
 }
 
 impl Badges {
     /// The badge texts, in display order.
     pub fn labels(self) -> Vec<&'static str> {
-        [(self.mixed_scale, "mixed scale"), (self.hdr, "HDR")]
-            .into_iter()
-            .filter_map(|(on, label)| on.then_some(label))
-            .collect()
+        [
+            (self.mixed_scale, "mixed scale"),
+            (self.hdr, "HDR"),
+            (self.stale, "may be stale"),
+        ]
+        .into_iter()
+        .filter_map(|(on, label)| on.then_some(label))
+        .collect()
     }
 }
 
@@ -127,6 +134,7 @@ pub fn cut(frames: &[FrozenFrame], region: Option<&Region>, settings: &Screensho
         badges: Badges {
             mixed_scale: is_mixed && !split,
             hdr: touched.iter().any(|f| f.hdr),
+            stale: false,
         },
     }
 }

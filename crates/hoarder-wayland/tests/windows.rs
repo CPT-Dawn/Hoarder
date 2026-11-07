@@ -118,6 +118,96 @@ fn hyprland_before_0_42_had_a_boolean_fullscreen() {
     );
 }
 
+/// For `shot window --list`: every window, how to name its toplevel, and
+/// the scale it is drawn at.
+#[test]
+fn sway_lists_every_window_with_its_toplevel_and_scale() {
+    let windows =
+        SwayIpc::parse_tree_all(include_bytes!("fixtures/sway-get-tree.json")).expect("parses");
+    let seen: Vec<(&str, Option<&str>, Option<f64>, bool)> = windows
+        .iter()
+        .map(|w| {
+            (
+                w.title.as_str(),
+                w.toplevel.as_deref(),
+                w.scale,
+                w.may_be_stale,
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            (
+                "probe.a",
+                Some("55ee991b33c1f14817db9dc84259ed9a"),
+                Some(1.0),
+                false
+            ),
+            (
+                "probe.b",
+                Some("7d0d69c55b84ce8999c31b9b14e15c77"),
+                Some(1.0),
+                false
+            ),
+            (
+                "probe.d",
+                Some("fb9b961e748a321c3b95126d191f402d"),
+                Some(2.0),
+                false
+            ),
+            // The scratchpad: on no output.
+            (
+                "probe.c",
+                Some("21e255a4e871bd847dda9d12cd242b3e"),
+                None,
+                false
+            ),
+        ]
+    );
+}
+
+/// Hyprland does not redraw windows on workspaces no monitor shows: their
+/// own buffers may be stale.
+#[test]
+fn hyprland_lists_every_mapped_window_marking_hidden_ones_maybe_stale() {
+    let windows = HyprlandIpc::parse_all(
+        include_bytes!("fixtures/hyprland-clients.json"),
+        include_bytes!("fixtures/hyprland-monitors.json"),
+    )
+    .expect("parses");
+    let seen: Vec<(&str, Option<u64>, Option<f64>, bool)> = windows
+        .iter()
+        .map(|w| (w.title.as_str(), w.address, w.scale, w.may_be_stale))
+        .collect();
+    assert_eq!(
+        seen,
+        vec![
+            (
+                "scratchpad terminal",
+                Some(0x557648e80000),
+                Some(1.0),
+                false
+            ),
+            ("floating mixer", Some(0x557648e60000), Some(1.0), false),
+            ("tiled browser", Some(0x557648e50bd0), Some(1.0), false),
+            (
+                "laptop terminal",
+                Some(0x55764847fa40),
+                Some(1.6666666),
+                false
+            ),
+            (
+                "on a hidden workspace",
+                Some(0x557648e70000),
+                Some(1.0),
+                true
+            ),
+            ("hidden group member", Some(0x557648e90000), Some(1.0), true),
+        ]
+    );
+}
+
 #[test]
 fn garbage_is_an_error_not_a_panic() {
     assert!(SwayIpc::parse_tree(b"not json").is_err());
