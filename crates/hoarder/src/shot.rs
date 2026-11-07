@@ -11,6 +11,7 @@ use hoarder_ui::{Outcome, OverlayError, overlay};
 use hoarder_wayland::CaptureError;
 
 use crate::Exit;
+use crate::after::Delivered;
 use crate::image::Image;
 
 /// What a Capture covers.
@@ -65,6 +66,8 @@ pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(),
             config.screenshot.clone(),
         )
     });
+    // Only now the Target is chosen: never over the Overlay, never in the Capture.
+    let _flash = crate::after::flash(&config.screenshot);
     if config.screenshot.copy {
         let mut png = Vec::new();
         image
@@ -72,13 +75,26 @@ pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(),
             .map_err(|e| (Exit::Io, format!("cannot encode the Capture: {e}")))?;
         crate::clipboard::copy_capture(&png)?;
     }
-    if let Some(output) = output {
-        return deliver(&image, output, &config.screenshot)
-            .map_err(|e| (Exit::Io, format!("cannot write {}: {e}", output.display())));
-    }
-    if let Some(saving) = saving {
-        println!("{}", saving.wait()?.display());
-    }
+    let path = match (output, saving) {
+        (Some(output), _) => {
+            deliver(&image, output, &config.screenshot)
+                .map_err(|e| (Exit::Io, format!("cannot write {}: {e}", output.display())))?;
+            (output != Path::new("-")).then(|| output.to_owned())
+        }
+        (None, Some(saving)) => {
+            let path = saving.wait()?;
+            println!("{}", path.display());
+            Some(path)
+        }
+        (None, None) => None,
+    };
+    let delivered = Delivered {
+        path,
+        width: image.width,
+        height: image.height,
+        target: target.name(),
+    };
+    crate::after::run(&delivered, &config.screenshot);
     Ok(())
 }
 

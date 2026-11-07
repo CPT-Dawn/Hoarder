@@ -10,6 +10,7 @@ authors.workspace = true
 
 [dependencies]
 clap.workspace = true
+futures-util.workspace = true
 hoarder-config.workspace = true
 hoarder-ui.workspace = true
 hoarder-wayland.workspace = true
@@ -17,8 +18,11 @@ image.workspace = true
 jiff.workspace = true
 png.workspace = true
 webp.workspace = true
+zbus.workspace = true
 
 [dev-dependencies]
+# A stand-in notification server on a private bus.
+zbus = { workspace = true, features = ["service"] }
 hoarder-e2e.workspace = true
 image.workspace = true
 png.workspace = true
