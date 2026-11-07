@@ -4,6 +4,7 @@
 //! socket (ADR-0004). It sleeps in the kernel until something happens: no
 //! timers run while idle.
 
+mod history;
 mod reader;
 pub mod service;
 mod socket;
@@ -76,8 +77,10 @@ pub fn run(overrides: &[(String, String)]) -> Result<(), Fail> {
         }
     };
 
+    let history = history::History::start(&handle);
     let mut daemon = Daemon {
         handle,
+        history,
         watcher,
         config,
         overrides: overrides.to_vec(),
@@ -134,6 +137,8 @@ struct Slot {
     kept: Vec<Representation>,
     /// Whether `kept` may be served once its source goes away.
     may_take_over: bool,
+    /// Whether `kept` goes to History once read.
+    record: bool,
     read: Option<ReadState>,
     /// The Selection went empty mid-read: take over once the read ends.
     take_over_after_read: bool,
@@ -175,10 +180,11 @@ pub(crate) struct Daemon {
     overrides: Vec<(String, String)>,
     config_watch: Option<hoarder_config::Watcher>,
     slots: [Slot; 2],
+    history: history::History,
     clients: socket::Clients,
-    /// `(sync token, client, request id)` of requests answered once the
-    /// compositor has caught up.
-    syncs: Vec<(u64, u64, u64)>,
+    /// `(sync token, client, request id, answer)` of requests answered once
+    /// the compositor has caught up.
+    syncs: Vec<(u64, u64, u64, hoarder_ipc::Value)>,
     next_token: u64,
     fatal: Option<Fail>,
 }
@@ -232,6 +238,15 @@ impl Daemon {
         }
     }
 
+    /// Whether Normal changes of `which` go to History.
+    fn records(&self, which: Selection) -> bool {
+        self.config.history.enabled
+            && match which {
+                Selection::Clipboard => true,
+                Selection::Primary => self.config.clipboard.primary.history,
+            }
+    }
+
     fn selection_changed(&mut self, which: Selection, offer: Option<Offer>) {
         if !self.watched(which) {
             return;
@@ -252,6 +267,7 @@ impl Daemon {
             .as_ref()
             .is_some_and(|app| self.config.clipboard.no_takeover_apps.contains(app));
         let may_take_over = self.persists(which) && !secret && !excluded;
+        let record = !secret && self.records(which);
         let plan = if secret {
             // Secret: never touched (ADR-0006).
             Vec::new()
@@ -263,6 +279,7 @@ impl Daemon {
         slot.offered = offer.mime_types.clone();
         slot.kept.clear();
         slot.may_take_over = may_take_over;
+        slot.record = record;
         slot.take_over_after_read = false;
         slot.read = Some(ReadState {
             offer,
@@ -431,7 +448,19 @@ impl Daemon {
 
     fn finish_read(&mut self, which: Selection) {
         let slot = &mut self.slots[which as usize];
-        slot.read = None;
+        let read = slot.read.take();
+        if let Some(read) = read
+            && std::mem::take(&mut slot.record)
+            && !slot.kept.is_empty()
+        {
+            let job = history::Job::Record {
+                reprs: slot.kept.clone(),
+                app: read.offer.focused_app,
+            };
+            // Without History there is nothing to record into.
+            let _ = self.history.send(job);
+        }
+        let slot = &mut self.slots[which as usize];
         if std::mem::take(&mut slot.take_over_after_read) {
             self.take_over(which);
         }
@@ -458,17 +487,56 @@ impl Daemon {
         slot.kept.clear();
         slot.take_over_after_read = false;
         self.watcher.clear(which);
+        self.reply_when_synced(client, id, hoarder_ipc::Value::Null);
+    }
+
+    /// Answer `id` with `answer` once the compositor has applied what was
+    /// just asked of it.
+    fn reply_when_synced(&mut self, client: u64, id: u64, answer: hoarder_ipc::Value) {
         let token = self.next_token;
         self.next_token += 1;
         self.watcher.sync(token);
-        self.syncs.push((token, client, id));
+        self.syncs.push((token, client, id, answer));
     }
 
     fn synced(&mut self, token: u64) {
-        if let Some(i) = self.syncs.iter().position(|(t, _, _)| *t == token) {
-            let (_, client, id) = self.syncs.remove(i);
-            self.reply(client, id, Ok(hoarder_ipc::Value::Null));
+        if let Some(i) = self.syncs.iter().position(|(t, ..)| *t == token) {
+            let (_, client, id, answer) = self.syncs.remove(i);
+            self.reply(client, id, Ok(answer));
         }
+    }
+
+    /// The History thread has finished a job.
+    fn history_done(&mut self, done: history::Done) {
+        match done {
+            history::Done::Reply { client, id, result } => self.reply(client, id, result),
+            history::Done::Restore {
+                client,
+                id,
+                clip,
+                reprs,
+            } => self.restore(client, id, clip, reprs),
+        }
+    }
+
+    /// Restore: own the clipboard with a Clip's representations.
+    fn restore(
+        &mut self,
+        client: u64,
+        id: u64,
+        clip: hoarder_ipc::ClipSummary,
+        reprs: Vec<Representation>,
+    ) {
+        let which = Selection::Clipboard;
+        self.stop_reading(which);
+        let slot = &mut self.slots[which as usize];
+        slot.kept = reprs;
+        slot.may_take_over = true;
+        slot.record = false;
+        slot.take_over_after_read = false;
+        let types: Vec<String> = slot.kept.iter().map(|(m, _)| m.clone()).collect();
+        self.watcher.serve(which, &types);
+        self.reply_when_synced(client, id, history::to_value(&clip));
     }
 
     fn status(&self) -> Status {

@@ -14,6 +14,7 @@ clap.workspace = true
 futures-util.workspace = true
 hoarder-config.workspace = true
 hoarder-ipc.workspace = true
+hoarder-store.workspace = true
 hoarder-ui.workspace = true
 hoarder-wayland.workspace = true
 image.workspace = true

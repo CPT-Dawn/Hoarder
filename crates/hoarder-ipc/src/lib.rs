@@ -13,6 +13,7 @@
 //! changes bump [`PROTOCOL`] and this crate's major version.
 
 use std::io::{BufRead as _, BufReader, Write as _};
+use std::os::fd::{AsFd as _, BorrowedFd};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
@@ -55,6 +56,58 @@ pub enum Op {
     /// Empty the clipboard and keep it empty: no Takeover restores it.
     /// Answered once the compositor has applied it.
     Clear,
+    /// History, most recently used first; answered with [`ClipSummary`]s.
+    List {
+        /// At most this many Clips (all of them if absent).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+    },
+    /// Stream one representation of a Clip into the pipe passed with the
+    /// request (`SCM_RIGHTS`); answered with [`Got`] before the data
+    /// arrives, and the pipe closes at its end.
+    Get {
+        clip: i64,
+        /// The MIME type to send; the Clip's first type if absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mime: Option<String>,
+    },
+    /// Make a Clip the clipboard Selection again, and move it to the top.
+    /// Answered with its [`ClipSummary`] once the compositor has applied it.
+    Restore { clip: i64 },
+    /// Remove a Clip from History.
+    Delete { clip: i64 },
+}
+
+/// One Clip, as `list` shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClipSummary {
+    pub id: i64,
+    /// `text`, `image`, `files` or `other`.
+    pub kind: String,
+    /// A line of text, an image's `W×H`, or the file names.
+    pub preview: String,
+    /// The app focused when it was copied, if known.
+    #[serde(default)]
+    pub app: Option<String>,
+    /// When it was last copied or restored (RFC 3339).
+    pub at: String,
+    /// When it was first copied (RFC 3339).
+    pub created: String,
+    pub pinned: bool,
+    /// Total bytes of all its representations.
+    pub size: u64,
+    /// Its MIME types, in the source's order.
+    pub types: Vec<String>,
+}
+
+/// The `ok` of [`Op::Get`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Got {
+    pub clip: ClipSummary,
+    /// The type being streamed.
+    pub mime: String,
+    /// How many bytes will arrive.
+    pub size: u64,
 }
 
 /// The Daemon's answer to one [`Request`].
@@ -101,6 +154,8 @@ pub enum ErrorCode {
     UnsupportedVersion,
     /// The Daemon understood but could not do it.
     Failed,
+    /// No such Clip (or no such type in it).
+    NotFound,
     /// Anything newer than this crate.
     #[serde(other)]
     Unknown,
@@ -244,6 +299,72 @@ impl Connection {
             op,
         };
         self.writer.write_all(encode(&request).as_bytes())?;
+        self.response(id)
+    }
+
+    /// Send `op` with `fd` attached (`SCM_RIGHTS`) and wait for its response.
+    pub fn call_with_fd(
+        &mut self,
+        op: Op,
+        fd: BorrowedFd<'_>,
+    ) -> std::io::Result<Result<Value, Failure>> {
+        use rustix::net::{SendAncillaryBuffer, SendAncillaryMessage, SendFlags, sendmsg};
+        let id = self.next_id;
+        self.next_id += 1;
+        let line = encode(&Request {
+            v: PROTOCOL,
+            id,
+            op,
+        });
+        let mut space = [std::mem::MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+        let mut ancillary = SendAncillaryBuffer::new(&mut space);
+        let fds = [fd];
+        ancillary.push(SendAncillaryMessage::ScmRights(&fds));
+        let sent = sendmsg(
+            &self.writer,
+            &[std::io::IoSlice::new(line.as_bytes())],
+            &mut ancillary,
+            SendFlags::NOSIGNAL,
+        )?;
+        // The fd went with the first byte; the rest is plain stream.
+        if sent < line.len() {
+            self.writer.write_all(&line.as_bytes()[sent..])?;
+        }
+        self.response(id)
+    }
+
+    /// [`Op::Get`]: the response and a reader for the data, which ends
+    /// after [`Got::size`] bytes.
+    pub fn get(
+        &mut self,
+        clip: i64,
+        mime: Option<String>,
+    ) -> std::io::Result<Result<(Got, std::fs::File), Failure>> {
+        let (read, write) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)?;
+        let response = self.call_with_fd(Op::Get { clip, mime }, write.as_fd());
+        drop(write);
+        Ok(match response? {
+            Ok(v) => Ok((
+                serde_json::from_value(v)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?,
+                std::fs::File::from(read),
+            )),
+            Err(f) => Err(f),
+        })
+    }
+
+    /// [`Op::List`], decoded.
+    pub fn list(&mut self, limit: Option<u32>) -> std::io::Result<Result<Vec<ClipSummary>, Failure>> {
+        self.typed(Op::List { limit })
+    }
+
+    /// [`Op::Restore`], decoded.
+    pub fn restore(&mut self, clip: i64) -> std::io::Result<Result<ClipSummary, Failure>> {
+        self.typed(Op::Restore { clip })
+    }
+
+    /// Wait for the response to request `id`.
+    fn response(&mut self, id: u64) -> std::io::Result<Result<Value, Failure>> {
         loop {
             let mut line = String::new();
             if self.reader.read_line(&mut line)? == 0 {

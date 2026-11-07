@@ -20,6 +20,7 @@ hoarder-store = { path = "crates/hoarder-store", version = "0.1.0" }
 hoarder-ui = { path = "crates/hoarder-ui", version = "0.1.0" }
 hoarder-wayland = { path = "crates/hoarder-wayland", version = "0.1.0" }
 
+blake3 = "1.8.7"
 calloop = "0.14"
 clap = { version = "4.6", features = ["derive"] }
 cosmic-text = "0.19"
@@ -30,6 +31,8 @@ jiff = "0.2"
 png = "0.18"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# Bundled SQLite 3.54: FTS5 and the trigram tokenizer are compiled in.
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 rustix = { version = "1.1", features = ["event", "fs", "net", "pipe", "process"] }
 smithay-client-toolkit = { version = "0.21", default-features = false, features = ["xkbcommon"] }
 tempfile = "3.27"

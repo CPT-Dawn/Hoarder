@@ -4,6 +4,7 @@ mod config;
 mod cut;
 mod daemon;
 mod encode;
+mod history;
 mod hook;
 mod image;
 mod notify;
@@ -73,6 +74,9 @@ enum Command {
     Config(config::ConfigCommand),
     /// Empty the clipboard, and keep the Daemon from restoring it.
     Clear,
+    /// List, read, restore and delete Clips in History (needs the Daemon).
+    #[command(subcommand)]
+    History(history::HistoryCommand),
     /// Run the Daemon in the foreground (what the service runs).
     Daemon,
     /// Install, remove or inspect the Daemon's systemd user service.
@@ -149,6 +153,7 @@ fn main() -> ExitCode {
         Some(Command::NotifyCapture(args)) => notify::serve_child(args),
         Some(Command::Config(command)) => config::run(command, &cli.overrides),
         Some(Command::Clear) => daemon::clear(),
+        Some(Command::History(command)) => history::run(command),
         Some(Command::Daemon) => daemon::run(&cli.overrides),
         Some(Command::Service(command)) => daemon::service::run(command),
         None => Ok(()),
