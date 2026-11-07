@@ -1,12 +1,18 @@
 [package]
 name = "hoarder-ipc"
-description = "Request, response and event types for the Hoarder JSON-lines IPC API, plus a framing codec."
+description = "Request, response and event types for the Hoarder clipboard daemon's JSON-lines socket API, plus a blocking client."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+homepage = "https://github.com/CPT-Dawn/Hoarder"
+documentation = "https://docs.rs/hoarder-ipc"
+readme = "README.md"
+keywords = ["clipboard", "wayland", "ipc", "json-lines", "hoarder"]
+categories = ["api-bindings", "os::linux-apis"]
+include = ["src/**", "tests/**", "README.md", "CHANGELOG.md", "LICENSE"]
 
 [dependencies]
 rustix.workspace = true

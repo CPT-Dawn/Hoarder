@@ -379,7 +379,11 @@ One JSON object per line, sent over `$XDG_RUNTIME_DIR/hoarder/hoarder.sock`. The
 
 **Ops:** `hello` (version negotiation), `status`, `list`, `get` (the representation is streamed over a passed fd), `thumb`, `restore`, `offer` (Capture or `copy` data in a passed memfd), `paste` (the current Selection, streamed from its source into a passed pipe; what `paste --watch` reads through), `delete`, `pin`, `unpin`, `clear` (the clipboard), `clear_history`, `pause`, `resume`, `subscribe`, `reload`.
 
+**Events:** `selection`, `clip_added`, `clip_removed`, `state`.
+
 **Compatibility:** additive changes keep `v:1`; breaking changes bump `v` and the `hoarder-ipc` major version.
+
+The full reference, with every op, event and error code and runnable `socat`/`jq` examples, is [docs/ipc.md](ipc.md).
 
 ## 12. Budgets
 
