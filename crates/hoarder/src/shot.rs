@@ -4,7 +4,7 @@ use std::io::Write as _;
 use std::path::Path;
 
 use clap::ValueEnum;
-use hoarder_config::Config;
+use hoarder_config::{Config, Screenshot};
 use hoarder_wayland::CaptureError;
 
 use crate::Exit;
@@ -30,7 +30,7 @@ pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(),
         Target::All => Image::all_outputs(&frozen.frames),
     };
     match output {
-        Some(output) => deliver(&image, output)
+        Some(output) => deliver(&image, output, &config.screenshot)
             .map_err(|e| (Exit::Io, format!("cannot write {}: {e}", output.display()))),
         None if config.screenshot.save => {
             let path = crate::save::save(&image, "all", None, &config.screenshot)?;
@@ -41,9 +41,10 @@ pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(),
     }
 }
 
-fn deliver(image: &Image, output: &Path) -> std::io::Result<()> {
+fn deliver(image: &Image, output: &Path, settings: &Screenshot) -> std::io::Result<()> {
     let mut buf = Vec::new();
-    image.write_png(&mut buf).map_err(std::io::Error::other)?;
+    crate::encode::encode(image, settings.format, settings, &mut buf)
+        .map_err(std::io::Error::other)?;
     if output == Path::new("-") {
         let mut stdout = std::io::stdout().lock();
         stdout.write_all(&buf)?;

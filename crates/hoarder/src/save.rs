@@ -4,7 +4,7 @@
 use std::io::Write as _;
 use std::path::PathBuf;
 
-use hoarder_config::{Format, NameFields, Screenshot};
+use hoarder_config::{NameFields, Screenshot};
 
 use crate::Exit;
 use crate::image::Image;
@@ -19,11 +19,10 @@ pub fn save(
 ) -> Result<PathBuf, (Exit, String)> {
     let dir = hoarder_config::expand_dir(&settings.dir)
         .map_err(|e| (Exit::Io, format!("screenshot.dir: {e}")))?;
-    if settings.format != Format::Png {
-        // Other encoders land with #66/#67; never write PNG bytes under a lying name.
+    if crate::encode::narrows(image, settings.format) {
         eprintln!(
-            "hoarder: screenshot.format = {:?} is not supported yet; saving PNG",
-            settings.format
+            "hoarder: {} keeps 8 bits per channel; use png to keep 10-bit detail",
+            settings.format.extension()
         );
     }
     let stem = settings.name.expand(&NameFields {
@@ -34,16 +33,16 @@ pub fn save(
         height: image.height,
     });
     let mut bytes = Vec::new();
-    image
-        .write_png(&mut bytes)
-        .map_err(|e| (Exit::Io, format!("cannot encode PNG: {e}")))?;
+    crate::encode::encode(image, settings.format, settings, &mut bytes)
+        .map_err(|e| (Exit::Io, e))?;
     let io =
         |e: std::io::Error, p: &PathBuf| (Exit::Io, format!("cannot write {}: {e}", p.display()));
     std::fs::create_dir_all(&dir).map_err(|e| io(e, &dir))?;
+    let ext = settings.format.extension();
     for n in 0u32.. {
         let name = match n {
-            0 => format!("{stem}.png"),
-            n => format!("{stem}_{n}.png"),
+            0 => format!("{stem}.{ext}"),
+            n => format!("{stem}_{n}.{ext}"),
         };
         let path = dir.join(name);
         match std::fs::File::create_new(&path) {

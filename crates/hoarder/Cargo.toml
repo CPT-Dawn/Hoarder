@@ -12,11 +12,14 @@ authors.workspace = true
 clap.workspace = true
 hoarder-config.workspace = true
 hoarder-wayland.workspace = true
+image.workspace = true
 jiff.workspace = true
 png.workspace = true
+webp.workspace = true
 
 [dev-dependencies]
 hoarder-e2e.workspace = true
+image.workspace = true
 png.workspace = true
 
 [lints]

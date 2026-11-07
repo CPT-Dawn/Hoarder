@@ -8,13 +8,14 @@ Hoarder is tested through as few seams as possible, as high up as possible ([PLA
 cargo test --workspace
 ```
 
-The end-to-end tests need these on `PATH` (Arch: `sway grim wl-clipboard`):
+The end-to-end tests need these on `PATH` (Arch: `sway grim wl-clipboard libavif`):
 
 | Tool | Why |
 |---|---|
 | `sway` (1.11+) | The compositor, run with `WLR_BACKENDS=headless` and `WLR_RENDERER=pixman`. No GPU, display or seat needed. |
 | `grim` | Independent oracle for "what the user sees" (`Session::screenshot`). |
 | `wl-paste` | Independent oracle for Selections in the harness's own tests. |
+| `avifdec` | Independent AVIF decoder for the saved-format tests (`libavif`). |
 
 Each test starts its own Sway in a private directory under `/tmp`, so tests run in parallel and never touch your real desktop, config or History. Set `HOARDER_E2E_KEEP=1` to keep that directory (it holds a `--debug` `sway.log`) and print its path.
 

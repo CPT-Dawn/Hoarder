@@ -58,9 +58,9 @@ jobs:
     env:
       CARGO_HOME: /cargo
     steps:
-      - name: Install Sway, grim, wl-clipboard and Rust
+      - name: Install Sway, grim, wl-clipboard, libavif and Rust
         run: |
-          pacman -Syu --noconfirm --needed base-devel git rust sway grim wl-clipboard xkeyboard-config
+          pacman -Syu --noconfirm --needed base-devel git rust sway grim wl-clipboard libavif xkeyboard-config
           # Arch gives sway cap_sys_nice, which an unprivileged container cannot
           # grant, so exec fails with EPERM. Headless tests don't need it.
           setcap -r "$(command -v sway)"
