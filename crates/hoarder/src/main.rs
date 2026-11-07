@@ -57,9 +57,13 @@ enum Command {
         #[arg(long)]
         no_copy: bool,
         /// Skip the freeze: select over the live desktop and capture it as it
-        /// is when the selection ends.
+        /// is when the selection ends (`screenshot.freeze = false`).
         #[arg(long)]
         live: bool,
+        /// Enter Refine after every drag, not only after Shift+release
+        /// (`screenshot.confirm = true`).
+        #[arg(long)]
+        confirm: bool,
         /// Count down SECONDS (decimals allowed) before freezing.
         #[arg(long, value_name = "SECONDS", value_parser = shot::parse_delay)]
         delay: Option<std::time::Duration>,
@@ -200,6 +204,7 @@ fn main() -> ExitCode {
             no_save,
             no_copy,
             live,
+            confirm,
             delay,
             no_notify,
             list,
@@ -213,6 +218,8 @@ fn main() -> ExitCode {
                 no_copy.then(|| ("screenshot.copy", "false".into())),
                 no_notify.then(|| ("screenshot.notify", "false".into())),
                 cursor.then(|| ("screenshot.cursor", "true".into())),
+                live.then(|| ("screenshot.freeze", "false".into())),
+                confirm.then(|| ("screenshot.confirm", "true".into())),
             ];
             cli.overrides
                 .extend(flags.into_iter().flatten().map(|(k, v)| (k.into(), v)));
@@ -220,7 +227,10 @@ fn main() -> ExitCode {
                 shot::run(
                     target,
                     list.as_ref().map(Option::as_deref),
-                    shot::When { live, delay },
+                    shot::When {
+                        live: !config.screenshot.freeze,
+                        delay,
+                    },
                     output.as_deref(),
                     &config,
                 )

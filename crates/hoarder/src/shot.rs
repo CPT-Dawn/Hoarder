@@ -22,16 +22,22 @@ pub enum Target {
     Region,
     /// A window: picked on the Overlay, or by title with `--list`.
     Window,
+    /// The output the user is on, without the Overlay (with no window
+    /// geometry to tell, the Overlay asks: press O or click the desktop).
+    Output,
     /// Every output, as one image laid out like the desktop.
     All,
+    /// The last Region captured, again, without the Overlay.
+    Last,
 }
 
 impl Target {
     /// The name used in file name templates.
     fn name(self) -> &'static str {
         match self {
-            Target::Region => "region",
+            Target::Region | Target::Last => "region",
             Target::Window => "window",
+            Target::Output => "output",
             Target::All => "all",
         }
     }
@@ -40,8 +46,8 @@ impl Target {
 /// When the pixels are taken.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct When {
-    /// `--live`: no freeze; the Region is cut from the desktop as it is when
-    /// the selection ends.
+    /// `--live` (`screenshot.freeze = false`): no freeze; the Region is cut
+    /// from the desktop as it is when the selection ends.
     pub live: bool,
     /// `--delay`: count down this long before the freeze.
     pub delay: Option<Duration>,
@@ -102,14 +108,42 @@ pub fn run(
             target.name(),
         ),
         (Target::All, None) => {
-            let mut frozen = freeze()?;
-            if config.screenshot.cursor {
-                composite_cursor(&mut frozen);
-            }
+            let frozen = frozen_with_cursor(config)?;
             (
                 cut::cut(&frozen.frames, None, &config.screenshot),
                 target.name(),
             )
+        }
+        (Target::Last, None) => {
+            let region = options.last_region.ok_or_else(|| {
+                (
+                    Exit::Usage,
+                    "no Region captured yet: take one with `hoarder shot region` first".into(),
+                )
+            })?;
+            let frozen = frozen_with_cursor(config)?;
+            (
+                cut::cut(&frozen.frames, Some(&region), &config.screenshot),
+                target.name(),
+            )
+        }
+        (Target::Output, None) => {
+            let frozen = frozen_with_cursor(config)?;
+            let only = match frozen.frames.as_slice() {
+                [frame] => Some(frame.output.clone()),
+                _ => None,
+            };
+            match focused_output().or(only) {
+                Some(name) => {
+                    let whole = output_region(&frozen, &name)?;
+                    (
+                        cut::cut(&frozen.frames, Some(&whole), &config.screenshot),
+                        target.name(),
+                    )
+                }
+                // Nothing tells which output the user is on: let them say.
+                None => from_overlay(when.live, started, &options, &mut state, config)?,
+            }
         }
         (Target::Region | Target::Window, None) => {
             from_overlay(when.live, started, &options, &mut state, config)?
@@ -235,6 +269,41 @@ fn windows() -> Vec<Window> {
         })
 }
 
+/// Freeze every output, with the cursor layer in if `screenshot.cursor`
+/// asks: for Targets that need no Overlay.
+fn frozen_with_cursor(config: &Config) -> Result<Frozen, (Exit, String)> {
+    let mut frozen = freeze()?;
+    if config.screenshot.cursor {
+        composite_cursor(&mut frozen);
+    }
+    Ok(frozen)
+}
+
+/// The output the user is on, as the window-geometry provider says.
+fn focused_output() -> Option<String> {
+    hoarder_wayland::windows::detect()
+        .focused_output()
+        .unwrap_or_else(|e| {
+            eprintln!("hoarder: cannot tell which output is focused: {e}");
+            None
+        })
+}
+
+/// The whole of output `name`, as a Region.
+fn output_region(frozen: &Frozen, name: &str) -> Result<Region, (Exit, String)> {
+    let frame = frozen
+        .frames
+        .iter()
+        .find(|f| f.output == name)
+        .ok_or_else(|| (Exit::Io, format!("output {name} went away")))?;
+    Ok(Region {
+        x: frame.logical.x as f64,
+        y: frame.logical.y as f64,
+        width: frame.logical.width as f64,
+        height: frame.logical.height as f64,
+    })
+}
+
 pub(crate) fn freeze() -> Result<Frozen, (Exit, String)> {
     hoarder_wayland::freeze().map_err(|e| {
         let code = match e {
@@ -314,17 +383,7 @@ fn from_overlay(
             (cut::cut(&frozen.frames, Some(&r), settings), "region")
         }
         Outcome::Output(name) => {
-            let frame = frozen
-                .frames
-                .iter()
-                .find(|f| f.output == name)
-                .ok_or_else(|| (Exit::Io, format!("output {name} went away")))?;
-            let whole = Region {
-                x: frame.logical.x as f64,
-                y: frame.logical.y as f64,
-                width: frame.logical.width as f64,
-                height: frame.logical.height as f64,
-            };
+            let whole = output_region(&frozen, &name)?;
             (cut::cut(&frozen.frames, Some(&whole), settings), "output")
         }
         Outcome::WindowBuffer(window) => (window_buffer(&frozen, &window, settings), "window"),

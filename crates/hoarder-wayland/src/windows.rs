@@ -98,6 +98,12 @@ pub trait WindowGeometry: std::fmt::Debug + Send {
     fn all_windows(&self) -> Result<Vec<Window>, GeometryError> {
         self.windows()
     }
+
+    /// The name of the output the user is on (`shot output`); `None` if
+    /// the provider cannot tell.
+    fn focused_output(&self) -> Result<Option<String>, GeometryError> {
+        Ok(None)
+    }
 }
 
 /// The provider for the compositor this process runs under, picked from
@@ -137,7 +143,8 @@ pub struct SwayIpc {
     socket: PathBuf,
 }
 
-/// i3-ipc message type `GET_TREE`.
+/// i3-ipc message types `GET_OUTPUTS` and `GET_TREE`.
+const SWAY_GET_OUTPUTS: u32 = 3;
 const SWAY_GET_TREE: u32 = 4;
 const SWAY_MAGIC: &[u8; 6] = b"i3-ipc";
 
@@ -165,6 +172,18 @@ impl SwayIpc {
         let mut all = SwayIpc::parse(json)?;
         all.sort_by_key(|(_, visible)| !visible);
         Ok(all.into_iter().map(|(w, _)| w).collect())
+    }
+
+    /// The focused output's name in a `get_outputs` reply.
+    pub fn parse_focused_output(json: &[u8]) -> Result<Option<String>, GeometryError> {
+        #[derive(Deserialize)]
+        struct Output {
+            name: String,
+            #[serde(default)]
+            focused: bool,
+        }
+        let outputs: Vec<Output> = serde_json::from_slice(json)?;
+        Ok(outputs.into_iter().find(|o| o.focused).map(|o| o.name))
     }
 
     /// Every window, topmost first, and whether it is on screen.
@@ -237,6 +256,10 @@ impl WindowGeometry for SwayIpc {
 
     fn all_windows(&self) -> Result<Vec<Window>, GeometryError> {
         SwayIpc::parse_tree_all(&self.request(SWAY_GET_TREE)?)
+    }
+
+    fn focused_output(&self) -> Result<Option<String>, GeometryError> {
+        SwayIpc::parse_focused_output(&self.request(SWAY_GET_OUTPUTS)?)
     }
 }
 
@@ -423,6 +446,15 @@ impl HyprlandIpc {
             .collect())
     }
 
+    /// The focused monitor's name in `j/monitors`.
+    pub fn parse_focused_output(monitors: &[u8]) -> Result<Option<String>, GeometryError> {
+        let monitors: Vec<HyprMonitor> = serde_json::from_slice(monitors)?;
+        Ok(monitors
+            .into_iter()
+            .find(|m| m.focused && !m.disabled)
+            .and_then(|m| m.name))
+    }
+
     /// One request, answered in full. Hyprland serves this socket
     /// synchronously, so the connection is closed straight away.
     fn request(&self, command: &str) -> Result<Vec<u8>, GeometryError> {
@@ -449,6 +481,10 @@ impl WindowGeometry for HyprlandIpc {
         let monitors = self.request("j/monitors")?;
         let clients = self.request("j/clients")?;
         HyprlandIpc::parse_all(&clients, &monitors)
+    }
+
+    fn focused_output(&self) -> Result<Option<String>, GeometryError> {
+        HyprlandIpc::parse_focused_output(&self.request("j/monitors")?)
     }
 }
 
@@ -514,6 +550,9 @@ impl HyprFullscreen {
 #[serde(rename_all = "camelCase")]
 struct HyprMonitor {
     id: Option<i64>,
+    name: Option<String>,
+    #[serde(default)]
+    focused: bool,
     scale: Option<f64>,
     active_workspace: Option<HyprWorkspace>,
     special_workspace: Option<HyprWorkspace>,
