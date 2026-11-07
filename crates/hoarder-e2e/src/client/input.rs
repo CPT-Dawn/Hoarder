@@ -29,7 +29,10 @@ use wayland_protocols_wlr::virtual_pointer::v1::client::{
 };
 
 use super::{Client, State, Worker};
-use crate::{Output, Result};
+use crate::{Output, Result, Rgb8};
+
+/// What a probe window shows unless asked otherwise.
+const PROBE_GREY: Rgb8 = Rgb8(0x80, 0x80, 0x80);
 
 /// An input event a helper client's windows received.
 #[derive(Debug, Clone, PartialEq)]
@@ -241,8 +244,14 @@ impl Client {
     /// keyboard input is recorded; read it with
     /// [`take_input_events`](Self::take_input_events).
     pub fn open_window(&self, app_id: &str) -> Result<()> {
+        self.open_window_coloured(app_id, PROBE_GREY)
+    }
+
+    /// [`open_window`](Self::open_window), filled with `colour` instead of
+    /// the default grey (`#808080`), so windows can be told apart on screen.
+    pub fn open_window_coloured(&self, app_id: &str, colour: Rgb8) -> Result<()> {
         let app_id = app_id.to_owned();
-        self.call(move |w| w.open_window(&app_id))
+        self.call(move |w| w.open_window(&app_id, colour))
     }
 
     /// All input events this client's windows received since the last call.
@@ -291,7 +300,7 @@ impl Worker {
         self.roundtrip()
     }
 
-    fn open_window(&mut self, app_id: &str) -> Result<()> {
+    fn open_window(&mut self, app_id: &str, colour: Rgb8) -> Result<()> {
         let compositor: wayland_client::protocol::wl_compositor::WlCompositor = self.bind(4)?;
         let wm_base: XdgWmBase = self.bind(1)?;
         let viewporter: WpViewporter = self.bind(1)?;
@@ -320,13 +329,10 @@ impl Worker {
         } else {
             DEFAULT_WINDOW_SIZE
         };
-        // One grey pixel, stretched over the window: scale-agnostic and cheap.
-        let buffer = self.shm_buffer(
-            &0x0080_8080u32.to_le_bytes(),
-            1,
-            1,
-            wl_shm::Format::Xrgb8888,
-        )?;
+        // One pixel, stretched over the window: scale-agnostic and cheap.
+        let Rgb8(r, g, b) = colour;
+        let pixel = u32::from_be_bytes([0, r, g, b]);
+        let buffer = self.shm_buffer(&pixel.to_le_bytes(), 1, 1, wl_shm::Format::Xrgb8888)?;
         let viewport = viewporter.get_viewport(&surface, &self.qh, ());
         viewport.set_destination(w, h);
         surface.attach(Some(&buffer), 0, 0);
