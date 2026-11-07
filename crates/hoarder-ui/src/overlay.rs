@@ -118,7 +118,7 @@ fn failed(e: impl std::fmt::Display) -> OverlayError {
 }
 
 /// How the Overlay behaves for one Capture.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct Options {
     /// The Region cannot leave the output where the drag started
     /// (`screenshot.mixed_scale = "clamp"`).
@@ -128,7 +128,7 @@ pub struct Options {
 /// Show the Overlay over `frozen` and wait for the user to pick a Region or
 /// cancel. `started` is when the user asked for the Capture; with
 /// [`TIMINGS_ENV`] set, the time until the Overlay is visible is printed.
-pub fn run(frozen: &Frozen, started: Instant, options: Options) -> Result<Outcome, OverlayError> {
+pub fn run(frozen: &Frozen, started: Instant, options: &Options) -> Result<Outcome, OverlayError> {
     timing(started, "frozen");
     let conn = Connection::connect_to_env().map_err(failed)?;
     let (globals, mut queue): (_, EventQueue<App>) = registry_queue_init(&conn).map_err(failed)?;
@@ -164,7 +164,7 @@ pub fn run(frozen: &Frozen, started: Instant, options: Options) -> Result<Outcom
         views: Vec::new(),
         fonts: Fonts::load(),
         drag: None,
-        options,
+        options: options.clone(),
         outcome: None,
         started,
         visible_reported: false,

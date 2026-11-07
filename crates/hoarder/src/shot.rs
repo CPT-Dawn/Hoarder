@@ -50,7 +50,7 @@ pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(),
             let options = Options {
                 clamp_to_output: cut::clamps_regions(&frozen.frames, &config.screenshot),
             };
-            match overlay::run(&frozen, started, options).map_err(|e| {
+            match overlay::run(&frozen, started, &options).map_err(|e| {
                 let code = match e {
                     OverlayError::Unsupported(_) => Exit::Unsupported,
                     OverlayError::Failed(_) => Exit::Io,
