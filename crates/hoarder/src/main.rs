@@ -3,6 +3,7 @@ mod clipboard;
 mod config;
 mod hook;
 mod image;
+mod notify;
 mod save;
 mod shot;
 
@@ -35,6 +36,9 @@ enum Command {
         /// Leave the clipboard alone (`screenshot.copy = false` for this run).
         #[arg(long)]
         no_copy: bool,
+        /// No notification for this Capture (`screenshot.notify = false`).
+        #[arg(long)]
+        no_notify: bool,
     },
     /// Copy stdin or text to the clipboard (accepts every wl-copy flag).
     Copy(clipboard::CopyArgs),
@@ -43,6 +47,9 @@ enum Command {
     /// Serve an Offer read from stdin; started by Hoarder itself.
     #[command(name = clipboard::SERVE_SUBCOMMAND, hide = true)]
     ServeOffer(clipboard::ServeArgs),
+    /// Announce a Capture and answer its actions; started by Hoarder itself.
+    #[command(name = notify::SUBCOMMAND, hide = true)]
+    NotifyCapture(notify::NotifyArgs),
     /// Read, change and check `config.toml`.
     #[command(subcommand)]
     Config(config::ConfigCommand),
@@ -74,13 +81,16 @@ fn main() -> ExitCode {
             target,
             output,
             no_copy,
+            no_notify,
         }) => config::effective(&cli.overrides).and_then(|mut config| {
             config.screenshot.copy &= !no_copy;
+            config.screenshot.notify &= !no_notify;
             shot::run(target, output.as_deref(), &config)
         }),
         Some(Command::Copy(args)) => clipboard::copy(args),
         Some(Command::Paste(args)) => clipboard::paste(args),
         Some(Command::ServeOffer(args)) => clipboard::serve_child(args),
+        Some(Command::NotifyCapture(args)) => notify::serve_child(args),
         Some(Command::Config(command)) => config::run(command, &cli.overrides),
         None => Ok(()),
     };

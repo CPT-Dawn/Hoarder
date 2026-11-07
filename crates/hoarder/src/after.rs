@@ -18,4 +18,7 @@ pub struct Delivered {
 
 pub fn run(capture: &Delivered, settings: &Screenshot) {
     crate::hook::spawn(&settings.on_capture, capture);
+    if settings.notify {
+        crate::notify::spawn(capture);
+    }
 }
