@@ -6,7 +6,8 @@ use hoarder_config::{Config, Diagnostic, EditError, Format, parse, reset, set};
 const COMMENTED: &str = r#"# hoarder config
 # (hand-written, with odd spacing on purpose)
 
-theme   =   "tokyo-night"   # dark, obviously
+[theme]
+name   =   "tokyo-night"   # dark, obviously
 
 [screenshot]
 # where captures go
@@ -35,7 +36,7 @@ fn set_changes_only_the_value_and_keeps_every_comment() {
 
 #[test]
 fn set_keeps_the_comment_above_the_first_key() {
-    let out = set(COMMENTED, "theme", "gruvbox-dark").unwrap();
+    let out = set(COMMENTED, "theme.name", "gruvbox-dark").unwrap();
 
     assert_eq!(
         out,
@@ -157,7 +158,7 @@ fn diag(text: &str) -> Diagnostic {
 
 #[test]
 fn check_reports_the_line_and_column_of_an_unknown_key() {
-    let d = diag("theme = \"zenith\"\n\n[screenshot]\nsave = true\n  formt = \"png\"\n");
+    let d = diag("[theme]\nname = \"zenith\"\n[screenshot]\nsave = true\n  formt = \"png\"\n");
 
     assert_eq!((d.line, d.column), (5, 3), "{d}");
     assert!(d.message.contains("formt"), "{d}");

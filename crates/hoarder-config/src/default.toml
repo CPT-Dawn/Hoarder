@@ -2,7 +2,21 @@
 # Edit with `hoarder config set KEY VALUE` or `hoarder config edit`; check with
 # `hoarder config check`. Changes apply live, without a restart.
 
-theme = "zenith"          # zenith | midnight-bloom | tokyo-night | catppuccin-mocha | gruvbox-dark | custom
+[theme]
+# zenith follows Zenith's active theme and style.css live (Midnight Bloom
+# without Zenith); or midnight-bloom | tokyo-night | catppuccin-mocha |
+# gruvbox-dark | custom (Midnight Bloom, meant to be overridden).
+name = "zenith"
+# Overrides beat the theme; "" keeps the theme's value. Colours are
+# "#rrggbb", "#rrggbbaa" or "rgb(r g b / a)".
+accent = ""
+surface = ""
+text = ""
+muted = ""
+dim = ""
+radius = ""               # pixels, 0-64
+font = ""                 # a stack: "Inter, sans-serif"
+mono_font = ""
 
 [screenshot]
 dir = "$XDG_PICTURES_DIR/Screenshots"

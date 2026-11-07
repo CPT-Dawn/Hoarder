@@ -6,6 +6,7 @@ use std::fmt;
 use serde::de::{self, Deserializer, Visitor};
 use serde::{Deserialize, Serialize, Serializer};
 
+use crate::colour::Colour;
 use crate::template::NameTemplate;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -20,15 +21,42 @@ pub struct Config {
     pub picker: Picker,
 }
 
+/// `[theme]` (PLAN.md §8): which theme, and per-token overrides that beat it.
+/// An empty override (`""`) keeps the theme's value.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Theme {
+    pub name: ThemeName,
+    #[serde(with = "crate::colour::unset_or_colour")]
+    pub accent: Option<Colour>,
+    #[serde(with = "crate::colour::unset_or_colour")]
+    pub surface: Option<Colour>,
+    #[serde(with = "crate::colour::unset_or_colour")]
+    pub text: Option<Colour>,
+    #[serde(with = "crate::colour::unset_or_colour")]
+    pub muted: Option<Colour>,
+    #[serde(with = "crate::colour::unset_or_colour")]
+    pub dim: Option<Colour>,
+    /// Corner radius in logical pixels.
+    #[serde(with = "crate::colour::unset_or_radius")]
+    pub radius: Option<u32>,
+    /// A font stack, like CSS `font-family`: the first installed family wins.
+    pub font: String,
+    pub mono_font: String,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum Theme {
+pub enum ThemeName {
+    /// Follow Zenith's active theme and `style.css`; Midnight Bloom (Zenith's
+    /// own default) when Zenith is not configured.
     #[default]
     Zenith,
     MidnightBloom,
     TokyoNight,
     CatppuccinMocha,
     GruvboxDark,
+    /// Midnight Bloom as a base for a palette made of overrides.
     Custom,
 }
 
