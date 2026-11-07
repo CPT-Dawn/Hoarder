@@ -6,7 +6,10 @@ mod common;
 use common::{Overlay, as_8bit};
 use std::time::{Duration, Instant};
 
-use hoarder_e2e::{Image, OutputSpec, Pattern, Rgb8, Selection, Session, Transform, keys};
+use hoarder_e2e::{
+    BitDepth, Image, OutputSpec, Pattern, PixelFormat, Rgb8, Rgb10, Selection, Session, Transform,
+    keys,
+};
 
 /// Asserts the `w`×`h` PNG is exactly `pattern` as painted on an 8-bit output
 /// of physical size `size`, starting at physical pixel `origin`.
@@ -191,6 +194,31 @@ fn a_rotated_output_shows_and_captures_its_frame_upright() {
         (100, 100),
         "rotated region",
     );
+}
+
+#[test]
+fn a_region_of_a_10bit_output_keeps_every_bit() {
+    let session = Session::start(&[OutputSpec::new(640, 480).depth(BitDepth::Ten)]).unwrap();
+    let app = session.client().unwrap();
+    let out = session.output("HEADLESS-1");
+    app.paint_as(out, &Pattern::Ramp, PixelFormat::Xrgb2101010)
+        .unwrap();
+
+    let overlay = Overlay::start(&session, &["shot", "region", "-o", "-"], &["HEADLESS-1"]);
+    let input = session.input();
+    input.move_to(out, 10.0, 2.0).unwrap();
+    input.button(keys::BTN_LEFT, true).unwrap();
+    input.move_to(out, 600.0, 6.0).unwrap();
+    input.button(keys::BTN_LEFT, false).unwrap();
+    let png = overlay.finish().png();
+
+    assert_eq!((png.width, png.height, png.depth), (590, 4, 16));
+    for y in 0..4 {
+        for x in 0..590 {
+            let Rgb10(r, g, b) = Pattern::Ramp.colour_at(10 + x, 2 + y, 640, 480);
+            assert_eq!(png.rgb(x, y).map(|v| v >> 6), [r, g, b], "({x}, {y})");
+        }
+    }
 }
 
 fn clipboard_text(session: &Session) -> Vec<u8> {

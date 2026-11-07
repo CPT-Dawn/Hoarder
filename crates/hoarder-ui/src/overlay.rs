@@ -51,10 +51,11 @@ use wayland_client::{
 };
 use wayland_protocols::wp::{
     cursor_shape::v1::client::wp_cursor_shape_device_v1::{Shape, WpCursorShapeDeviceV1},
+    single_pixel_buffer::v1::client::wp_single_pixel_buffer_manager_v1::WpSinglePixelBufferManagerV1,
     viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
 };
 
-use crate::chrome::{Fonts, Scene};
+use crate::chrome::{DIM, Fonts, Scene};
 use crate::geom::Rect;
 
 /// Set to print how long the Overlay took to become visible.
@@ -140,6 +141,7 @@ pub fn run(frozen: &Frozen, started: Instant) -> Result<Outcome, OverlayError> {
         .bind(&qh, 1..=1, ())
         .map_err(missing("wp_viewporter"))?;
     let cursor_shapes = CursorShapeManager::bind(&globals, &qh).ok();
+    let single_pixel: Option<WpSinglePixelBufferManagerV1> = globals.bind(&qh, 1..=1, ()).ok();
 
     let mut app = App {
         registry: RegistryState::new(&globals),
@@ -167,6 +169,11 @@ pub fn run(frozen: &Frozen, started: Instant) -> Result<Outcome, OverlayError> {
             .outputs()
             .find(|o| app.outputs.info(o).and_then(|i| i.name).as_deref() == Some(&frame.output))
             .ok_or_else(|| failed(format!("output {} went away", frame.output)))?;
+        let dim = match &single_pixel {
+            // Premultiplied, full range: black at DIM's alpha.
+            Some(m) => m.create_u32_rgba_buffer(0, 0, 0, DIM[3] as u32 * 0x0101_0101, &qh, ()),
+            None => pixel_buffer(DIM, &app.shm, &qh).map_err(failed)?,
+        };
         let view = View::new(
             frame,
             &output,
@@ -175,6 +182,7 @@ pub fn run(frozen: &Frozen, started: Instant) -> Result<Outcome, OverlayError> {
             &layer_shell,
             &viewporter,
             &app.shm,
+            dim,
             &qh,
         )
         .map_err(failed)?;
@@ -228,6 +236,9 @@ struct View {
     frame_subsurface: WlSubsurface,
     frame_viewport: WpViewport,
     frame_buffer: WlBuffer,
+    /// Until there is a selection, the chrome is this one dim pixel stretched
+    /// over the output: nothing to paint, nothing to upload.
+    dim_buffer: WlBuffer,
     buffers: Vec<ChromeBuffer>,
     drawn: Scene,
     wanted: Scene,
@@ -252,6 +263,7 @@ impl View {
         layer_shell: &LayerShell,
         viewporter: &WpViewporter,
         shm: &Shm,
+        dim_buffer: WlBuffer,
         qh: &QueueHandle<App>,
     ) -> std::io::Result<View> {
         let root = compositor.create_surface(qh);
@@ -290,6 +302,7 @@ impl View {
             frame_subsurface,
             frame_viewport,
             frame_buffer,
+            dim_buffer,
             buffers: Vec::new(),
             drawn: Scene::default(),
             wanted: Scene::default(),
@@ -324,6 +337,19 @@ impl View {
             return Ok(());
         }
         let first = self.buffers.is_empty();
+        if first && self.wanted == Scene::default() {
+            if !self.presented {
+                let surface = self.layer.wl_surface();
+                self.root_viewport
+                    .set_destination(self.logical.2 as i32, self.logical.3 as i32);
+                surface.attach(Some(&self.dim_buffer), 0, 0);
+                surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
+                surface.frame(qh, FrameCallbackData(surface.clone()));
+                self.layer.commit();
+                self.frame_pending = true;
+            }
+            return Ok(());
+        }
         let full = Rect::new(0, 0, self.size.0 as i32, self.size.1 as i32);
         let damage = if first {
             vec![full]
@@ -395,6 +421,7 @@ impl Drop for View {
         self.frame_subsurface.destroy();
         self.frame_surface.destroy();
         self.frame_buffer.destroy();
+        self.dim_buffer.destroy();
         self.root_viewport.destroy();
     }
 }
@@ -417,18 +444,51 @@ fn frozen_buffer(
     } else {
         file.write_all(&frame.data[..size])?;
     }
-    let pool = shm.wl_shm().create_pool(file.as_fd(), size as i32, qh, ());
+    let format = frame.format.wl();
+    Ok(file_buffer(
+        &file,
+        (frame.width, frame.height, frame.stride),
+        format,
+        shm,
+        qh,
+    ))
+}
+
+/// One `Argb8888` pixel, for the compositor to stretch over a whole surface.
+fn pixel_buffer(pixel: [u8; 4], shm: &Shm, qh: &QueueHandle<App>) -> std::io::Result<WlBuffer> {
+    let fd = rustix::fs::memfd_create("hoarder-overlay-dim", rustix::fs::MemfdFlags::CLOEXEC)?;
+    let mut file = std::fs::File::from(fd);
+    file.write_all(&pixel)?;
+    Ok(file_buffer(
+        &file,
+        (1, 1, 4),
+        wl_shm::Format::Argb8888,
+        shm,
+        qh,
+    ))
+}
+
+/// A `wl_buffer` over the whole of `file`, `(width, height, stride)`.
+fn file_buffer(
+    file: &std::fs::File,
+    (width, height, stride): (u32, u32, u32),
+    format: wl_shm::Format,
+    shm: &Shm,
+    qh: &QueueHandle<App>,
+) -> WlBuffer {
+    let size = stride as i32 * height as i32;
+    let pool = shm.wl_shm().create_pool(file.as_fd(), size, qh, ());
     let buffer = pool.create_buffer(
         0,
-        frame.width as i32,
-        frame.height as i32,
-        frame.stride as i32,
-        frame.format.wl(),
+        width as i32,
+        height as i32,
+        stride as i32,
+        format,
         qh,
         (),
     );
     pool.destroy();
-    Ok(buffer)
+    buffer
 }
 
 struct App {
@@ -805,5 +865,6 @@ delegate_registry!(App);
 smithay_client_toolkit::delegate_dispatch2!(App);
 delegate_noop!(App: WpViewporter);
 delegate_noop!(App: WpViewport);
+delegate_noop!(App: WpSinglePixelBufferManagerV1);
 delegate_noop!(App: WlShmPool);
 delegate_noop!(App: ignore WlBuffer);

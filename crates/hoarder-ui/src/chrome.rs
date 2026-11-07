@@ -9,7 +9,7 @@ use crate::geom::Rect;
 /// `Argb8888` pixels as little-endian bytes (premultiplied).
 const CLEAR: [u8; 4] = [0, 0, 0, 0];
 /// Black at 45% opacity: what the Overlay dims the unselected frame with.
-const DIM: [u8; 4] = [0, 0, 0, 115];
+pub(crate) const DIM: [u8; 4] = [0, 0, 0, 115];
 /// The accent colour of the selection border, #3d8eff.
 const ACCENT: [u8; 4] = [0xff, 0x8e, 0x3d, 0xff];
 
