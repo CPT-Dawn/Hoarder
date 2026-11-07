@@ -90,6 +90,10 @@ _Avoid_: menu, launcher, clipboard manager window
 The `clipboard` module inside the Zenith bar: a Front end showing Daemon state and recent Clips in a popover.
 _Avoid_: applet, widget, bar plugin
 
+**Theme**:
+The named set of tokens (accent, surface, text, muted, dim, radius, font, mono font) the Overlay and Picker draw with; `zenith` follows the Zenith bar's active theme and `style.css`, and `[theme]` overrides beat any theme value.
+_Avoid_: skin, palette (for the whole set), style
+
 **Compat shims**:
 Optional `wl-copy` / `wl-paste` commands that accept wl-clipboard's flags and forward to Hoarder.
 _Avoid_: aliases, wrappers

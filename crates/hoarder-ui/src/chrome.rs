@@ -5,13 +5,33 @@
 use cosmic_text::{Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache};
 
 use crate::geom::Rect;
+use crate::theme::Theme;
 
 /// `Argb8888` pixels as little-endian bytes (premultiplied).
 const CLEAR: [u8; 4] = [0, 0, 0, 0];
 /// Black at 45% opacity: what the Overlay dims the unselected frame with.
 pub(crate) const DIM: [u8; 4] = [0, 0, 0, 115];
-/// The accent colour of the selection border, #3d8eff.
-const ACCENT: [u8; 4] = [0xff, 0x8e, 0x3d, 0xff];
+
+/// The theme's colours as premultiplied `Argb8888` bytes, ready to fill with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Palette {
+    /// The selection border.
+    pub accent: [u8; 4],
+}
+
+impl Palette {
+    pub fn of(theme: &Theme) -> Palette {
+        Palette {
+            accent: argb(theme.accent),
+        }
+    }
+}
+
+/// `colour` as premultiplied `Argb8888` bytes (BGRA in memory).
+fn argb(c: hoarder_config::Colour) -> [u8; 4] {
+    let p = |v: u8| (v as u32 * c.a as u32 / 255) as u8;
+    [p(c.b), p(c.g), p(c.r), c.a]
+}
 
 /// What one output's chrome shows, in that output's physical pixels.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -45,7 +65,7 @@ impl Scene {
     }
 
     /// Repaint `area` of `canvas` (`width` pixels per row, stride `4 * width`).
-    pub fn paint(&self, canvas: &mut [u8], width: u32, height: u32, area: Rect) {
+    pub fn paint(&self, canvas: &mut [u8], width: u32, height: u32, area: Rect, palette: Palette) {
         let area = area.intersect(&Rect::new(0, 0, width as i32, height as i32));
         if area.is_empty() {
             return;
@@ -53,7 +73,7 @@ impl Scene {
         let stride = width as usize * 4;
         for y in area.y..area.bottom() {
             let row = &mut canvas[y as usize * stride..(y as usize + 1) * stride];
-            for (x0, x1, colour) in self.row_spans(y) {
+            for (x0, x1, colour) in self.row_spans(y, palette.accent) {
                 let (x0, x1) = (x0.max(area.x), x1.min(area.right()));
                 if x0 < x1 {
                     row[x0 as usize * 4..x1 as usize * 4]
@@ -69,7 +89,7 @@ impl Scene {
     }
 
     /// Row `y` as `(start, end, colour)` spans covering every x.
-    fn row_spans(&self, y: i32) -> Vec<(i32, i32, [u8; 4])> {
+    fn row_spans(&self, y: i32, accent: [u8; 4]) -> Vec<(i32, i32, [u8; 4])> {
         let Some(s) = self.selection else {
             return vec![(i32::MIN, i32::MAX, DIM)];
         };
@@ -79,15 +99,15 @@ impl Scene {
         } else if y == ring.y || y == ring.bottom() - 1 {
             vec![
                 (i32::MIN, ring.x, DIM),
-                (ring.x, ring.right(), ACCENT),
+                (ring.x, ring.right(), accent),
                 (ring.right(), i32::MAX, DIM),
             ]
         } else {
             vec![
                 (i32::MIN, ring.x, DIM),
-                (ring.x, s.x, ACCENT),
+                (ring.x, s.x, accent),
                 (s.x, s.right(), CLEAR),
-                (s.right(), ring.right(), ACCENT),
+                (s.right(), ring.right(), accent),
                 (ring.right(), i32::MAX, DIM),
             ]
         }
@@ -132,20 +152,17 @@ impl Fonts {
         })
     }
 
-    /// Render `text` as a pill at `scale` physical pixels per logical pixel,
-    /// with its top-left corner at `(x, y)`.
-    pub fn label(&mut self, text: &str, scale: f64, x: i32, y: i32) -> Label {
+    /// Render `text` as a pill in `theme`'s surface, text colour, font and
+    /// radius, at `scale` physical pixels per logical pixel, with its top-left
+    /// corner at `(x, y)`.
+    pub fn label(&mut self, text: &str, scale: f64, x: i32, y: i32, theme: &Theme) -> Label {
         let (fonts, cache) = self.get();
+        let family = installed_family(fonts, &theme.font);
         let px = |v: f64| (v * scale).round().max(1.0) as f32;
         let (size, pad_x, pad_y) = (px(13.0), px(6.0), px(3.0));
         let mut buffer = Buffer::new(fonts, Metrics::new(size, (size * 1.3).ceil()));
         buffer.set_size(None, None);
-        buffer.set_text(
-            text,
-            &Attrs::new().family(Family::SansSerif),
-            Shaping::Advanced,
-            None,
-        );
+        buffer.set_text(text, &Attrs::new().family(family), Shaping::Advanced, None);
         buffer.shape_until_scroll(fonts, false);
         let text_w = buffer
             .layout_runs()
@@ -156,9 +173,10 @@ impl Fonts {
         let h = ((size * 1.3).ceil() + 2.0 * pad_y) as u32;
         let mut pixmap = tiny_skia::Pixmap::new(w.max(1), h.max(1)).expect("non-empty label");
         let mut paint = tiny_skia::Paint::default();
-        paint.set_color_rgba8(20, 20, 24, 217);
+        let bg = theme.surface;
+        paint.set_color_rgba8(bg.r, bg.g, bg.b, bg.a);
         paint.anti_alias = true;
-        if let Some(path) = rounded_rect(w as f32, h as f32, pad_y * 1.5) {
+        if let Some(path) = rounded_rect(w as f32, h as f32, px(theme.radius.into())) {
             pixmap.fill_path(
                 &path,
                 &paint,
@@ -172,7 +190,7 @@ impl Fonts {
         buffer.draw(
             fonts,
             cache,
-            Color::rgb(255, 255, 255),
+            Color::rgba(theme.text.r, theme.text.g, theme.text.b, theme.text.a),
             |gx, gy, gw, gh, c| {
                 for dy in 0..gh as i32 {
                     for dx in 0..gw as i32 {
@@ -220,6 +238,28 @@ impl Label {
             }
         }
     }
+}
+
+/// The first family of the CSS-style `stack` that is installed (generic names
+/// always are), or sans-serif.
+fn installed_family<'a>(fonts: &FontSystem, stack: &'a str) -> Family<'a> {
+    stack
+        .split(',')
+        .map(|f| f.trim().trim_matches(['"', '\'']).trim())
+        .find_map(|name| match name.to_ascii_lowercase().as_str() {
+            "sans-serif" => Some(Family::SansSerif),
+            "serif" => Some(Family::Serif),
+            "monospace" => Some(Family::Monospace),
+            "cursive" => Some(Family::Cursive),
+            "fantasy" => Some(Family::Fantasy),
+            "" => None,
+            _ => fonts
+                .db()
+                .faces()
+                .any(|f| f.families.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)))
+                .then_some(Family::Name(name)),
+        })
+        .unwrap_or(Family::SansSerif)
 }
 
 fn rounded_rect(w: f32, h: f32, r: f32) -> Option<tiny_skia::Path> {

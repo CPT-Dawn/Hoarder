@@ -7,5 +7,7 @@
 mod chrome;
 mod geom;
 pub mod overlay;
+pub mod theme;
 
 pub use overlay::{Outcome, OverlayError, Region};
+pub use theme::Theme;

@@ -55,8 +55,9 @@ use wayland_protocols::wp::{
     viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
 };
 
-use crate::chrome::{DIM, Fonts, Scene};
+use crate::chrome::{DIM, Fonts, Palette, Scene};
 use crate::geom::Rect;
+use crate::theme::Theme;
 
 /// Set to print how long the Overlay took to become visible.
 pub const TIMINGS_ENV: &str = "HOARDER_TIMINGS";
@@ -118,9 +119,10 @@ fn failed(e: impl std::fmt::Display) -> OverlayError {
 }
 
 /// Show the Overlay over `frozen` and wait for the user to pick a Region or
-/// cancel. `started` is when the user asked for the Capture; with
-/// [`TIMINGS_ENV`] set, the time until the Overlay is visible is printed.
-pub fn run(frozen: &Frozen, started: Instant) -> Result<Outcome, OverlayError> {
+/// cancel, drawn in `theme`. `started` is when the user asked for the
+/// Capture; with [`TIMINGS_ENV`] set, the time until the Overlay is visible is
+/// printed.
+pub fn run(frozen: &Frozen, started: Instant, theme: &Theme) -> Result<Outcome, OverlayError> {
     timing(started, "frozen");
     let conn = Connection::connect_to_env().map_err(failed)?;
     let (globals, mut queue): (_, EventQueue<App>) = registry_queue_init(&conn).map_err(failed)?;
@@ -155,6 +157,7 @@ pub fn run(frozen: &Frozen, started: Instant) -> Result<Outcome, OverlayError> {
         keyboard: None,
         views: Vec::new(),
         fonts: Fonts::load(),
+        theme: theme.clone(),
         drag: None,
         outcome: None,
         started,
@@ -183,6 +186,7 @@ pub fn run(frozen: &Frozen, started: Instant) -> Result<Outcome, OverlayError> {
             &viewporter,
             &app.shm,
             dim,
+            Palette::of(theme),
             &qh,
         )
         .map_err(failed)?;
@@ -239,6 +243,7 @@ struct View {
     /// Until there is a selection, the chrome is this one dim pixel stretched
     /// over the output: nothing to paint, nothing to upload.
     dim_buffer: WlBuffer,
+    palette: Palette,
     buffers: Vec<ChromeBuffer>,
     drawn: Scene,
     wanted: Scene,
@@ -264,6 +269,7 @@ impl View {
         viewporter: &WpViewporter,
         shm: &Shm,
         dim_buffer: WlBuffer,
+        palette: Palette,
         qh: &QueueHandle<App>,
     ) -> std::io::Result<View> {
         let root = compositor.create_surface(qh);
@@ -303,6 +309,7 @@ impl View {
             frame_viewport,
             frame_buffer,
             dim_buffer,
+            palette,
             buffers: Vec::new(),
             drawn: Scene::default(),
             wanted: Scene::default(),
@@ -392,7 +399,7 @@ impl View {
         let target = &self.buffers[index];
         let canvas = target.buffer.canvas(pool).expect("free or new");
         for area in repaint {
-            self.wanted.paint(canvas, w, h, area);
+            self.wanted.paint(canvas, w, h, area, self.palette);
         }
 
         let surface = self.layer.wl_surface();
@@ -503,6 +510,7 @@ struct App {
     keyboard: Option<WlKeyboard>,
     views: Vec<View>,
     fonts: Fonts,
+    theme: Theme,
     drag: Option<Drag>,
     outcome: Option<Outcome>,
     started: Instant,
@@ -536,7 +544,7 @@ impl App {
                         Some(l) => Some(l.clone()),
                         None => {
                             let (sx, _) = view.scale();
-                            let mut l = self.fonts.label(&text, sx, sel.x, 0);
+                            let mut l = self.fonts.label(&text, sx, sel.x, 0, &self.theme);
                             l.rect.y = label_y(sel, l.rect.h, view.size.1);
                             Some(l)
                         }

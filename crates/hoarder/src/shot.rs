@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use clap::ValueEnum;
 use hoarder_config::Config;
-use hoarder_ui::{Outcome, OverlayError, overlay};
+use hoarder_ui::{Outcome, OverlayError, Theme, overlay};
 use hoarder_wayland::CaptureError;
 
 use crate::Exit;
@@ -43,13 +43,14 @@ pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(),
     })?;
     let image = match target {
         Target::All => Image::all_outputs(&frozen.frames),
-        Target::Region => match overlay::run(&frozen, started).map_err(|e| {
-            let code = match e {
-                OverlayError::Unsupported(_) => Exit::Unsupported,
-                OverlayError::Failed(_) => Exit::Io,
-            };
-            (code, e.to_string())
-        })? {
+        Target::Region => match overlay::run(&frozen, started, &Theme::load(&config.theme))
+            .map_err(|e| {
+                let code = match e {
+                    OverlayError::Unsupported(_) => Exit::Unsupported,
+                    OverlayError::Failed(_) => Exit::Io,
+                };
+                (code, e.to_string())
+            })? {
             Outcome::Region(region) => Image::region(&frozen.frames, &region),
             Outcome::Cancelled => return Err((Exit::Cancelled, "cancelled".into())),
         },

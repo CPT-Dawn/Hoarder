@@ -10,10 +10,12 @@ authors.workspace = true
 
 [dependencies]
 cosmic-text.workspace = true
+hoarder-config.workspace = true
 hoarder-wayland.workspace = true
 rustix.workspace = true
 smithay-client-toolkit.workspace = true
 tiny-skia.workspace = true
+toml_edit.workspace = true
 wayland-client.workspace = true
 wayland-protocols.workspace = true
 

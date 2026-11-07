@@ -267,17 +267,21 @@ This lives in the Zenith repo as a separate PR. It is a new `ModuleId::Clipboard
 
 ## 8. Theming
 
-`theme = "zenith"` (default when `~/.config/zenith-bar` exists) or one of `midnight-bloom`, `tokyo-night`, `catppuccin-mocha`, `gruvbox-dark`, or `custom`.
+`[theme] name = "zenith"` (the default) or one of `midnight-bloom`, `tokyo-night`, `catppuccin-mocha`, `gruvbox-dark`, or `custom` (Midnight Bloom as a base for overrides). This mirrors Zenith's own `[theme]` table: a name plus override keys in one table.
 
-- `zenith`: Hoarder parses the active Zenith theme CSS plus the user's `style.css` for the `--zb-*` colour, font and radius variables, and follows changes live.
-- `[theme]` keys override any token: `accent`, `surface`, `text`, `muted`, `dim`, `radius`, `font`, `mono_font`.
+- `zenith`: Hoarder rebuilds Zenith's cascade: the built-in palette named by Zenith's `[theme] name`, then Zenith's `[theme]` overrides (`accent`, `surface_opacity`, `module_radius`), then the `:root` `--zb-*` variables in `style.css` (simple `var()` references resolve; anything unparsable such as `color-mix()` is skipped). It reads them afresh for every Overlay and Picker, so a Zenith theme change shows on the next one. With no (or a broken) Zenith config it falls back to Midnight Bloom, Zenith's default.
+- The other keys of `[theme]` override any token and beat every theme value: `accent`, `surface`, `text`, `muted`, `dim` (CSS colours: `#rgb[a]`, `#rrggbb[aa]`, `rgb()`/`rgba()`), `radius` (0–64 logical px), `font`, `mono_font` (font stacks, first installed family wins). `""` keeps the theme's value.
+
+Token sources in Zenith: `accent` ← `--zb-accent`, `surface` ← `--zb-surface-color` at `--zb-surface-opacity`, `text`/`muted`/`dim` ← `--zb-text`/`--zb-text-muted`/`--zb-text-dim`, `radius` ← `--zb-module-radius`, `font` ← `--zb-font-family`, `mono_font` ← `--zb-mono`.
 
 ## 9. Configuration
 
 `~/.config/hoarder/config.toml` reloads live. `hoarder config get|set|edit|reset|check|path`, and any setting can be overridden for one run with a flag.
 
 ```toml
-theme = "zenith"
+[theme]
+name = "zenith"
+accent = ""               # "" keeps the theme's; or "#rrggbb", "rgb(r g b / a)"
 
 [screenshot]
 dir = "~/Pictures/Screenshots"
