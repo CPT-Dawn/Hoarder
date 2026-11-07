@@ -7,6 +7,7 @@
 mod classify;
 mod concealed;
 mod history;
+mod keyring;
 mod pause;
 mod reader;
 pub mod service;
@@ -84,7 +85,7 @@ pub fn run(overrides: &[(String, String)]) -> Result<(), Fail> {
         }
     };
 
-    let history = history::History::start(&handle);
+    let history = history::History::start(&handle, config.history.encrypt);
     // Retention runs on every insert, at startup and once an hour.
     let _ = history.send(history::Job::Retain {
         limits: history::limits(&config.history),
@@ -871,6 +872,11 @@ impl Daemon {
         }
         let config = hoarder_config::with_overrides(&text, &self.overrides)
             .map_err(|e| format!("--set {e}"))?;
+        if config.history.encrypt != self.config.history.encrypt {
+            let _ = self
+                .history
+                .send(history::Job::Encrypt(config.history.encrypt));
+        }
         self.classifier = classifier(&config);
         self.config = config;
         self.retain();
