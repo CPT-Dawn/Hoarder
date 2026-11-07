@@ -259,3 +259,61 @@ fn with_screenshot_confirm_every_release_enters_refine() {
         "confirmed Region",
     );
 }
+
+/// Enter Refine on HEADLESS-1 with a Shift+release over (50, 40)–(150, 120).
+fn into_refine(session: &Session) {
+    let input = session.input();
+    let out = session.output("HEADLESS-1");
+    input.move_to(out, 50.0, 40.0).unwrap();
+    input.button(keys::BTN_LEFT, true).unwrap();
+    input.move_to(out, 150.0, 120.0).unwrap();
+    input.key_down(keys::KEY_LEFTSHIFT).unwrap();
+    input.button(keys::BTN_LEFT, false).unwrap();
+    input.key_up(keys::KEY_LEFTSHIFT).unwrap();
+}
+
+/// The accent-filled part of the Refine toolbar: the focused action's pill,
+/// on the row of the size label below the selection.
+fn focused_pill(shot: &Image) -> Option<u32> {
+    (160..320).find(|&x| (125..150).any(|y| shot.pixel(x, y) == ACCENT))
+}
+
+#[test]
+fn tab_moves_through_the_refine_toolbar_and_enter_runs_the_focused_action() {
+    let (session, _app) = two_outputs();
+    let overlay = start(&session, &["shot", "-o", "-"]);
+    into_refine(&session);
+    // Capture is focused first: its pill is filled with the accent.
+    let first = screenshot_when(&session, "HEADLESS-1", |s| focused_pill(s).is_some());
+    let at_capture = focused_pill(&first).unwrap();
+
+    session.input().tap(keys::KEY_TAB).unwrap();
+    let second = screenshot_when(&session, "HEADLESS-1", |s| {
+        focused_pill(s).is_some_and(|x| x > at_capture)
+    });
+    let at_cursor = focused_pill(&second).unwrap();
+    session.input().tap(keys::KEY_TAB).unwrap();
+    screenshot_when(&session, "HEADLESS-1", |s| {
+        focused_pill(s).is_some_and(|x| x > at_cursor)
+    });
+    // Third is Cancel.
+    session.input().tap(keys::KEY_ENTER).unwrap();
+
+    assert_eq!(overlay.finish().status.code(), Some(1), "cancelled");
+}
+
+#[test]
+fn shift_tab_wraps_round_to_the_last_action() {
+    let (session, _app) = two_outputs();
+    let overlay = start(&session, &["shot", "-o", "-"]);
+    into_refine(&session);
+    screenshot_when(&session, "HEADLESS-1", |s| focused_pill(s).is_some());
+    session
+        .input()
+        .chord(&[keys::KEY_LEFTSHIFT, keys::KEY_TAB])
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    session.input().tap(keys::KEY_ENTER).unwrap();
+
+    assert_eq!(overlay.finish().status.code(), Some(1), "cancelled");
+}

@@ -68,7 +68,7 @@ use wayland_protocols::wp::{
 use crate::chrome::{CLEAR, DIM, Fonts, Highlight, Palette, Scene};
 use crate::geom::Rect;
 use crate::layers::{Context, Layers, ViewLayers};
-use crate::select::{Action, Key, Selector};
+use crate::select::{Action, Key, Selector, Tool};
 use crate::snap::Hover;
 use crate::surface::{self, Error, Layered, failed, timing};
 use crate::theme::Theme;
@@ -824,6 +824,10 @@ impl App {
             Action::Region(region) => Some(Outcome::Region(region)),
             Action::OutputAt(at) => self.view_at(at).map(|v| Outcome::Output(v.output.clone())),
             Action::AllOutputs => Some(Outcome::AllOutputs),
+            Action::ToggleCursor => {
+                self.layers.toggle_cursor();
+                None
+            }
             Action::Cancel => Some(Outcome::Cancelled),
         };
     }
@@ -867,9 +871,11 @@ impl App {
             .selector
             .moving_point()
             .map_or(1.0, |at| self.pixel_at(at));
-        match self.selector.key(key, released, px) {
-            Some(action) => self.act(action),
-            None => self.update(qh),
+        if let Some(action) = self.selector.key(key, released, px) {
+            self.act(action);
+        }
+        if self.outcome.is_none() {
+            self.update(qh);
         }
     }
 
@@ -912,18 +918,56 @@ impl App {
                 Some(sel) if refining => handles(sel, view.ui_scale()),
                 _ => Vec::new(),
             };
+            let toolbar = match (&label, self.selector.tool()) {
+                (Some(size), Some(focused)) => {
+                    let (scale, start) = (view.ui_scale(), size.rect);
+                    self.toolbar(focused, scale, start)
+                }
+                _ => Vec::new(),
+            };
             let view = &mut self.views[i];
             view.wanted = Scene {
                 window,
                 selection,
                 label,
                 handles,
+                toolbar,
             };
             if let Err(e) = view.redraw(&mut self.pool, qh) {
                 self.outcome = Some(Outcome::Cancelled);
                 eprintln!("hoarder: cannot draw the Overlay: {e}");
             }
         }
+    }
+
+    /// Refine's toolbar pills, in [`Tool::ALL`]'s order, on the row of the
+    /// size label `after` and to its right; `focused` in the accent.
+    fn toolbar(&mut self, focused: Tool, scale: f64, after: Rect) -> Vec<crate::chrome::Label> {
+        let gap = (6.0 * scale).round() as i32;
+        let mut x = after.right() + gap;
+        let lit = Theme {
+            surface: self.theme.accent,
+            text: hoarder_config::Colour {
+                a: 255,
+                ..self.theme.surface
+            },
+            ..self.theme.clone()
+        };
+        Tool::ALL
+            .iter()
+            .map(|&tool| {
+                let text = match tool {
+                    Tool::Capture => "Capture",
+                    Tool::Cursor if self.layers.cursor => "Cursor: on",
+                    Tool::Cursor => "Cursor: off",
+                    Tool::Cancel => "Cancel",
+                };
+                let theme = if tool == focused { &lit } else { &self.theme };
+                let pill = self.fonts.label(text, scale, x, after.y, theme);
+                x = pill.rect.right() + gap;
+                pill
+            })
+            .collect()
     }
 
     /// Window `index` as highlighted on output `view`, if it shows there.
@@ -1027,6 +1071,26 @@ impl App {
             PointerEventKind::Press {
                 button: BTN_LEFT, ..
             } => {
+                // A click on a Refine toolbar pill runs its action.
+                let view = &self.views[i];
+                let (sx, sy) = view.scale();
+                let (px, py) = (
+                    (event.position.0 * sx) as i32,
+                    (event.position.1 * sy) as i32,
+                );
+                let hit = view.drawn.toolbar.iter().position(|pill| {
+                    let r = pill.rect;
+                    px >= r.x && px < r.right() && py >= r.y && py < r.bottom()
+                });
+                if let Some(tool) = hit.and_then(|j| Tool::ALL.get(j))
+                    && let Some(action) = self.selector.run_tool(*tool)
+                {
+                    self.act(action);
+                    if self.outcome.is_none() {
+                        self.update(qh);
+                    }
+                    return;
+                }
                 self.selector.press(at);
                 self.update(qh);
             }
@@ -1123,6 +1187,7 @@ fn key_of(keysym: Keysym) -> Option<Key> {
         Keysym::Right | Keysym::KP_Right => Key::Right,
         Keysym::Up | Keysym::KP_Up => Key::Up,
         Keysym::Down | Keysym::KP_Down => Key::Down,
+        Keysym::Tab | Keysym::ISO_Left_Tab => Key::Tab,
         _ => return None,
     })
 }

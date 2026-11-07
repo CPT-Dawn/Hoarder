@@ -51,6 +51,8 @@ pub struct Scene {
     pub label: Option<Label>,
     /// Refine's resize handles, filled with the accent colour.
     pub handles: Vec<Rect>,
+    /// Refine's toolbar: one pill per action, the focused one in the accent.
+    pub toolbar: Vec<Label>,
 }
 
 /// A hovered window: tinted, with a border just outside and its title.
@@ -83,6 +85,10 @@ impl Scene {
         if self.handles != next.handles {
             out.extend(&self.handles);
             out.extend(&next.handles);
+        }
+        if self.toolbar != next.toolbar {
+            out.extend(self.toolbar.iter().map(|l| l.rect));
+            out.extend(next.toolbar.iter().map(|l| l.rect));
         }
         out.retain(|r| !r.is_empty());
         out
@@ -118,7 +124,11 @@ impl Scene {
             }
         }
         let window_label = self.window.as_ref().and_then(|w| w.label.as_ref());
-        for label in window_label.into_iter().chain(&self.label) {
+        for label in window_label
+            .into_iter()
+            .chain(&self.label)
+            .chain(&self.toolbar)
+        {
             label.blend_into(canvas, width, area);
         }
     }

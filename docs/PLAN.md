@@ -113,7 +113,7 @@ Idle ──press──► Dragging ──release──► Capture
 | `C` | Toggle the cursor layer |
 | `O`, `A` | Capture the Output / All Outputs |
 | `W` | Cycle through the windows under the pointer |
-| `Tab` (in Refine) | Move between the Refine toolbar actions |
+| `Tab` / `Shift+Tab` (in Refine) | Move between the Refine toolbar actions: Capture (focused first, so Enter still captures), Cursor (toggles the cursor layer) and Cancel; Enter or a click runs one |
 
 **Visual spec.**
 - Outside the selection, the frame is dimmed to 45%.
