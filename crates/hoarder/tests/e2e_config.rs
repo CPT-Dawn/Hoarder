@@ -180,7 +180,7 @@ fn config_edit_opens_the_editor_then_checks() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2), "{out:?}");
-    assert!(String::from_utf8_lossy(&out.stderr).contains(":12:6: "));
+    assert!(String::from_utf8_lossy(&out.stderr).contains(":26:6: "));
 }
 
 #[test]
