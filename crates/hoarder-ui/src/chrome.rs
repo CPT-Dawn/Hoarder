@@ -28,7 +28,7 @@ impl Palette {
 }
 
 /// `colour` as premultiplied `Argb8888` bytes (BGRA in memory).
-fn argb(c: hoarder_config::Colour) -> [u8; 4] {
+pub(crate) fn argb(c: hoarder_config::Colour) -> [u8; 4] {
     let p = |v: u8| (v as u32 * c.a as u32 / 255) as u8;
     [p(c.b), p(c.g), p(c.r), c.a]
 }
