@@ -10,6 +10,7 @@
 
 mod edit;
 mod schema;
+mod state;
 mod template;
 mod watch;
 
@@ -18,6 +19,7 @@ use std::path::{Path, PathBuf};
 
 pub use edit::{EditError, get, reset, set};
 pub use schema::*;
+pub use state::{State, StoredRegion, state_path};
 pub use template::{NameFields, NameTemplate};
 pub use watch::Watcher;
 

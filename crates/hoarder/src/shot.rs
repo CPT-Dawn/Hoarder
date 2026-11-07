@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use clap::ValueEnum;
-use hoarder_config::{Config, Screenshot};
-use hoarder_ui::{Outcome, OverlayError, overlay};
+use hoarder_config::{Config, Screenshot, State, StoredRegion};
+use hoarder_ui::{Options, Outcome, OverlayError, Region, overlay};
 use hoarder_wayland::CaptureError;
 
 use crate::Exit;
@@ -43,29 +43,15 @@ pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(),
         };
         (code, e.to_string())
     })?;
-    let image = Arc::new(match target {
-        Target::All => Image::all_outputs(&frozen.frames),
-        Target::Region => match overlay::run(&frozen, started).map_err(|e| {
-            let code = match e {
-                OverlayError::Unsupported(_) => Exit::Unsupported,
-                OverlayError::Failed(_) => Exit::Io,
-            };
-            (code, e.to_string())
-        })? {
-            Outcome::Region(region) => Image::region(&frozen.frames, &region),
-            Outcome::Cancelled => return Err((Exit::Cancelled, "cancelled".into())),
-        },
-    });
+    let (image, name) = match target {
+        Target::All => (Image::all_outputs(&frozen.frames), target.name()),
+        Target::Region => from_overlay(&frozen, started, config)?,
+    };
+    let image = Arc::new(image);
     // The file is encoded on a worker thread, started before the clipboard
     // copy, so a slow format (AVIF takes seconds at 4K) never delays it.
-    let saving = (output.is_none() && config.screenshot.save).then(|| {
-        crate::save::spawn(
-            image.clone(),
-            target.name(),
-            None,
-            config.screenshot.clone(),
-        )
-    });
+    let saving = (output.is_none() && config.screenshot.save)
+        .then(|| crate::save::spawn(image.clone(), name, None, config.screenshot.clone()));
     // Only now the Target is chosen: never over the Overlay, never in the Capture.
     let _flash = crate::after::flash(&config.screenshot);
     if config.screenshot.copy {
@@ -92,10 +78,63 @@ pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(),
         path,
         width: image.width,
         height: image.height,
-        target: target.name(),
+        target: name,
     };
     crate::after::run(&delivered, &config.screenshot);
     Ok(())
+}
+
+/// Show the Overlay and cut out the Target picked there; returns the image
+/// and the Target's name for file names.
+fn from_overlay(
+    frozen: &hoarder_wayland::Frozen,
+    started: Instant,
+    config: &Config,
+) -> Result<(Image, &'static str), (Exit, String)> {
+    let mut state = State::load();
+    let options = Options {
+        confirm: config.screenshot.confirm,
+        last_region: state.last_region().map(|r| Region {
+            x: r.x,
+            y: r.y,
+            width: r.width,
+            height: r.height,
+        }),
+    };
+    let outcome = overlay::run(frozen, started, &options).map_err(|e| {
+        let code = match e {
+            OverlayError::Unsupported(_) => Exit::Unsupported,
+            OverlayError::Failed(_) => Exit::Io,
+        };
+        (code, e.to_string())
+    })?;
+    Ok(match outcome {
+        Outcome::Region(r) => {
+            state.set_last_region(StoredRegion {
+                x: r.x,
+                y: r.y,
+                width: r.width,
+                height: r.height,
+            });
+            if let Err(e) = state.save() {
+                eprintln!(
+                    "hoarder: cannot remember the Region in {}: {e}",
+                    hoarder_config::state_path().display()
+                );
+            }
+            (Image::region(&frozen.frames, &r), "region")
+        }
+        Outcome::Output(name) => {
+            let frame = frozen
+                .frames
+                .iter()
+                .find(|f| f.output == name)
+                .ok_or_else(|| (Exit::Io, format!("output {name} went away")))?;
+            (Image::upright(frame), "output")
+        }
+        Outcome::AllOutputs => (Image::all_outputs(&frozen.frames), "all"),
+        Outcome::Cancelled => return Err((Exit::Cancelled, "cancelled".into())),
+    })
 }
 
 fn deliver(image: &Image, output: &Path, settings: &Screenshot) -> std::io::Result<()> {
