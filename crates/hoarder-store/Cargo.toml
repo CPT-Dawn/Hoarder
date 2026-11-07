@@ -9,8 +9,10 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+age.workspace = true
 blake3.workspace = true
 rusqlite.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
