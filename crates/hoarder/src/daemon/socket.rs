@@ -1,28 +1,50 @@
 //! The Daemon's end of the socket (PLAN.md §11): a private directory, a
 //! same-user check on every connection, and JSON-lines requests answered on
-//! the event loop.
+//! the event loop. Ops that take a file descriptor (`get`) take the oldest
+//! one passed (`SCM_RIGHTS`) on that connection and not yet used.
 
-use std::collections::HashMap;
-use std::io::{ErrorKind, Read as _, Write as _};
+use std::collections::{HashMap, VecDeque};
+use std::io::{ErrorKind, Write as _};
+use std::mem::MaybeUninit;
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 
 use calloop::generic::Generic;
 use calloop::{Interest, LoopHandle, Mode, PostAction};
-use hoarder_ipc::{Failure, Hello, Op, Outcome, PROTOCOL, Response, SUPPORTED, Value};
+use hoarder_ipc::{ErrorCode, Failure, Hello, Op, Outcome, PROTOCOL, Response, SUPPORTED, Value};
+use rustix::io::Errno;
+use rustix::net::{RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, recvmsg};
 
+use super::history::{Job, to_value};
 use super::{Daemon, Fail};
 use crate::Exit;
 
 /// A request line longer than this is not a Front end talking.
 const MAX_LINE: usize = 1024 * 1024;
+/// Passed fds a connection may have waiting; more is not a Front end either.
+const MAX_FDS: usize = 16;
+/// Reply bytes a connection may leave unread.
+const MAX_PENDING: usize = 64 * 1024 * 1024;
 
 /// Connected Front ends, by connection number.
 #[derive(Debug, Default)]
 pub(super) struct Clients {
     next: u64,
-    /// The write half of each connection and its unfinished input line.
-    open: HashMap<u64, (UnixStream, Vec<u8>)>,
+    open: HashMap<u64, Client>,
+}
+
+/// One connected Front end.
+#[derive(Debug)]
+struct Client {
+    /// The write half of the connection.
+    writer: UnixStream,
+    /// Its unfinished input line.
+    buf: Vec<u8>,
+    /// Fds it passed, oldest first, not yet taken by a request.
+    fds: VecDeque<OwnedFd>,
+    /// Reply bytes the socket had no room for yet.
+    pending: Vec<u8>,
 }
 
 /// Create `$XDG_RUNTIME_DIR/hoarder` (mode 0700) and listen on its socket.
@@ -110,30 +132,49 @@ impl Daemon {
             move |_, stream, daemon: &mut Daemon| Ok(daemon.on_client(id, stream)),
         );
         if inserted.is_ok() {
-            self.clients.open.insert(id, (writer, Vec::new()));
+            self.clients.open.insert(
+                id,
+                Client {
+                    writer,
+                    buf: Vec::new(),
+                    fds: VecDeque::new(),
+                    pending: Vec::new(),
+                },
+            );
         }
     }
 
     fn on_client(&mut self, id: u64, stream: &UnixStream) -> PostAction {
         let mut chunk = [0u8; 4096];
         loop {
-            match (&*stream).read(&mut chunk) {
-                Ok(0) => {
-                    self.clients.open.remove(&id);
-                    return PostAction::Remove;
-                }
-                Ok(n) => {
-                    let Some((_, buf)) = self.clients.open.get_mut(&id) else {
+            let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(4))];
+            let mut ancillary = RecvAncillaryBuffer::new(&mut space);
+            let received = recvmsg(
+                stream,
+                &mut [std::io::IoSliceMut::new(&mut chunk)],
+                &mut ancillary,
+                RecvFlags::CMSG_CLOEXEC,
+            );
+            match received {
+                Ok(msg) => {
+                    let Some(client) = self.clients.open.get_mut(&id) else {
                         return PostAction::Remove;
                     };
-                    buf.extend_from_slice(&chunk[..n]);
-                    if buf.len() > MAX_LINE && !buf.contains(&b'\n') {
+                    for message in ancillary.drain() {
+                        if let RecvAncillaryMessage::ScmRights(fds) = message {
+                            client.fds.extend(fds);
+                        }
+                    }
+                    let n = msg.bytes;
+                    client.buf.extend_from_slice(&chunk[..n]);
+                    let flooded = client.buf.len() > MAX_LINE && !client.buf.contains(&b'\n');
+                    if n == 0 || flooded || client.fds.len() > MAX_FDS {
                         self.clients.open.remove(&id);
                         return PostAction::Remove;
                     }
                 }
-                Err(e) if e.kind() == ErrorKind::WouldBlock => break,
-                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(Errno::AGAIN) => break,
+                Err(Errno::INTR) => {}
                 Err(_) => {
                     self.clients.open.remove(&id);
                     return PostAction::Remove;
@@ -151,7 +192,7 @@ impl Daemon {
     }
 
     fn take_line(&mut self, id: u64) -> Option<String> {
-        let (_, buf) = self.clients.open.get_mut(&id)?;
+        let buf = &mut self.clients.open.get_mut(&id)?.buf;
         let end = buf.iter().position(|b| *b == b'\n')?;
         let line: Vec<u8> = buf.drain(..=end).collect();
         Some(String::from_utf8_lossy(&line).trim().to_owned())
@@ -181,6 +222,44 @@ impl Daemon {
                 self.reply(client, id, Ok(to_value(&status)));
             }
             Op::Clear => self.clear(client, id),
+            Op::List { limit } => self.ask_history(client, id, Job::List { client, id, limit }),
+            Op::Get { clip, mime } => {
+                let pipe = self
+                    .clients
+                    .open
+                    .get_mut(&client)
+                    .and_then(|c| c.fds.pop_front());
+                match pipe {
+                    Some(pipe) => self.ask_history(
+                        client,
+                        id,
+                        Job::Get {
+                            client,
+                            id,
+                            clip,
+                            mime,
+                            pipe,
+                        },
+                    ),
+                    None => self.reply(
+                        client,
+                        id,
+                        Err(Failure {
+                            code: ErrorCode::BadRequest,
+                            message: "get streams into a pipe passed with the request".into(),
+                        }),
+                    ),
+                }
+            }
+            Op::Restore { clip } => self.ask_history(client, id, Job::Restore { client, id, clip }),
+            Op::Delete { clip } => self.ask_history(client, id, Job::Delete { client, id, clip }),
+        }
+    }
+
+    /// Hand a request to the History thread, which answers it.
+    fn ask_history(&mut self, client: u64, id: u64, job: Job) {
+        if let Err(failure) = self.history.send(job) {
+            self.reply(client, id, Err(failure));
         }
     }
 
@@ -199,16 +278,83 @@ impl Daemon {
 
     fn send_response(&mut self, client: u64, response: &Response) {
         let line = hoarder_ipc::encode(response);
-        let Some((writer, _)) = self.clients.open.get_mut(&client) else {
+        let Some(Client {
+            writer, pending, ..
+        }) = self.clients.open.get_mut(&client)
+        else {
             return;
         };
-        // Replies are small; a Front end that cannot take one is dropped.
-        if writer.write_all(line.as_bytes()).is_err() {
+        let writer_busy = !pending.is_empty();
+        let unsent = if writer_busy {
+            line.as_bytes()
+        } else {
+            match write_some(writer, line.as_bytes()) {
+                Ok(n) => &line.as_bytes()[n..],
+                Err(_) => {
+                    self.clients.open.remove(&client);
+                    return;
+                }
+            }
+        };
+        if unsent.is_empty() {
+            return;
+        }
+        if unsent.len() + pending.len() > MAX_PENDING {
+            // A Front end that reads nothing is not worth our memory.
             self.clients.open.remove(&client);
+            return;
+        }
+        pending.extend_from_slice(unsent);
+        if writer_busy {
+            return;
+        }
+        // Finish the reply whenever the Front end makes room for it.
+        let Ok(fd) = writer.try_clone() else {
+            self.clients.open.remove(&client);
+            return;
+        };
+        let inserted = self.handle.insert_source(
+            Generic::new(fd, Interest::WRITE, Mode::Level),
+            move |_, _, daemon: &mut Daemon| Ok(daemon.on_writable(client)),
+        );
+        if inserted.is_err() {
+            self.clients.open.remove(&client);
+        }
+    }
+
+    /// Send what is pending for `client`; stop watching once all is sent.
+    fn on_writable(&mut self, client: u64) -> PostAction {
+        let Some(c) = self.clients.open.get_mut(&client) else {
+            return PostAction::Remove;
+        };
+        match write_some(&mut c.writer, &c.pending) {
+            Ok(n) => {
+                c.pending.drain(..n);
+                if c.pending.is_empty() {
+                    PostAction::Remove
+                } else {
+                    PostAction::Continue
+                }
+            }
+            Err(_) => {
+                self.clients.open.remove(&client);
+                PostAction::Remove
+            }
         }
     }
 }
 
-fn to_value<T: serde::Serialize>(value: &T) -> Value {
-    serde_json::to_value(value).unwrap_or(Value::Null)
+/// Write as much of `data` as the socket takes now.
+fn write_some(writer: &mut UnixStream, data: &[u8]) -> std::io::Result<usize> {
+    let mut sent = 0;
+    while sent < data.len() {
+        match writer.write(&data[sent..]) {
+            Ok(0) => return Err(ErrorKind::WriteZero.into()),
+            Ok(n) => sent += n,
+            Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+            Err(e) if e.kind() == ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(sent)
 }

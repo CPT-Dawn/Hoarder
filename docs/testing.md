@@ -87,6 +87,10 @@ It is also handy for bug reports: a user can check whether a capture problem fol
 
 The Daemon tests start `hoarder daemon` in the session and judge it only by what a user or Front end can see: `wl-paste` after the source app exits (Takeover and the Reader rules), the source still owning its Selection, socket responses, `/proc` context switches for idle wakeups, and exit codes. The `status` op's `reading` flag tells a test when the Daemon has finished reading an Offer, so a source is never quit mid-read by accident. `hoarder service` runs against a stand-in `systemctl` placed first on `PATH`, so no test touches your real user manager.
 
+## History (`crates/hoarder/tests/e2e_history.rs`)
+
+History is judged through `hoarder history … --json`, `history get` bytes, `wl-paste` after a `history restore`, and the files under the session's private `$XDG_DATA_HOME/hoarder` (modes, and which representations became `blobs/` files). Each test polls `history list --json` until the Daemon has recorded what it copied, so nothing waits on a fixed sleep.
+
 ## Window geometry providers
 
 `hoarder` picks its window-geometry provider from the environment: `HYPRLAND_INSTANCE_SIGNATURE` means Hyprland IPC, `SWAYSOCK` means Sway IPC, and neither means no provider (no hover highlighting). `Session::command` sets `SWAYSOCK`, so the end-to-end tests (`e2e_window.rs`) snap through Sway's `get_tree`; `cmd.env_remove("SWAYSOCK")` gives the no-provider path. Hyprland can't run headless in CI, so its parsing is covered by fixture tests (`crates/hoarder-wayland/tests/windows.rs`) and its live behaviour by the manual release checklist.
