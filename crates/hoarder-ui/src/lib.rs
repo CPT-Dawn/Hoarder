@@ -7,9 +7,12 @@
 mod chrome;
 pub mod countdown;
 mod geom;
+mod layers;
+mod loupe;
 pub mod overlay;
 mod select;
 mod snap;
+mod sprite;
 pub mod theme;
 mod wait;
 

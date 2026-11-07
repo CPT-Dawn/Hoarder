@@ -17,6 +17,11 @@ pub fn state_path() -> PathBuf {
     dir.join("hoarder").join("state.toml")
 }
 
+/// After this many showings the Overlay's hint bar retires (PLAN.md §4.2).
+pub const HINT_BAR_RETIRES_AFTER: u32 = 20;
+
+const HINT_BAR_USES: &str = "hint_bar_uses";
+
 /// A Region as stored: global logical coordinates of the compositor layout.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StoredRegion {
@@ -70,6 +75,33 @@ impl State {
         (region.width > 0.0 && region.height > 0.0).then_some(region)
     }
 
+    /// How many times the Overlay has shown its hint bar.
+    pub fn hint_bar_uses(&self) -> u32 {
+        self.doc
+            .get(HINT_BAR_USES)
+            .and_then(Item::as_integer)
+            .map_or(0, |n| n.clamp(0, u32::MAX as i64) as u32)
+    }
+
+    /// Whether the hint bar has uses left ([`HINT_BAR_RETIRES_AFTER`]).
+    pub fn hint_bar_due(&self) -> bool {
+        self.hint_bar_uses() < HINT_BAR_RETIRES_AFTER
+    }
+
+    /// Count one more showing of the hint bar.
+    pub fn record_hint_bar_use(&mut self) {
+        let uses = self.hint_bar_uses().saturating_add(1) as i64;
+        match self.doc.get_mut(HINT_BAR_USES).and_then(Item::as_value_mut) {
+            // Keep the comments around the old value.
+            Some(old) => {
+                let decor = old.decor().clone();
+                *old = uses.into();
+                *old.decor_mut() = decor;
+            }
+            None => self.doc[HINT_BAR_USES] = value(uses),
+        }
+    }
+
     pub fn set_last_region(&mut self, r: StoredRegion) {
         let mut t = Table::new();
         t["x"] = value(r.x);
@@ -102,5 +134,24 @@ mod tests {
         };
         assert_eq!(back.last_region(), Some(r));
         assert!(text.contains("hint_uses = 3"), "{text}");
+    }
+
+    #[test]
+    fn the_hint_bar_counts_its_uses_and_keeps_comments() {
+        let mut state = State::default();
+        assert_eq!(state.hint_bar_uses(), 0);
+        state.record_hint_bar_use();
+        assert_eq!(state.doc.to_string(), "hint_bar_uses = 1\n");
+
+        let mut state = State {
+            doc: "# mine\nhint_bar_uses = 19 # nearly\n".parse().unwrap(),
+        };
+        assert!(state.hint_bar_due());
+        state.record_hint_bar_use();
+        assert_eq!(
+            state.doc.to_string(),
+            "# mine\nhint_bar_uses = 20 # nearly\n"
+        );
+        assert!(!state.hint_bar_due());
     }
 }

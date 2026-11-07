@@ -14,6 +14,7 @@
 //! and waits for the compositor to present that, so a Capture taken next
 //! holds none of its pixels.
 
+use std::cell::Cell;
 use std::io::Write as _;
 use std::os::fd::AsFd;
 use std::time::{Duration, Instant};
@@ -63,6 +64,7 @@ use wayland_protocols::wp::{
 
 use crate::chrome::{CLEAR, DIM, Fonts, Highlight, Palette, Scene};
 use crate::geom::Rect;
+use crate::layers::{Context, Layers, ViewLayers};
 use crate::select::{Action, Key, Selector};
 use crate::snap::Hover;
 use crate::theme::Theme;
@@ -109,6 +111,12 @@ pub struct Options {
     pub last_region: Option<Region>,
     /// What the chrome and labels are drawn in (Midnight Bloom by default).
     pub theme: Theme,
+    /// Show the hint bar (it retires after 20 uses; the caller counts).
+    pub hint_bar: bool,
+    /// Whether the cursor layer is in the Capture (`--cursor`,
+    /// `screenshot.cursor`). The Overlay flips it as the user presses `C`,
+    /// so after [`run`] it holds the user's final choice.
+    pub cursor: Cell<bool>,
     /// A selection cannot leave the output where its drag started
     /// (`screenshot.mixed_scale = "clamp"`). With `run_live`, only when the
     /// outputs differ in scale.
@@ -225,6 +233,7 @@ fn show(
         views: Vec::new(),
         fonts: Fonts::load(),
         theme: options.theme.clone(),
+        layers: Layers::new(options.hint_bar, options.cursor.get()),
         selector: Selector::new(options.confirm, options.last_region),
         pointer_at: None,
         hover: Hover::new(options.windows.clone()),
@@ -304,8 +313,21 @@ fn show(
     }
     timing(started, "surfaces_created");
 
-    while app.outcome.is_none() {
-        queue.blocking_dispatch(&mut app).map_err(failed)?;
+    loop {
+        queue.dispatch_pending(&mut app).map_err(failed)?;
+        let now = Instant::now();
+        app.layers.tick(now);
+        app.refresh_layers(frozen, now);
+        if app.outcome.is_some() {
+            break;
+        }
+        // Sleep until the compositor speaks or a layer's timer is due.
+        let deadline = app.layers.deadline(now);
+        crate::wait::dispatch_once(&mut queue, deadline).map_err(failed)?;
+    }
+    options.cursor.set(app.layers.cursor);
+    for view in &mut app.views {
+        view.layers.hide();
     }
     let outcome = app.outcome.take().expect("loop ended on an outcome");
     if frozen.is_none() && outcome != Outcome::Cancelled {
@@ -333,6 +355,9 @@ struct View {
     output: String,
     /// Layout position and size of the output (logical).
     logical: (f64, f64, f64, f64),
+    /// The Loupe, hint bar and cursor layer; dropped before the surfaces
+    /// they float over.
+    layers: ViewLayers,
     /// Physical size of the chrome buffer: the upright Frozen Frame size.
     size: (u32, u32),
     layer: LayerSurface,
@@ -436,11 +461,20 @@ impl View {
             }
             None => None,
         };
+        let layers = ViewLayers::new(
+            layer.wl_surface(),
+            frame.as_ref().map(|f| &f.surface),
+            compositor,
+            subcompositor,
+            viewporter,
+            qh,
+        );
         layer.commit();
 
         Ok(View {
             output: screen.name.clone(),
             logical: screen.logical,
+            layers,
             size: screen.size,
             layer,
             root_viewport,
@@ -643,7 +677,7 @@ fn file_buffer(
     buffer
 }
 
-struct App {
+pub(crate) struct App {
     registry: RegistryState,
     outputs: OutputState,
     seats: SeatState,
@@ -656,6 +690,8 @@ struct App {
     views: Vec<View>,
     fonts: Fonts,
     theme: Theme,
+    /// What the Loupe, the hint bar and the cursor layer show.
+    layers: Layers,
     selector: Selector,
     /// Where the pointer last was, in global logical coordinates.
     pointer_at: Option<(f64, f64)>,
@@ -667,6 +703,31 @@ struct App {
 }
 
 impl App {
+    /// Bring every output's Loupe, hint bar and cursor layer up to date.
+    fn refresh_layers(&mut self, frozen: Option<&Frozen>, now: Instant) {
+        for (i, view) in self.views.iter_mut().enumerate() {
+            if !view.presented {
+                continue;
+            }
+            let cx = Context {
+                frame: frozen.map(|f| &f.frames[i]),
+                logical: (view.logical.2, view.logical.3),
+                scale: view.size.0 as f64 / view.logical.2.max(1.0),
+                fonts: &mut self.fonts,
+                theme: &self.theme,
+                pool: &mut self.pool,
+            };
+            match view.layers.refresh(&self.layers, i, now, cx) {
+                Ok(true) => view.layer.commit(),
+                Ok(false) => {}
+                Err(e) => {
+                    eprintln!("hoarder: cannot draw the Overlay: {e}");
+                    self.outcome = Some(Outcome::Cancelled);
+                }
+            }
+        }
+    }
+
     /// Make every View transparent and ask to hear when that is on screen.
     fn hide(&mut self, qh: &QueueHandle<App>) -> std::io::Result<()> {
         for (i, view) in self.views.iter_mut().enumerate() {
@@ -736,6 +797,12 @@ impl App {
         let Some(key) = key_of(keysym) else {
             return;
         };
+        if key == Key::Cursor {
+            if !released {
+                self.layers.toggle_cursor();
+            }
+            return;
+        }
         if key == Key::Output {
             if !released {
                 let at = self.pointer_at.unwrap_or_else(|| {
@@ -857,6 +924,13 @@ impl App {
         let at = (ox + event.position.0, oy + event.position.1);
         self.pointer_at = Some(at);
         match event.kind {
+            PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
+                self.layers.pointer_at(i, event.position, Instant::now());
+            }
+            PointerEventKind::Leave { .. } => self.layers.pointer_left(i),
+            _ => {}
+        }
+        match event.kind {
             PointerEventKind::Enter { serial } => {
                 if let Some(device) = &self.cursor_device {
                     device.set_shape(serial, Shape::Crosshair);
@@ -953,6 +1027,7 @@ fn key_of(keysym: Keysym) -> Option<Key> {
         Keysym::space => Key::Space,
         Keysym::o | Keysym::O => Key::Output,
         Keysym::a | Keysym::A => Key::AllOutputs,
+        Keysym::c | Keysym::C => Key::Cursor,
         Keysym::Left | Keysym::KP_Left => Key::Left,
         Keysym::Right | Keysym::KP_Right => Key::Right,
         Keysym::Up | Keysym::KP_Up => Key::Up,
@@ -1023,6 +1098,7 @@ impl CompositorHandler for App {
         if !self.visible_reported && self.views.iter().all(|v| v.presented) {
             self.visible_reported = true;
             timing(self.started, "overlay_visible");
+            self.layers.visible(Instant::now());
         }
         if let Err(e) = self.views[i].redraw(&mut self.pool, qh) {
             eprintln!("hoarder: cannot draw the Overlay: {e}");
@@ -1210,6 +1286,7 @@ impl KeyboardHandler for App {
         _: u32,
     ) {
         self.selector.set_shift(modifiers.shift);
+        self.layers.set_alt(modifiers.alt);
     }
 }
 
@@ -1242,6 +1319,7 @@ delegate_registry!(App);
 smithay_client_toolkit::delegate_dispatch2!(App);
 delegate_noop!(App: WpViewporter);
 delegate_noop!(App: WpViewport);
+delegate_noop!(App: wayland_client::protocol::wl_region::WlRegion);
 delegate_noop!(App: WpSinglePixelBufferManagerV1);
 delegate_noop!(App: WlShmPool);
 delegate_noop!(App: ignore WlBuffer);
