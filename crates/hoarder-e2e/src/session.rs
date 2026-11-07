@@ -19,7 +19,11 @@ pub enum BitDepth {
     Ten,
 }
 
-/// `wl_output` transform, in Sway's spelling.
+/// Output rotation as written in Sway's config (`output … transform 90`).
+///
+/// Careful: Sway's names are the inverse of the protocol's. `Rotate90` here
+/// makes Sway advertise `wl_output.transform = 270` (and vice versa), so a
+/// raw capture must be rotated clockwise by the *Sway* angle to be upright.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Transform {
     Normal,
