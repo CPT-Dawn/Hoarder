@@ -109,7 +109,7 @@ HOARDER_BUDGET_SCALE=3 cargo test --release -p hoarder --test e2e_shot_clipboard
 
 ## CI (`.github/workflows/ci.yml`)
 
-CI runs on pushes to `main`, `integration/**` and `ticket/**`, and on every pull request.
+CI runs on pushes to `main`, `integration/**`, `ticket/**` and `fix/**`, and on every pull request.
 
 | Job | Command | Notes |
 |---|---|---|
