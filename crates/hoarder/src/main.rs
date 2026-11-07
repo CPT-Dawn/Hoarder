@@ -9,6 +9,7 @@ mod history;
 mod hook;
 mod image;
 mod notify;
+mod pause;
 mod save;
 mod setup;
 mod shot;
@@ -85,9 +86,28 @@ enum Command {
     Config(config::ConfigCommand),
     /// Empty the clipboard, and keep the Daemon from restoring it.
     Clear,
-    /// List, read, restore and delete Clips in History (needs the Daemon).
+    /// List, read, restore, delete, pin and clear Clips in History (needs
+    /// the Daemon).
     #[command(subcommand)]
     History(history::HistoryCommand),
+    /// Stop recording into History, for DURATION (90, 30s, 5m, 1h30m) or
+    /// until `hoarder resume`. Copies still outlive their apps.
+    Pause {
+        #[arg(value_name = "DURATION", value_parser = pause::parse_duration)]
+        duration: Option<u64>,
+        #[command(flatten)]
+        json: history::Json,
+    },
+    /// Record into History again after `hoarder pause`.
+    Resume {
+        #[command(flatten)]
+        json: history::Json,
+    },
+    /// Show the Daemon's state: recording or Paused, and the clipboard.
+    Status {
+        #[command(flatten)]
+        json: history::Json,
+    },
     /// Run the Daemon in the foreground (what the service runs).
     Daemon,
     /// Install, remove or inspect the Daemon's systemd user service.
@@ -184,6 +204,9 @@ fn main() -> ExitCode {
         Some(Command::Config(command)) => config::run(command, &cli.overrides),
         Some(Command::Clear) => daemon::clear(),
         Some(Command::History(command)) => history::run(command),
+        Some(Command::Pause { duration, json }) => pause::pause(duration, json.json),
+        Some(Command::Resume { json }) => pause::resume(json.json),
+        Some(Command::Status { json }) => pause::status(json.json),
         Some(Command::Daemon) => daemon::run(&cli.overrides),
         Some(Command::Service(command)) => daemon::service::run(command),
         Some(Command::Doctor) => doctor::run(),
