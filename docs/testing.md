@@ -86,7 +86,7 @@ cmd.env("HOARDER_HIDE_GLOBALS", "ext_image_copy_capture_manager_v1");
 cmd.env("HOARDER_HIDE_GLOBALS", "ext_image_copy_capture_manager_v1,zwlr_screencopy_manager_v1");
 ```
 
-It is also handy for bug reports: a user can check whether a capture problem follows one protocol. Hiding `ext_data_control_manager_v1` sends the Daemon to its `wlr-data-control` fallback.
+It is also handy for bug reports: a user can check whether a capture problem follows one protocol. Hiding `ext_data_control_manager_v1` sends the Daemon, and `copy`/`paste` without one, to the `wlr-data-control` fallback.
 
 ## The Daemon (`crates/hoarder/tests/e2e_daemon.rs`)
 

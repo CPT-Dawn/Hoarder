@@ -12,6 +12,7 @@
 
 pub mod capture;
 pub mod clipboard;
+mod data_control;
 pub mod focus;
 mod hyprland;
 pub mod paste;
