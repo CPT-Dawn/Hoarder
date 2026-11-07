@@ -55,7 +55,16 @@ pub struct Entry {
     pub id: i64,
     /// `text`, `image`, `files` or `other`.
     pub kind: String,
+    /// A line of text, an image's size or the file names; for a
+    /// Concealed Clip, only dots.
     pub preview: String,
+    /// The app focused when it was copied, if known.
+    pub app: Option<String>,
+    /// When it was last copied or restored, in ms since the Unix epoch.
+    pub at_ms: Option<i64>,
+    pub pinned: bool,
+    /// Held by the Daemon in memory only; shown masked until Alt is held.
+    pub concealed: bool,
 }
 
 /// Where the Picker reads History from.
@@ -294,7 +303,7 @@ impl App {
             }
         }
         if query != model.query() {
-            let found = history.search(&query);
+            let found = history.search(&model::Filter::parse(&query).text);
             model.set_query(&query, &found);
         }
         self.dirty = true;

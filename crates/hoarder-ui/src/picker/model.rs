@@ -13,6 +13,54 @@ use nucleo_matcher::{Config, Matcher, Utf32Str};
 
 use super::Entry;
 
+/// A query split into its filter prefixes (`img:`, `txt:`, `file:`,
+/// `pin:`, `app:<id>`) and the text to search for.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Filter {
+    /// Kinds to keep (any of them); every kind if empty.
+    kinds: Vec<&'static str>,
+    pinned: bool,
+    /// Lowercased parts of the source app id to keep (all of them).
+    apps: Vec<String>,
+    /// What is left once the filters are taken out, words joined by one
+    /// space.
+    pub(crate) text: String,
+}
+
+impl Filter {
+    pub(crate) fn parse(query: &str) -> Filter {
+        let mut filter = Filter::default();
+        let mut words = Vec::new();
+        for word in query.split_whitespace() {
+            match word {
+                "img:" => filter.kinds.push("image"),
+                "txt:" => filter.kinds.push("text"),
+                "file:" => filter.kinds.push("files"),
+                "pin:" => filter.pinned = true,
+                _ => match word.strip_prefix("app:") {
+                    // `app:` alone is a filter still being typed.
+                    Some("") => {}
+                    Some(app) => filter.apps.push(app.to_lowercase()),
+                    None => words.push(word),
+                },
+            }
+        }
+        filter.text = words.join(" ");
+        filter
+    }
+
+    fn keeps(&self, entry: &Entry) -> bool {
+        (self.kinds.is_empty() || self.kinds.contains(&entry.kind.as_str()))
+            && (!self.pinned || entry.pinned)
+            && self.apps.iter().all(|want| {
+                entry
+                    .app
+                    .as_ref()
+                    .is_some_and(|app| app.to_lowercase().contains(want))
+            })
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct Model {
     /// Every Clip, most recently used first.
@@ -50,22 +98,29 @@ impl Model {
         self.entries.is_empty()
     }
 
-    /// Match `query`; `found` are the ids the full-text search found for it.
-    /// The selection goes back to the best match.
+    /// Match `query`; `found` are the ids the full-text search found for
+    /// its text ([`Filter::text`]). The selection goes back to the best
+    /// match.
     pub(crate) fn set_query(&mut self, query: &str, found: &[i64]) {
         self.query = query.to_owned();
         self.selected = 0;
         self.top = 0;
-        if query.trim().is_empty() {
-            self.shown = (0..self.entries.len()).collect();
+        let filter = Filter::parse(query);
+        let kept = |e: &Entry| filter.keeps(e);
+        if filter.text.is_empty() {
+            self.shown = (0..self.entries.len())
+                .filter(|&i| kept(&self.entries[i]))
+                .collect();
             return;
         }
-        let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+        let pattern = Pattern::parse(&filter.text, CaseMatching::Smart, Normalization::Smart);
         let mut buf = Vec::new();
         let mut scored: Vec<(u32, usize)> = self
             .entries
             .iter()
             .enumerate()
+            // A Concealed Clip's text is never searched.
+            .filter(|(_, e)| kept(e) && !e.concealed)
             .filter_map(|(i, e)| {
                 let score = pattern.score(Utf32Str::new(&e.preview, &mut buf), &mut self.matcher);
                 score.map(|s| (s, i))
@@ -81,6 +136,7 @@ impl Model {
         let mut extra: Vec<usize> = found
             .iter()
             .filter_map(|id| self.by_id.get(id).copied())
+            .filter(|&i| kept(&self.entries[i]) && !self.entries[i].concealed)
             .filter(|&i| !std::mem::replace(&mut seen[i], true))
             .collect();
         extra.sort_unstable();
@@ -129,6 +185,10 @@ mod tests {
                     id: 100 + i as i64,
                     kind: "text".into(),
                     preview: (*p).into(),
+                    app: None,
+                    at_ms: None,
+                    pinned: false,
+                    concealed: false,
                 })
                 .collect(),
         )

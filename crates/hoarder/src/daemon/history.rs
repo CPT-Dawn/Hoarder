@@ -401,6 +401,8 @@ pub(super) fn summary(clip: &Clip) -> ClipSummary {
         pinned: clip.pinned,
         size: clip.size,
         types: clip.types.clone(),
+        sensitivity: Default::default(),
+        expires: None,
     }
 }
 

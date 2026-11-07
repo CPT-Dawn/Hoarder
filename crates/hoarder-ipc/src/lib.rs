@@ -234,6 +234,13 @@ pub struct ClipSummary {
     pub size: u64,
     /// Its MIME types, in the source's order.
     pub types: Vec<String>,
+    /// `concealed` for a Concealed Clip ([`Op::List`] with `concealed`),
+    /// absent (`normal`) for a Clip in History.
+    #[serde(default, skip_serializing_if = "Sensitivity::is_normal")]
+    pub sensitivity: Sensitivity,
+    /// When a Concealed Clip is forgotten (RFC 3339); absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires: Option<String>,
 }
 
 /// The `ok` of [`Op::Get`].
@@ -353,6 +360,12 @@ pub enum Sensitivity {
     Concealed,
     /// Marked by a password manager: never read, stored or restored.
     Secret,
+}
+
+impl Sensitivity {
+    fn is_normal(&self) -> bool {
+        *self == Sensitivity::Normal
+    }
 }
 
 /// Who serves a Selection.

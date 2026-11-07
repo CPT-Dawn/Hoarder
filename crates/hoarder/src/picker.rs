@@ -90,7 +90,15 @@ impl picker::History for Daemon {
             .map(|c| Entry {
                 id: c.id,
                 kind: c.kind,
+                at_ms: c
+                    .at
+                    .parse::<jiff::Timestamp>()
+                    .ok()
+                    .map(|t| t.as_millisecond()),
                 preview: c.preview,
+                app: c.app,
+                pinned: c.pinned,
+                concealed: c.sensitivity == hoarder_ipc::Sensitivity::Concealed,
             })
             .collect())
     }
