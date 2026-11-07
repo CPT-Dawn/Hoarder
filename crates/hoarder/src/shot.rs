@@ -11,6 +11,7 @@ use hoarder_ui::{Options, Outcome, OverlayError, overlay};
 use hoarder_wayland::CaptureError;
 
 use crate::Exit;
+use crate::after::Delivered;
 use crate::cut;
 use crate::image::Image;
 
@@ -63,7 +64,7 @@ pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(),
             }
         }
     };
-    // Until notifications (#68) carry them, the badges go to stderr.
+    // Also on stderr, for runs that end up in a pipe rather than a notification.
     for badge in cut.badges.labels() {
         eprintln!("hoarder: {badge}: {}", explain(badge));
     }
@@ -91,34 +92,64 @@ pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(),
     } else {
         Vec::new()
     };
+    // Only now the Target is chosen: never over the Overlay, never in the Capture.
+    let _flash = crate::after::flash(&config.screenshot);
     if config.screenshot.copy {
         let mut png = Vec::new();
         main.write_png(&mut png)
             .map_err(|e| (Exit::Io, format!("cannot encode the Capture: {e}")))?;
         crate::clipboard::copy_capture(&png)?;
     }
-    if let Some(output) = output {
-        let write = |image: &Image, path: &Path| {
-            deliver(image, path, &config.screenshot)
-                .map_err(|e| (Exit::Io, format!("cannot write {}: {e}", path.display())))
-        };
-        return match parts.as_slice() {
-            [(_, image)] => write(image, output),
-            _ if output == Path::new("-") => {
-                eprintln!(
-                    "hoarder: stdout takes one image; writing the largest of the {} split parts",
-                    parts.len()
-                );
-                write(&main, output)
+    let delivered = |image: &Image, path: Option<PathBuf>| Delivered {
+        path,
+        width: image.width,
+        height: image.height,
+        target: target.name(),
+        badges: cut.badges,
+    };
+    let delivered: Vec<Delivered> = match output {
+        Some(output) => {
+            let write = |image: &Image, path: &Path| {
+                deliver(image, path, &config.screenshot)
+                    .map_err(|e| (Exit::Io, format!("cannot write {}: {e}", path.display())))
+            };
+            match parts.as_slice() {
+                _ if output == Path::new("-") => {
+                    if parts.len() > 1 {
+                        eprintln!(
+                            "hoarder: stdout takes one image; writing the largest of the {} split parts",
+                            parts.len()
+                        );
+                    }
+                    write(&main, output)?;
+                    vec![delivered(&main, None)]
+                }
+                [(_, image)] => {
+                    write(image, output)?;
+                    vec![delivered(image, Some(output.to_owned()))]
+                }
+                _ => parts
+                    .iter()
+                    .map(|(name, image)| {
+                        let path = beside(output, name.as_deref().unwrap_or_default());
+                        write(image, &path)?;
+                        Ok(delivered(image, Some(path)))
+                    })
+                    .collect::<Result<_, _>>()?,
             }
-            _ => parts.iter().try_for_each(|(name, image)| {
-                write(image, &beside(output, name.as_deref().unwrap_or_default()))
-            }),
-        };
-    }
-    for saving in savings {
-        println!("{}", saving.wait()?.display());
-    }
+        }
+        None if savings.is_empty() => vec![delivered(&main, None)],
+        None => savings
+            .into_iter()
+            .zip(&parts)
+            .map(|(saving, (_, image))| {
+                let path = saving.wait()?;
+                println!("{}", path.display());
+                Ok(delivered(image, Some(path)))
+            })
+            .collect::<Result<_, (Exit, String)>>()?,
+    };
+    crate::after::run(&delivered, &config.screenshot);
     Ok(())
 }
 
