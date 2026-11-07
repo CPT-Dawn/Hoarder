@@ -1,5 +1,6 @@
 mod clipboard;
 mod config;
+mod daemon;
 mod image;
 mod save;
 mod shot;
@@ -44,6 +45,13 @@ enum Command {
     /// Read, change and check `config.toml`.
     #[command(subcommand)]
     Config(config::ConfigCommand),
+    /// Empty the clipboard, and keep the Daemon from restoring it.
+    Clear,
+    /// Run the Daemon in the foreground (what the service runs).
+    Daemon,
+    /// Install, remove or inspect the Daemon's systemd user service.
+    #[command(subcommand)]
+    Service(daemon::service::ServiceCommand),
 }
 
 /// Process exit codes (PLAN.md §10). clap exits 2 on its own usage errors.
@@ -80,6 +88,9 @@ fn main() -> ExitCode {
         Some(Command::Paste(args)) => clipboard::paste(args),
         Some(Command::ServeOffer(args)) => clipboard::serve_child(args),
         Some(Command::Config(command)) => config::run(command, &cli.overrides),
+        Some(Command::Clear) => daemon::clear(),
+        Some(Command::Daemon) => daemon::run(&cli.overrides),
+        Some(Command::Service(command)) => daemon::service::run(command),
         None => Ok(()),
     };
     match result {

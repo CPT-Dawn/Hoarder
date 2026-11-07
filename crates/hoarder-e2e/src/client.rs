@@ -153,9 +153,34 @@ impl Client {
     pub fn set_selection(&self, selection: Selection, offer: &[(&str, &[u8])]) -> Result<()> {
         let offer: Offer = offer
             .iter()
-            .map(|(m, d)| (m.to_string(), Arc::new(d.to_vec())))
+            .map(|(m, d)| (m.to_string(), Arc::new(Reply::Now(d.to_vec()))))
             .collect();
         self.call(move |w| w.set_selection(selection, offer))
+    }
+
+    /// Like [`set_selection`](Self::set_selection), but each type answers a
+    /// paste the way its [`Reply`] says: at once, late, or never. Use it to
+    /// play a slow or stuck source app.
+    pub fn set_selection_replying(
+        &self,
+        selection: Selection,
+        offer: Vec<(&str, Reply)>,
+    ) -> Result<()> {
+        let offer: Offer = offer
+            .into_iter()
+            .map(|(m, r)| (m.to_string(), Arc::new(r)))
+            .collect();
+        self.call(move |w| w.set_selection(selection, offer))
+    }
+
+    /// Whether this client still owns `selection`: true from
+    /// [`set_selection`](Self::set_selection) until the compositor cancels the
+    /// source because someone else set the Selection (or cleared it).
+    pub fn owns_selection(&self, selection: Selection) -> Result<bool> {
+        self.call(move |w| {
+            w.roundtrip()?;
+            Ok(w.state.owned[selection as usize].is_some())
+        })
     }
 
     /// Disconnect from the compositor, as if the app had quit.
@@ -180,8 +205,19 @@ impl Drop for Client {
     }
 }
 
-/// The representations a data source serves: `(MIME type, bytes)` in order.
-type Offer = Vec<(String, Arc<Vec<u8>>)>;
+/// The representations a data source serves: `(MIME type, reply)` in order.
+type Offer = Vec<(String, Arc<Reply>)>;
+
+/// How a helper's data source answers a paste of one MIME type.
+#[derive(Debug, Clone)]
+pub enum Reply {
+    /// Write these bytes straight away.
+    Now(Vec<u8>),
+    /// Wait this long, then write the bytes.
+    After(Duration, Vec<u8>),
+    /// Keep the pipe open and write nothing until the client exits.
+    Never,
+}
 
 /// One of the two Wayland Selections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,6 +254,10 @@ pub(crate) struct State {
     copies: HashMap<ObjectId, Copy>,
     /// What each live data source offers, by MIME type.
     sources: HashMap<ObjectId, Offer>,
+    /// The source currently set on each Selection, until it is cancelled.
+    owned: [Option<ObjectId>; 2],
+    /// Pipes of [`Reply::Never`] pastes, held open until the client exits.
+    stalled: Vec<OwnedFd>,
     input: input::InputState,
 }
 
@@ -433,6 +473,7 @@ impl Worker {
             source.offer(mime.clone());
         }
         self.state.sources.insert(source.id(), offer);
+        self.state.owned[selection as usize] = Some(source.id());
         let device = self.data_device.as_ref().expect("created above");
         match selection {
             Selection::Clipboard => device.set_selection(Some(&source)),
@@ -698,14 +739,31 @@ impl Dispatch<ExtDataControlSourceV1, ()> for State {
                         .find(|(m, _)| *m == mime_type)
                         .map(|(_, d)| d.clone())
                 });
-                if let Some(data) = data {
+                match data {
+                    Some(reply) if matches!(*reply, Reply::Never) => state.stalled.push(fd),
                     // Write off-thread so a slow reader never stalls the event loop.
-                    std::thread::spawn(move || {
-                        let _ = std::fs::File::from(fd).write_all(&data);
-                    });
+                    Some(reply) => {
+                        std::thread::spawn(move || {
+                            let bytes = match &*reply {
+                                Reply::Now(b) => b,
+                                Reply::After(delay, b) => {
+                                    std::thread::sleep(*delay);
+                                    b
+                                }
+                                Reply::Never => return,
+                            };
+                            let _ = std::fs::File::from(fd).write_all(bytes);
+                        });
+                    }
+                    None => {}
                 }
             }
             ext_data_control_source_v1::Event::Cancelled => {
+                for owned in &mut state.owned {
+                    if owned.as_ref() == Some(&source.id()) {
+                        *owned = None;
+                    }
+                }
                 state.sources.remove(&source.id());
                 source.destroy();
             }

@@ -9,15 +9,21 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+calloop.workspace = true
 clap.workspace = true
 hoarder-config.workspace = true
+hoarder-ipc.workspace = true
 hoarder-wayland.workspace = true
 jiff.workspace = true
 png.workspace = true
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 hoarder-e2e.workspace = true
 png.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

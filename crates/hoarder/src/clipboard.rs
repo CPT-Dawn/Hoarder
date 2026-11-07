@@ -12,7 +12,7 @@ use hoarder_wayland::clipboard::{Clipboard, ClipboardError, Representation, Sele
 use crate::Exit;
 
 /// The KDE hint password managers set; its value is `secret`.
-const PASSWORD_HINT: &str = "x-kde-passwordManagerHint";
+pub(crate) const PASSWORD_HINT: &str = "x-kde-passwordManagerHint";
 
 /// The aliases X11-era apps look for, offered with every text copy.
 const TEXT_ALIASES: [&str; 5] = [

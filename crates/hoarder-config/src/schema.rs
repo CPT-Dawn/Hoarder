@@ -330,6 +330,9 @@ pub struct Clipboard {
     pub persist: bool,
     pub deny_types: Vec<String>,
     pub max_offer_mb: Count,
+    /// App ids whose copies the Daemon never takes over (the escape hatch
+    /// for apps that misbehave when Hoarder serves their Selection).
+    pub no_takeover_apps: Vec<String>,
     pub on_clip: String,
     pub primary: Primary,
 }
@@ -340,6 +343,7 @@ impl Default for Clipboard {
             persist: true,
             deny_types: Vec::new(),
             max_offer_mb: Int::new(64),
+            no_takeover_apps: Vec::new(),
             on_clip: String::new(),
             primary: Primary::default(),
         }
