@@ -183,7 +183,7 @@ mod tests {
             &[
                 "AKIAIOSFODNN7EXAMPLE",
                 "aws_access_key_id = AKIAIOSFODNN7EXAMPLE\n",
-                "ASIAY34FZKBOKMUTVV7A",
+                concat!("ASIA", "IOSFODNN7EXAMPLE"),
             ],
             &[
                 "AKIA",
