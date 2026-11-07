@@ -10,9 +10,12 @@ authors.workspace = true
 
 [dependencies]
 clap.workspace = true
+hoarder-wayland.workspace = true
+png.workspace = true
 
 [dev-dependencies]
 hoarder-e2e.workspace = true
+png.workspace = true
 
 [lints]
 workspace = true

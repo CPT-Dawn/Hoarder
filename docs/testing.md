@@ -54,12 +54,25 @@ let image = session.screenshot("HEADLESS-1")?; // grim: what the user sees
 What it guarantees:
 
 - **Session**: outputs are named `HEADLESS-1`… in the order given and laid out left to right. `Session::start` returns once every output is active. `Session::swaymsg` runs IPC commands against it.
-- **Painting**: a background layer-shell surface per output. The buffer is the output's physical size, mapped 1:1 through `wp_viewporter`, so the pattern lands on physical pixels at any scale or rotation. `paint_as(…, PixelFormat::Xrgb2101010)` paints 10-bit values; `Rgb10` colours with no 8-bit equivalent come back bit-exact from `capture` on a 10-bit output. Each call returns after the frame is presented.
+- **Painting**: a background layer-shell surface per output. The buffer is the output's physical size, mapped 1:1 through `wp_viewporter`, so the pattern lands on physical pixels at any scale or rotation. `paint_as(…, PixelFormat::Xrgb2101010)` paints 10-bit values; `Rgb10` colours with no 8-bit equivalent come back bit-exact from `capture` on a 10-bit output. `Pattern::Ramp` covers every 10-bit value of every channel; `Pattern::Checker { cell: 1 }` shows any resampling. Each call returns after the frame is presented.
 - **Selections**: set over `ext-data-control-v1`, so no focus is needed; payloads of any size are written off-thread. `exit()` (or dropping the client) closes the connection, and the compositor clears the Selection exactly as it does when a real app quits.
 - **Input**: `wlr-virtual-pointer` with absolute motion in output-logical coordinates, and `zwp-virtual-keyboard` with a US keymap. The harness tracks modifiers itself, because the protocol leaves that to the client. Every call returns after the compositor has processed it.
 - **Probe windows**: plain `xdg_toplevel`s that Sway tiles and focuses like any new app. They record `InputEvent`s (enter, motion, buttons, keys, modifiers).
 
 Every helper call times out after 10 s with an error rather than hanging the test.
+
+## Pretending a protocol is missing
+
+`HOARDER_HIDE_GLOBALS` takes a comma-separated list of Wayland global interface names that `hoarder` then treats as absent. Headless Sway offers every protocol Hoarder uses, so this is how tests reach the other paths:
+
+```rust
+// Force the wlr-screencopy fallback.
+cmd.env("HOARDER_HIDE_GLOBALS", "ext_image_copy_capture_manager_v1");
+// Look like KWin: no capture protocol at all (exit code 3).
+cmd.env("HOARDER_HIDE_GLOBALS", "ext_image_copy_capture_manager_v1,zwlr_screencopy_manager_v1");
+```
+
+It is also handy for bug reports: a user can check whether a capture problem follows one protocol.
 
 ## CI (`.github/workflows/ci.yml`)
 

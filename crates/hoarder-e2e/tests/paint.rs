@@ -118,3 +118,21 @@ fn paints_upright_on_rotated_outputs() {
     assert_quadrants(&session, "HEADLESS-2", (480, 640));
     assert_quadrants(&session, "HEADLESS-3", (640, 480));
 }
+
+#[test]
+fn paints_every_10bit_value_with_the_ramp() {
+    let session = Session::start(&[OutputSpec::new(64, 32).depth(BitDepth::Ten)]).unwrap();
+    let client = session.client().unwrap();
+    let output = session.output("HEADLESS-1");
+
+    client
+        .paint_as(output, &Pattern::Ramp, PixelFormat::Xrgb2101010)
+        .unwrap();
+
+    let frame = client.capture(output).unwrap();
+    // Pixel i is (i, 7i + 3, 1023 - i) mod 1024.
+    assert_eq!(frame.pixel(0, 0), Rgb10(0, 3, 1023));
+    assert_eq!(frame.pixel(1, 0), Rgb10(1, 10, 1022));
+    assert_eq!(frame.pixel(63, 15), Rgb10(1023, 1020, 0));
+    assert_eq!(frame.pixel(0, 16), Rgb10(0, 3, 1023));
+}
