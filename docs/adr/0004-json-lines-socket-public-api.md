@@ -5,3 +5,4 @@ All Front ends, including Hoarder's own CLI and Picker and the Zenith `clipboard
 ## Consequences
 
 - Zenith gains a native `clipboard` module that is just another Front end; Zenith has no IPC of its own, so the dependency points one way (Zenith → Hoarder socket) and Zenith must tolerate the Daemon being absent.
+- The request/response/event types live in a separate `hoarder-ipc` crate published to crates.io, so Zenith and third parties depend on the contract rather than copying it; breaking changes bump both the protocol `v` and the crate's major version.

@@ -60,6 +60,14 @@ _Avoid_: selector, slurp UI
 The native-resolution copy of one output taken before the Overlay appears; the Overlay shows it and the Capture is cut from it.
 _Avoid_: freeze, snapshot, background
 
+**Refine**:
+The optional step after drawing a Region where it can be resized and confirmed before the Capture is taken.
+_Avoid_: edit mode, adjust mode, confirm screen
+
+**Loupe**:
+The magnified pixel grid that follows the cursor in the Overlay.
+_Avoid_: magnifier, zoom, lens
+
 **Target**:
 What a Capture covers: a **Region** (user-drawn rectangle), a **Window**, an **Output** (one monitor), or **All Outputs**.
 _Avoid_: mode, area, screen (for Output)
