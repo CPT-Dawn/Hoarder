@@ -1,3 +1,4 @@
+mod clipboard;
 mod config;
 mod image;
 mod save;
@@ -29,7 +30,17 @@ enum Command {
         /// to `screenshot.dir`.
         #[arg(short = 'o', long = "output", value_name = "PATH")]
         output: Option<PathBuf>,
+        /// Leave the clipboard alone (`screenshot.copy = false` for this run).
+        #[arg(long)]
+        no_copy: bool,
     },
+    /// Copy stdin or text to the clipboard (accepts every wl-copy flag).
+    Copy(clipboard::CopyArgs),
+    /// Paste the clipboard to stdout (accepts every wl-paste flag).
+    Paste(clipboard::PasteArgs),
+    /// Serve an Offer read from stdin; started by Hoarder itself.
+    #[command(name = clipboard::SERVE_SUBCOMMAND, hide = true)]
+    ServeOffer(clipboard::ServeArgs),
     /// Read, change and check `config.toml`.
     #[command(subcommand)]
     Config(config::ConfigCommand),
@@ -39,6 +50,8 @@ enum Command {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exit {
     Success = 0,
+    /// Cancelled by the user, or (for `paste`) nothing to paste.
+    Cancelled = 1,
     /// Bad arguments or an invalid config.
     Usage = 2,
     /// Unsupported compositor or protocol.
@@ -55,8 +68,17 @@ impl From<Exit> for ExitCode {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
-        Some(Command::Shot { target, output }) => config::effective(&cli.overrides)
-            .and_then(|config| shot::run(target, output.as_deref(), &config)),
+        Some(Command::Shot {
+            target,
+            output,
+            no_copy,
+        }) => config::effective(&cli.overrides).and_then(|mut config| {
+            config.screenshot.copy &= !no_copy;
+            shot::run(target, output.as_deref(), &config)
+        }),
+        Some(Command::Copy(args)) => clipboard::copy(args),
+        Some(Command::Paste(args)) => clipboard::paste(args),
+        Some(Command::ServeOffer(args)) => clipboard::serve_child(args),
         Some(Command::Config(command)) => config::run(command, &cli.overrides),
         None => Ok(()),
     };
