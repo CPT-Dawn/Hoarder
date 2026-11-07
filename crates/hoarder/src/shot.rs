@@ -2,23 +2,38 @@
 
 use std::io::Write as _;
 use std::path::Path;
+use std::time::Instant;
 
 use clap::ValueEnum;
 use hoarder_config::Config;
+use hoarder_ui::{Outcome, OverlayError, overlay};
 use hoarder_wayland::CaptureError;
 
 use crate::Exit;
 use crate::image::Image;
 
-/// What a Capture covers. Region, Window and Output need the Overlay (#61).
+/// What a Capture covers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Target {
+    /// A rectangle dragged out on the Overlay; it may span outputs.
+    Region,
     /// Every output, as one image laid out like the desktop.
     All,
 }
 
+impl Target {
+    /// The name used in file name templates.
+    fn name(self) -> &'static str {
+        match self {
+            Target::Region => "region",
+            Target::All => "all",
+        }
+    }
+}
+
 /// Capture `target`. `output` (`-o`) replaces saving to `screenshot.dir`.
 pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(), (Exit, String)> {
+    let started = Instant::now();
     let frozen = hoarder_wayland::freeze().map_err(|e| {
         let code = match e {
             CaptureError::NoWayland(_) | CaptureError::Unsupported(_) => Exit::Unsupported,
@@ -28,6 +43,16 @@ pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(),
     })?;
     let image = match target {
         Target::All => Image::all_outputs(&frozen.frames),
+        Target::Region => match overlay::run(&frozen, started).map_err(|e| {
+            let code = match e {
+                OverlayError::Unsupported(_) => Exit::Unsupported,
+                OverlayError::Failed(_) => Exit::Io,
+            };
+            (code, e.to_string())
+        })? {
+            Outcome::Region(region) => Image::region(&frozen.frames, &region),
+            Outcome::Cancelled => return Err((Exit::Cancelled, "cancelled".into())),
+        },
     };
     if config.screenshot.copy {
         let mut png = Vec::new();
@@ -40,7 +65,7 @@ pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(),
         Some(output) => deliver(&image, output)
             .map_err(|e| (Exit::Io, format!("cannot write {}: {e}", output.display()))),
         None if config.screenshot.save => {
-            let path = crate::save::save(&image, "all", None, &config.screenshot)?;
+            let path = crate::save::save(&image, target.name(), None, &config.screenshot)?;
             println!("{}", path.display());
             Ok(())
         }
