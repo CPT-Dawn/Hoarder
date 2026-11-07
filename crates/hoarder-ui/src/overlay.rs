@@ -13,7 +13,7 @@ use std::io::Write as _;
 use std::os::fd::AsFd;
 use std::time::Instant;
 
-use hoarder_wayland::{Frozen, FrozenFrame};
+use hoarder_wayland::{Frozen, FrozenFrame, Window};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, FrameCallbackData},
     delegate_registry,
@@ -55,8 +55,9 @@ use wayland_protocols::wp::{
     viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
 };
 
-use crate::chrome::{DIM, Fonts, Scene};
+use crate::chrome::{DIM, Fonts, Highlight, Scene};
 use crate::geom::Rect;
+use crate::snap::Hover;
 
 /// Set to print how long the Overlay took to become visible.
 pub const TIMINGS_ENV: &str = "HOARDER_TIMINGS";
@@ -75,10 +76,12 @@ pub struct Region {
 }
 
 /// How the user left the Overlay.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
     /// A Region was dragged out and released.
     Region(Region),
+    /// A click on a highlighted window.
+    Window(Window),
     /// Esc or right-click.
     Cancelled,
 }
@@ -118,9 +121,11 @@ fn failed(e: impl std::fmt::Display) -> OverlayError {
 }
 
 /// Show the Overlay over `frozen` and wait for the user to pick a Region or
+/// one of `windows` (topmost first, as a
+/// [`WindowGeometry`](hoarder_wayland::WindowGeometry) gives them), or to
 /// cancel. `started` is when the user asked for the Capture; with
 /// [`TIMINGS_ENV`] set, the time until the Overlay is visible is printed.
-pub fn run(frozen: &Frozen, started: Instant) -> Result<Outcome, OverlayError> {
+pub fn run(frozen: &Frozen, windows: &[Window], started: Instant) -> Result<Outcome, OverlayError> {
     timing(started, "frozen");
     let conn = Connection::connect_to_env().map_err(failed)?;
     let (globals, mut queue): (_, EventQueue<App>) = registry_queue_init(&conn).map_err(failed)?;
@@ -156,6 +161,7 @@ pub fn run(frozen: &Frozen, started: Instant) -> Result<Outcome, OverlayError> {
         views: Vec::new(),
         fonts: Fonts::load(),
         drag: None,
+        hover: Hover::new(windows.to_vec()),
         outcome: None,
         started,
         visible_reported: false,
@@ -207,7 +213,17 @@ struct Drag {
     cursor: (f64, f64),
 }
 
+/// How far (logical pixels, each way) the pointer may wander between press
+/// and release for it to still count as a click.
+const CLICK_SLOP: f64 = 3.0;
+
 impl Drag {
+    /// Still close enough to the press to be a click, not a drag.
+    fn is_click(&self) -> bool {
+        (self.cursor.0 - self.anchor.0).abs() < CLICK_SLOP
+            && (self.cursor.1 - self.anchor.1).abs() < CLICK_SLOP
+    }
+
     fn region(&self) -> Region {
         let (x0, x1) = min_max(self.anchor.0, self.cursor.0);
         let (y0, y1) = min_max(self.anchor.1, self.cursor.1);
@@ -504,6 +520,7 @@ struct App {
     views: Vec<View>,
     fonts: Fonts,
     drag: Option<Drag>,
+    hover: Hover,
     outcome: Option<Outcome>,
     started: Instant,
     visible_reported: bool,
@@ -516,10 +533,16 @@ impl App {
             .position(|v| v.layer.wl_surface() == surface)
     }
 
-    /// Recompute every output's scene from the drag and draw what changed.
+    /// Recompute every output's scene from the drag and the hovered window,
+    /// and draw what changed.
     fn update(&mut self, qh: &QueueHandle<App>) {
         let region = self.drag.map(|d| d.region());
+        let hovered = self
+            .hover
+            .current()
+            .filter(|_| self.drag.is_none_or(|d| d.is_click()));
         for i in 0..self.views.len() {
+            let window = hovered.and_then(|w| self.highlight(i, w));
             let view = &self.views[i];
             let selection = region
                 .map(|r| view.to_physical(&r))
@@ -545,12 +568,53 @@ impl App {
                 _ => None,
             };
             let view = &mut self.views[i];
-            view.wanted = Scene { selection, label };
+            view.wanted = Scene {
+                window,
+                selection,
+                label,
+            };
             if let Err(e) = view.redraw(&mut self.pool, qh) {
                 self.outcome = Some(Outcome::Cancelled);
                 eprintln!("hoarder: cannot draw the Overlay: {e}");
             }
         }
+    }
+
+    /// Window `index` as highlighted on output `view`, if it shows there.
+    fn highlight(&mut self, view: usize, index: usize) -> Option<Highlight> {
+        let view = &self.views[view];
+        let r = self.hover.window(index).rect;
+        let rect = view.to_physical(&Region {
+            x: r.x as f64,
+            y: r.y as f64,
+            width: r.width as f64,
+            height: r.height as f64,
+        });
+        let shown = rect.intersect(&Rect::new(0, 0, view.size.0 as i32, view.size.1 as i32));
+        if shown.is_empty() {
+            return None;
+        }
+        if let Some(h) = &view.drawn.window
+            && h.index == index
+            && h.rect == rect
+        {
+            return Some(h.clone());
+        }
+        let window = self.hover.window(index);
+        let text = if window.title.is_empty() {
+            &window.app_id
+        } else {
+            &window.title
+        };
+        let label = (!text.is_empty()).then(|| {
+            let (sx, _) = view.scale();
+            let mut l = self.fonts.label(&ellipsize(text, 80), sx, 0, 0);
+            // Centred on the part of the window this output shows.
+            l.rect.x = shown.x + ((shown.w - l.rect.w) / 2).max(0);
+            l.rect.y = shown.y + ((shown.h - l.rect.h) / 2).max(0);
+            l
+        });
+        Some(Highlight { index, rect, label })
     }
 
     fn pointer_event(&mut self, event: &PointerEvent, qh: &QueueHandle<App>) {
@@ -564,6 +628,8 @@ impl App {
                 if let Some(device) = &self.cursor_device {
                     device.set_shape(serial, Shape::Crosshair);
                 }
+                self.hover.point(at);
+                self.update(qh);
             }
             PointerEventKind::Press {
                 button: BTN_LEFT, ..
@@ -577,14 +643,21 @@ impl App {
             PointerEventKind::Motion { .. } => {
                 if let Some(drag) = &mut self.drag {
                     drag.cursor = at;
-                    self.update(qh);
                 }
+                self.hover.point(at);
+                self.update(qh);
             }
             PointerEventKind::Release {
                 button: BTN_LEFT, ..
             } => {
                 if let Some(mut drag) = self.drag.take() {
                     drag.cursor = at;
+                    if drag.is_click()
+                        && let Some(w) = self.hover.current()
+                    {
+                        self.outcome = Some(Outcome::Window(self.hover.window(w).clone()));
+                        return;
+                    }
                     let region = drag.region();
                     let (sx, sy) = self.views[i].scale();
                     if (region.width * sx).round() >= 1.0 && (region.height * sy).round() >= 1.0 {
@@ -600,6 +673,16 @@ impl App {
             _ => {}
         }
     }
+}
+
+/// `text`, cut to at most `max` characters with an ellipsis.
+fn ellipsize(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let mut out: String = text.chars().take(max - 1).collect();
+    out.push('…');
+    out
 }
 
 /// Where the size label goes: just below the selection, or above it when
@@ -793,13 +876,18 @@ impl KeyboardHandler for App {
     fn press_key(
         &mut self,
         _: &Connection,
-        _: &QueueHandle<Self>,
+        qh: &QueueHandle<Self>,
         _: &WlKeyboard,
         _: u32,
         event: KeyEvent,
     ) {
-        if event.keysym == Keysym::Escape {
-            self.outcome = Some(Outcome::Cancelled);
+        match event.keysym {
+            Keysym::Escape => self.outcome = Some(Outcome::Cancelled),
+            Keysym::w | Keysym::W => {
+                self.hover.cycle();
+                self.update(qh);
+            }
+            _ => {}
         }
     }
 

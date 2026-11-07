@@ -6,8 +6,8 @@ use std::time::Instant;
 
 use clap::ValueEnum;
 use hoarder_config::Config;
-use hoarder_ui::{Outcome, OverlayError, overlay};
-use hoarder_wayland::CaptureError;
+use hoarder_ui::{Outcome, OverlayError, Region, overlay};
+use hoarder_wayland::{CaptureError, Window};
 
 use crate::Exit;
 use crate::image::Image;
@@ -34,6 +34,9 @@ impl Target {
 /// Capture `target`. `output` (`-o`) replaces saving to `screenshot.dir`.
 pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(), (Exit, String)> {
     let started = Instant::now();
+    // Ask where the windows are while the outputs freeze, so both describe
+    // the same moment.
+    let windows = (target == Target::Region).then(|| std::thread::spawn(windows));
     let frozen = hoarder_wayland::freeze().map_err(|e| {
         let code = match e {
             CaptureError::NoWayland(_) | CaptureError::Unsupported(_) => Exit::Unsupported,
@@ -41,16 +44,27 @@ pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(),
         };
         (code, e.to_string())
     })?;
-    let image = match target {
-        Target::All => Image::all_outputs(&frozen.frames),
-        Target::Region => match overlay::run(&frozen, started).map_err(|e| {
+    let windows = windows.and_then(|t| t.join().ok()).unwrap_or_default();
+    let (image, target_name) = match target {
+        Target::All => (Image::all_outputs(&frozen.frames), target.name()),
+        Target::Region => match overlay::run(&frozen, &windows, started).map_err(|e| {
             let code = match e {
                 OverlayError::Unsupported(_) => Exit::Unsupported,
                 OverlayError::Failed(_) => Exit::Io,
             };
             (code, e.to_string())
         })? {
-            Outcome::Region(region) => Image::region(&frozen.frames, &region),
+            Outcome::Region(region) => (Image::region(&frozen.frames, &region), "region"),
+            Outcome::Window(window) => {
+                let r = window.rect;
+                let region = Region {
+                    x: r.x as f64,
+                    y: r.y as f64,
+                    width: r.width as f64,
+                    height: r.height as f64,
+                };
+                (Image::region(&frozen.frames, &region), "window")
+            }
             Outcome::Cancelled => return Err((Exit::Cancelled, "cancelled".into())),
         },
     };
@@ -65,12 +79,23 @@ pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(),
         Some(output) => deliver(&image, output)
             .map_err(|e| (Exit::Io, format!("cannot write {}: {e}", output.display()))),
         None if config.screenshot.save => {
-            let path = crate::save::save(&image, target.name(), None, &config.screenshot)?;
+            let path = crate::save::save(&image, target_name, None, &config.screenshot)?;
             println!("{}", path.display());
             Ok(())
         }
         None => Ok(()),
     }
+}
+
+/// The windows the Overlay can snap to. Without a provider there are none;
+/// if the compositor cannot tell, say why and carry on without them.
+fn windows() -> Vec<Window> {
+    hoarder_wayland::windows::detect()
+        .windows()
+        .unwrap_or_else(|e| {
+            eprintln!("hoarder: no window snapping: {e}");
+            Vec::new()
+        })
 }
 
 fn deliver(image: &Image, output: &Path) -> std::io::Result<()> {
