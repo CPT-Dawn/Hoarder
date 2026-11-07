@@ -596,11 +596,7 @@ type RawRepr = (i64, String, Option<Vec<u8>>, Option<Vec<u8>>);
 
 /// Store one representation, sealed with `key` if given: inline if small,
 /// else as a blob file. Returns the `inline` and `blob_hash` columns.
-fn store_repr(
-    blobs: &Path,
-    key: Option<&Key>,
-    data: &[u8],
-) -> Result<StoredRepr> {
+fn store_repr(blobs: &Path, key: Option<&Key>, data: &[u8]) -> Result<StoredRepr> {
     // Decided on the plain size, so sealing never moves the line.
     if data.len() <= INLINE_MAX {
         let inline = match key {

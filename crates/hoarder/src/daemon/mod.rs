@@ -5,6 +5,7 @@
 //! timers run while idle.
 
 mod history;
+mod keyring;
 mod reader;
 pub mod service;
 mod socket;
@@ -77,7 +78,7 @@ pub fn run(overrides: &[(String, String)]) -> Result<(), Fail> {
         }
     };
 
-    let history = history::History::start(&handle);
+    let history = history::History::start(&handle, config.history.encrypt);
     let mut daemon = Daemon {
         handle,
         history,
@@ -587,6 +588,11 @@ impl Daemon {
         }
         match hoarder_config::with_overrides(&text, &self.overrides) {
             Ok(config) => {
+                if config.history.encrypt != self.config.history.encrypt {
+                    let _ = self
+                        .history
+                        .send(history::Job::Encrypt(config.history.encrypt));
+                }
                 self.config = config;
                 for which in SELECTIONS {
                     if !self.watched(which) {
