@@ -2,8 +2,9 @@
 //! says once that History is off when no Daemon is there to keep it.
 
 use std::process::Stdio;
+use std::time::Duration;
 
-use hoarder_e2e::{OutputSpec, Pattern, Session};
+use hoarder_e2e::{OutputSpec, Pattern, Session, budget};
 
 const HOARDER: &str = env!("CARGO_BIN_EXE_hoarder");
 
@@ -117,7 +118,7 @@ fn a_4k_capture_reaches_the_clipboard_within_150_ms() {
     painter
         .paint(session.output("HEADLESS-1"), &Pattern::Ramp)
         .unwrap();
-    let mut best = std::time::Duration::MAX;
+    let mut best = Duration::MAX;
     for _ in 0..5 {
         let start = std::time::Instant::now();
         let (status, stderr) = shot_all(&session, &["--set", "screenshot.save=false"]);
@@ -125,7 +126,10 @@ fn a_4k_capture_reaches_the_clipboard_within_150_ms() {
         assert!(status.success(), "hoarder shot all failed: {stderr}");
         best = best.min(took);
     }
-    eprintln!("4K shot-to-clipboard: best of 5 = {best:?}");
     assert!(wl_paste(&session, &["-t", "image/png"]).status.success());
-    assert!(best.as_millis() < 150, "took {best:?}");
+    budget::assert_within(
+        "4K shot-to-clipboard, best of 5",
+        best,
+        Duration::from_millis(150),
+    );
 }

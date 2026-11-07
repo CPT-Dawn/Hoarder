@@ -272,12 +272,14 @@ fn copy_and_paste_agree_with_wl_clipboard() {
     }
 }
 
-/// Wait until `path` holds `lines` lines, then return its text.
+/// Wait until `path` holds `lines` complete (newline-terminated) lines, then
+/// return its text. A line still being written does not count, or the
+/// watcher's command could be caught halfway through its last line.
 fn wait_for_lines(path: &std::path::Path, lines: usize) -> String {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let text = std::fs::read_to_string(path).unwrap_or_default();
-        if text.lines().count() >= lines {
+        if text.matches('\n').count() >= lines {
             return text;
         }
         assert!(
@@ -286,6 +288,23 @@ fn wait_for_lines(path: &std::path::Path, lines: usize) -> String {
         );
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[test]
+fn wait_for_lines_waits_out_a_half_written_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("log");
+    std::fs::write(&path, "one\ntwo").unwrap();
+    let writer = {
+        let path = path.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            let mut log = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            log.write_all(b"\n").unwrap();
+        })
+    };
+    assert_eq!(wait_for_lines(&path, 2), "one\ntwo\n");
+    writer.join().unwrap();
 }
 
 /// What `paste --watch` saw: one line per run of its command, holding

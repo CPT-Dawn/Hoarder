@@ -3,7 +3,7 @@ name: CI
 
 on:
   push:
-    branches: [main, "integration/**", "ticket/**"]
+    branches: [main, "integration/**", "ticket/**", "fix/**"]
   pull_request:
   workflow_dispatch:
 
@@ -81,8 +81,16 @@ jobs:
       - name: cargo test
         run: runuser -u tester -- cargo test --workspace --locked
       # Latency budgets mean nothing in a debug build, so they run optimised.
+      # Shared runners measure 1.3-1.7x a desktop on the 4K budgets; 3x keeps
+      # headroom without hiding a real regression (docs/testing.md).
       - name: cargo test --release (timing budgets)
-        run: runuser -u tester -- cargo test --release --locked -p hoarder --test e2e_shot_clipboard 150_ms
+        env:
+          HOARDER_BUDGET_SCALE: "3"
+        run: >-
+          runuser -u tester -- env HOARDER_BUDGET_SCALE="$HOARDER_BUDGET_SCALE"
+          cargo test --release --locked -p hoarder
+          --test e2e_shot_clipboard --test e2e_overlay
+          -- 150_ms budget --nocapture
 
   deny:
     name: cargo-deny

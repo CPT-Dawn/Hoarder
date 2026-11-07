@@ -8,6 +8,7 @@
 //!
 //! See `docs/testing.md` for how to run it and what it needs.
 
+pub mod budget;
 mod client;
 mod frame;
 mod image;
