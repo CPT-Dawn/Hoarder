@@ -29,6 +29,10 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 inotify = { version = "0.11", default-features = false }
 jiff = "0.2"
 png = "0.18"
+# Secret patterns (ADR-0006); byte regexes, so Clip text is never copied to match.
+regex = "1.13"
+# mlock without unsafe code: Concealed Clips stay out of swap.
+region = "4.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 # Bundled SQLite 3.54: FTS5 and the trigram tokenizer are compiled in.
@@ -45,6 +49,7 @@ wayland-protocols = { version = "0.32", features = ["client", "staging", "unstab
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 wayland-scanner = "0.31"
+zeroize = "1.9"
 # zbus 6 has no blocking API: drive it with `zbus::block_on`.
 zbus = { version = "6.2", default-features = false, features = ["default-rt", "proxy"] }
 

@@ -250,6 +250,23 @@ pub struct SelectionStatus {
     pub kept: Vec<String>,
     /// Whether the Daemon is still reading the current Offer.
     pub reading: bool,
+    /// How private the current Selection is; `normal` until a read shows
+    /// otherwise.
+    #[serde(default)]
+    pub sensitivity: Sensitivity,
+}
+
+/// How private a Selection change is (ADR-0006).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Sensitivity {
+    /// Stored in History.
+    #[default]
+    Normal,
+    /// Looks private: held in locked memory only, masked, short-lived.
+    Concealed,
+    /// Marked by a password manager: never read, stored or restored.
+    Secret,
 }
 
 /// Who serves a Selection.
