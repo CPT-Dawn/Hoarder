@@ -15,7 +15,9 @@ use wayland_client::globals::{GlobalList, GlobalListContents, registry_queue_ini
 use wayland_client::protocol::{
     wl_buffer::WlBuffer,
     wl_output::{self, WlOutput},
+    wl_pointer::WlPointer,
     wl_registry::WlRegistry,
+    wl_seat::{self, WlSeat},
     wl_shm::{self, WlShm},
     wl_shm_pool::WlShmPool,
 };
@@ -25,6 +27,7 @@ use wayland_protocols::ext::image_capture_source::v1::client::{
     ext_output_image_capture_source_manager_v1::ExtOutputImageCaptureSourceManagerV1,
 };
 use wayland_protocols::ext::image_copy_capture::v1::client::{
+    ext_image_copy_capture_cursor_session_v1::{self, ExtImageCopyCaptureCursorSessionV1},
     ext_image_copy_capture_frame_v1::{self, ExtImageCopyCaptureFrameV1},
     ext_image_copy_capture_manager_v1::{ExtImageCopyCaptureManagerV1, Options},
     ext_image_copy_capture_session_v1::{self, ExtImageCopyCaptureSessionV1},
@@ -164,6 +167,25 @@ impl ShmFormat {
             [hi as u16, mid as u16, lo as u16]
         }
     }
+
+    /// `pixel` with its colour replaced by `rgb` (at
+    /// [`bits_per_channel`](Self::bits_per_channel)), alpha or padding kept.
+    pub fn with_rgb(self, pixel: u32, [r, g, b]: [u16; 3]) -> u32 {
+        let bgr = matches!(
+            self,
+            ShmFormat::Xbgr8888
+                | ShmFormat::Abgr8888
+                | ShmFormat::Xbgr2101010
+                | ShmFormat::Abgr2101010
+        );
+        let (hi, mid, lo) = if bgr { (b, g, r) } else { (r, g, b) };
+        let (hi, mid, lo) = (hi as u32, mid as u32, lo as u32);
+        if self.bits_per_channel() == 8 {
+            (pixel & 0xff00_0000) | (hi & 0xff) << 16 | (mid & 0xff) << 8 | (lo & 0xff)
+        } else {
+            (pixel & 0xc000_0000) | (hi & 0x3ff) << 20 | (mid & 0x3ff) << 10 | (lo & 0x3ff)
+        }
+    }
 }
 
 /// An output transform, with `wl_output` semantics: the buffer must be rotated
@@ -221,6 +243,28 @@ impl Transform {
                 | Transform::Flipped270
         )
     }
+
+    /// Which pixel of a `w`×`h` buffer shows at upright position `(ux, uy)`:
+    /// the inverse of rotating clockwise by the angle, then mirroring
+    /// horizontally for `Flipped*`.
+    pub fn buffer_position(self, ux: u32, uy: u32, w: u32, h: u32) -> (u32, u32) {
+        let upright_width = if self.swaps_axes() { h } else { w };
+        let flipped = matches!(
+            self,
+            Transform::Flipped
+                | Transform::Flipped90
+                | Transform::Flipped180
+                | Transform::Flipped270
+        );
+        let x = if flipped { upright_width - 1 - ux } else { ux };
+        let y = uy;
+        match self {
+            Transform::Normal | Transform::Flipped => (x, y),
+            Transform::Rotate90 | Transform::Flipped90 => (y, h - 1 - x),
+            Transform::Rotate180 | Transform::Flipped180 => (w - 1 - x, h - 1 - y),
+            Transform::Rotate270 | Transform::Flipped270 => (w - 1 - y, x),
+        }
+    }
 }
 
 /// An output's place in the compositor's layout, in logical pixels.
@@ -251,6 +295,23 @@ pub struct FrozenFrame {
     /// `wp-color-management-v1`); its pixels are not tone mapped.
     pub hdr: bool,
     pub data: Vec<u8>,
+    /// The pointer cursor over this output when it was frozen, kept apart
+    /// from `data`, which is asked for without it.
+    pub cursor: Option<FrozenCursor>,
+}
+
+/// The pointer cursor as it was over one output, captured through its own
+/// cursor session so a Capture can leave it out or composite it in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrozenCursor {
+    /// Top-left corner of the image (hotspot already subtracted), in the
+    /// output's upright physical pixels. May be negative.
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    /// Premultiplied `Argb8888` (BGRA bytes), upright, `4 * width` per row.
+    pub pixels: Vec<u8>,
 }
 
 impl FrozenFrame {
@@ -271,6 +332,59 @@ impl FrozenFrame {
             (self.height, self.width)
         } else {
             (self.width, self.height)
+        }
+    }
+
+    /// Byte offset of the pixel shown at upright position `(ux, uy)`.
+    fn upright_offset(&self, ux: u32, uy: u32) -> usize {
+        let (bx, by) = self
+            .transform
+            .buffer_position(ux, uy, self.width, self.height);
+        let row = if self.y_invert {
+            self.height - 1 - by
+        } else {
+            by
+        };
+        row as usize * self.stride as usize + bx as usize * 4
+    }
+
+    /// The raw pixel shown at upright position `(ux, uy)`.
+    pub fn upright_pixel(&self, ux: u32, uy: u32) -> u32 {
+        let i = self.upright_offset(ux, uy);
+        u32::from_le_bytes(self.data[i..i + 4].try_into().expect("four bytes"))
+    }
+
+    /// Blend [`cursor`](Self::cursor) into the pixels, as the compositor
+    /// would have drawn it, and drop it. Without a cursor this does nothing.
+    pub fn composite_cursor(&mut self) {
+        let Some(cursor) = self.cursor.take() else {
+            return;
+        };
+        let (uw, uh) = self.upright_size();
+        let max = (1u32 << self.format.bits_per_channel()) - 1;
+        for cy in 0..cursor.height {
+            for cx in 0..cursor.width {
+                let (ux, uy) = (cursor.x + cx as i32, cursor.y + cy as i32);
+                if ux < 0 || uy < 0 || ux >= uw as i32 || uy >= uh as i32 {
+                    continue;
+                }
+                let s = ((cy * cursor.width + cx) * 4) as usize;
+                let [b, g, r, a] = [0, 1, 2, 3].map(|k| cursor.pixels[s + k] as u32);
+                if a == 0 && r == 0 && g == 0 && b == 0 {
+                    continue;
+                }
+                let i = self.upright_offset(ux as u32, uy as u32);
+                let pixel = u32::from_le_bytes(self.data[i..i + 4].try_into().expect("four"));
+                let dst = self.format.rgb(pixel);
+                let blend = |src: u32, dst: u16| {
+                    let v =
+                        (src * max * 255 + dst as u32 * (255 - a) * 255 + 255 * 127) / (255 * 255);
+                    v.min(max) as u16
+                };
+                let out = [blend(r, dst[0]), blend(g, dst[1]), blend(b, dst[2])];
+                let pixel = self.format.with_rgb(pixel, out);
+                self.data[i..i + 4].copy_from_slice(&pixel.to_le_bytes());
+            }
         }
     }
 }
@@ -343,6 +457,7 @@ pub fn freeze() -> Result<Frozen, CaptureError> {
                 y_invert: copy.y_invert,
                 hdr: o.hdr,
                 data: copy.data,
+                cursor: o.cursor.take().and_then(CursorCopy::finish),
             }
         })
         .collect();
@@ -426,6 +541,10 @@ impl Freezer {
                 .bind(name, version.min(4), &self.qh, i);
             self.state.outputs.push(OutputState::new(wl));
         }
+        // A pointer to ask for its cursor with (ext only; optional).
+        if self.has("wl_seat") {
+            self.state.seat = Some(self.bind("wl_seat", 1..=5)?);
+        }
         if self.has("zxdg_output_manager_v1") {
             let manager: ZxdgOutputManagerV1 = self.bind("zxdg_output_manager_v1", 2..=3)?;
             for (i, o) in self.state.outputs.iter().enumerate() {
@@ -472,15 +591,28 @@ impl Freezer {
     fn capture_ext(&mut self, queue: &mut EventQueue<State>) -> Result<(), CaptureError> {
         let manager: ExtImageCopyCaptureManagerV1 = self.bind(EXT_CAPTURE, 1..=1)?;
         let sources: ExtOutputImageCaptureSourceManagerV1 = self.bind(EXT_OUTPUT_SOURCE, 1..=1)?;
+        let pointer = match &self.state.seat {
+            Some(seat) if self.state.has_pointer => Some(seat.get_pointer(&self.qh, ())),
+            _ => None,
+        };
         let mut sessions = Vec::new();
+        let mut cursor_sessions = Vec::new();
         for i in 0..self.state.outputs.len() {
             self.state.outputs[i].copy = Some(Copy::default());
             let source = sources.create_source(&self.state.outputs[i].wl, &self.qh, ());
             sessions.push(manager.create_session(&source, Options::empty(), &self.qh, i));
+            if let Some(pointer) = &pointer {
+                self.state.outputs[i].cursor = Some(CursorCopy::default());
+                let cursor =
+                    manager.create_pointer_cursor_session(&source, pointer, &self.qh, CursorOf(i));
+                let session = cursor.get_capture_session(&self.qh, CursorOf(i));
+                cursor_sessions.push((i, cursor, session));
+            }
             source.destroy();
         }
         self.dispatch_until(queue, "capture constraints", |s| {
             s.copies().all(|c| c.constraints_done)
+                && s.cursors().all(|c| c.constraints_done || c.stopped)
         })?;
 
         let wl_shm = self.shm()?;
@@ -505,14 +637,53 @@ impl Freezer {
             copy.buffer = Some((format, width, height, width * 4));
             frames.push((frame, shm));
         }
-        self.dispatch_until(queue, "capture", |s| s.copies().all(|c| c.ready))?;
+        // The cursor, where it is over an output: a small extra copy.
+        let mut cursor_frames = Vec::new();
+        for (i, _, session) in &cursor_sessions {
+            let Some(cursor) = self.state.outputs[*i].cursor.as_mut() else {
+                continue;
+            };
+            let format = [ShmFormat::Argb8888, ShmFormat::Abgr8888]
+                .into_iter()
+                .find(|f| cursor.offered.contains(&(f.wl() as u32)));
+            let (width, height) = cursor.size;
+            let wanted = cursor.entered && !cursor.stopped && width > 0 && height > 0;
+            let Some(format) = format.filter(|_| wanted) else {
+                cursor.done = true;
+                continue;
+            };
+            let shm = Shm::new(&wl_shm, &self.qh, format, width, height, width * 4)?;
+            let frame = session.create_frame(&self.qh, CursorOf(*i));
+            frame.attach_buffer(&shm.buffer);
+            frame.damage_buffer(0, 0, width as i32, height as i32);
+            frame.capture();
+            cursor.format = Some(format);
+            cursor_frames.push((*i, frame, shm));
+        }
+        self.dispatch_until(queue, "capture", |s| {
+            s.copies().all(|c| c.ready) && s.cursors().all(|c| c.done)
+        })?;
 
         for (i, (frame, shm)) in frames.into_iter().enumerate() {
             frame.destroy();
             self.state.outputs[i].copy.as_mut().expect("set above").data = shm.read()?;
         }
+        for (i, frame, shm) in cursor_frames {
+            frame.destroy();
+            let data = shm.read()?;
+            if let Some(cursor) = self.state.outputs[i].cursor.as_mut() {
+                cursor.data = data;
+            }
+        }
         for session in sessions {
             session.destroy();
+        }
+        for (_, cursor, session) in cursor_sessions {
+            session.destroy();
+            cursor.destroy();
+        }
+        if let Some(pointer) = pointer.filter(|p| p.version() >= 3) {
+            pointer.release();
         }
         Ok(())
     }
@@ -609,12 +780,22 @@ impl Shm {
 #[derive(Default)]
 struct State {
     outputs: Vec<OutputState>,
+    seat: Option<WlSeat>,
+    has_pointer: bool,
     failure: Option<String>,
 }
 
 impl State {
     fn copies(&self) -> impl Iterator<Item = &Copy> {
         self.outputs.iter().filter_map(|o| o.copy.as_ref())
+    }
+
+    fn cursors(&self) -> impl Iterator<Item = &CursorCopy> {
+        self.outputs.iter().filter_map(|o| o.cursor.as_ref())
+    }
+
+    fn cursor(&mut self, i: usize) -> Option<&mut CursorCopy> {
+        self.outputs[i].cursor.as_mut()
     }
 
     fn copy(&mut self, i: usize) -> &mut Copy {
@@ -632,6 +813,7 @@ struct OutputState {
     logical_position: Option<(i32, i32)>,
     logical_size: Option<(i32, i32)>,
     copy: Option<Copy>,
+    cursor: Option<CursorCopy>,
     /// Waiting for the output's colour information.
     colour_pending: bool,
     hdr: bool,
@@ -649,6 +831,7 @@ impl OutputState {
             logical_position: None,
             logical_size: None,
             copy: None,
+            cursor: None,
             colour_pending: false,
             hdr: false,
         }
@@ -693,6 +876,162 @@ struct Copy {
     y_invert: bool,
     ready: bool,
     data: Vec<u8>,
+}
+
+/// User data of the objects of output `.0`'s cursor session, so their
+/// events never mix with the output's own capture.
+#[derive(Debug, Clone, Copy)]
+struct CursorOf(usize);
+
+/// Progress of one output's cursor capture. Any trouble here only loses the
+/// cursor, never the Capture.
+#[derive(Default)]
+struct CursorCopy {
+    entered: bool,
+    /// Hotspot position in the output's upright buffer pixels.
+    position: Option<(i32, i32)>,
+    hotspot: (i32, i32),
+    size: (u32, u32),
+    offered: Vec<u32>,
+    constraints_done: bool,
+    stopped: bool,
+    format: Option<ShmFormat>,
+    transform: Option<Transform>,
+    ready: bool,
+    /// Captured, failed, or not worth capturing.
+    done: bool,
+    data: Vec<u8>,
+}
+
+impl CursorCopy {
+    /// The cursor image upright, as premultiplied `Argb8888`.
+    fn finish(self) -> Option<FrozenCursor> {
+        let (format, (x, y)) = (self.format?, self.position?);
+        if !self.ready {
+            return None;
+        }
+        let (w, h) = self.size;
+        let transform = self.transform.unwrap_or(Transform::Normal);
+        let (uw, uh) = if transform.swaps_axes() {
+            (h, w)
+        } else {
+            (w, h)
+        };
+        let mut pixels = Vec::with_capacity(uw as usize * uh as usize * 4);
+        for uy in 0..uh {
+            for ux in 0..uw {
+                let (bx, by) = transform.buffer_position(ux, uy, w, h);
+                let i = (by * w + bx) as usize * 4;
+                let mut p: [u8; 4] = self.data[i..i + 4].try_into().ok()?;
+                if format == ShmFormat::Abgr8888 {
+                    p.swap(0, 2);
+                }
+                pixels.extend_from_slice(&p);
+            }
+        }
+        Some(FrozenCursor {
+            x: x - self.hotspot.0,
+            y: y - self.hotspot.1,
+            width: uw,
+            height: uh,
+            pixels,
+        })
+    }
+}
+
+impl Dispatch<WlSeat, ()> for State {
+    fn event(
+        state: &mut Self,
+        _: &WlSeat,
+        event: wl_seat::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_seat::Event::Capabilities {
+            capabilities: WEnum::Value(c),
+        } = event
+        {
+            state.has_pointer = c.contains(wl_seat::Capability::Pointer);
+        }
+    }
+}
+
+impl Dispatch<ExtImageCopyCaptureCursorSessionV1, CursorOf> for State {
+    fn event(
+        state: &mut Self,
+        _: &ExtImageCopyCaptureCursorSessionV1,
+        event: ext_image_copy_capture_cursor_session_v1::Event,
+        &CursorOf(i): &CursorOf,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        use ext_image_copy_capture_cursor_session_v1::Event as E;
+        let Some(cursor) = state.cursor(i) else {
+            return;
+        };
+        match event {
+            E::Enter => cursor.entered = true,
+            E::Leave => cursor.entered = false,
+            E::Position { x, y } => cursor.position = Some((x, y)),
+            E::Hotspot { x, y } => cursor.hotspot = (x, y),
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ExtImageCopyCaptureSessionV1, CursorOf> for State {
+    fn event(
+        state: &mut Self,
+        _: &ExtImageCopyCaptureSessionV1,
+        event: ext_image_copy_capture_session_v1::Event,
+        &CursorOf(i): &CursorOf,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        use ext_image_copy_capture_session_v1::Event as E;
+        let Some(cursor) = state.cursor(i) else {
+            return;
+        };
+        match event {
+            E::BufferSize { width, height } => cursor.size = (width, height),
+            E::ShmFormat { format } => cursor.offered.push(match format {
+                WEnum::Value(f) => f as u32,
+                WEnum::Unknown(code) => code,
+            }),
+            E::Done => cursor.constraints_done = true,
+            E::Stopped => {
+                cursor.stopped = true;
+                cursor.done = true;
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ExtImageCopyCaptureFrameV1, CursorOf> for State {
+    fn event(
+        state: &mut Self,
+        _: &ExtImageCopyCaptureFrameV1,
+        event: ext_image_copy_capture_frame_v1::Event,
+        &CursorOf(i): &CursorOf,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        use ext_image_copy_capture_frame_v1::Event as E;
+        let Some(cursor) = state.cursor(i) else {
+            return;
+        };
+        match event {
+            E::Transform { transform } => cursor.transform = Some(Transform::from_wl(transform)),
+            E::Ready => {
+                cursor.ready = true;
+                cursor.done = true;
+            }
+            E::Failed { .. } => cursor.done = true,
+            _ => {}
+        }
+    }
 }
 
 impl Dispatch<WlRegistry, GlobalListContents> for State {
@@ -904,6 +1243,7 @@ fn is_hdr(tf: WEnum<TransferFunction>) -> bool {
 delegate_noop!(State: ignore WpColorManagerV1);
 delegate_noop!(State: ignore WpColorManagementOutputV1);
 delegate_noop!(State: ignore WlShm);
+delegate_noop!(State: ignore WlPointer);
 delegate_noop!(State: WlShmPool);
 delegate_noop!(State: ignore WlBuffer);
 delegate_noop!(State: ZxdgOutputManagerV1);
@@ -911,3 +1251,82 @@ delegate_noop!(State: ExtImageCopyCaptureManagerV1);
 delegate_noop!(State: ExtOutputImageCaptureSourceManagerV1);
 delegate_noop!(State: ExtImageCaptureSourceV1);
 delegate_noop!(State: ZwlrScreencopyManagerV1);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Where buffer pixel `(bx, by)` lands once upright (the compositor's
+    /// rule: rotate clockwise, then mirror for `Flipped*`).
+    fn upright(t: Transform, bx: u32, by: u32, w: u32, h: u32) -> (u32, u32) {
+        let (x, y, uw) = match t {
+            Transform::Normal | Transform::Flipped => (bx, by, w),
+            Transform::Rotate90 | Transform::Flipped90 => (h - 1 - by, bx, h),
+            Transform::Rotate180 | Transform::Flipped180 => (w - 1 - bx, h - 1 - by, w),
+            Transform::Rotate270 | Transform::Flipped270 => (by, w - 1 - bx, h),
+        };
+        let flipped = matches!(
+            t,
+            Transform::Flipped
+                | Transform::Flipped90
+                | Transform::Flipped180
+                | Transform::Flipped270
+        );
+        if flipped { (uw - 1 - x, y) } else { (x, y) }
+    }
+
+    #[test]
+    fn buffer_position_undoes_every_transform() {
+        use Transform::*;
+        let (w, h) = (5, 3);
+        for t in [
+            Normal, Rotate90, Rotate180, Rotate270, Flipped, Flipped90, Flipped180, Flipped270,
+        ] {
+            for by in 0..h {
+                for bx in 0..w {
+                    let (ux, uy) = upright(t, bx, by, w, h);
+                    assert_eq!(t.buffer_position(ux, uy, w, h), (bx, by), "{t:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_cursor_blends_over_8_and_10_bit_frames() {
+        for format in [ShmFormat::Xrgb8888, ShmFormat::Xbgr2101010] {
+            let white = 0xffff_ffffu32;
+            let mut frame = FrozenFrame {
+                output: "T".into(),
+                logical: LogicalRect {
+                    x: 0,
+                    y: 0,
+                    width: 2,
+                    height: 1,
+                },
+                format,
+                width: 2,
+                height: 1,
+                stride: 8,
+                transform: Transform::Normal,
+                y_invert: false,
+                hdr: false,
+                data: white.to_le_bytes().repeat(2),
+                // Half-transparent black at x = 1, and one pixel off the frame.
+                cursor: Some(FrozenCursor {
+                    x: 1,
+                    y: 0,
+                    width: 2,
+                    height: 1,
+                    pixels: vec![0, 0, 0, 128, 0, 0, 0, 255],
+                }),
+            };
+            frame.composite_cursor();
+            assert_eq!(frame.cursor, None);
+            let max = (1u32 << format.bits_per_channel()) - 1;
+            assert_eq!(format.rgb(frame.upright_pixel(0, 0)), [max as u16; 3]);
+            let half = ((max * 127 + 127) / 255) as u16;
+            assert_eq!(format.rgb(frame.upright_pixel(1, 0)), [half; 3]);
+            assert_eq!(frame.upright_pixel(1, 0) >> 30, white >> 30, "padding kept");
+        }
+    }
+}

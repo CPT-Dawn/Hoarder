@@ -191,6 +191,7 @@ mod tests {
             y_invert: false,
             hdr,
             data: vec![0; 32],
+            cursor: None,
         }
     }
 

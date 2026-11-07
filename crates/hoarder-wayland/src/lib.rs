@@ -16,6 +16,7 @@ pub mod watch;
 pub mod windows;
 
 pub use capture::{
-    Backend, CaptureError, Frozen, FrozenFrame, LogicalRect, ShmFormat, Transform, freeze,
+    Backend, CaptureError, Frozen, FrozenCursor, FrozenFrame, LogicalRect, ShmFormat, Transform,
+    freeze,
 };
 pub use windows::{GeometryError, Window, WindowGeometry};

@@ -165,6 +165,7 @@ fn cut(frame: ToplevelFrame, window: Option<&Window>, settings: &Screenshot) -> 
         y_invert: false,
         hdr: false,
         data: frame.data,
+        cursor: None,
     };
     let mut image = Image::upright(&frozen);
     let mut badges = Badges {
