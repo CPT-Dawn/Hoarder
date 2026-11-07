@@ -25,7 +25,7 @@ Each test starts its own Sway in a private directory under `/tmp`, so tests run 
 ## The harness (`crates/hoarder-e2e`)
 
 ```rust
-use hoarder_e2e::{keys, BitDepth, OutputSpec, Pattern, Selection, Session, Transform};
+use hoarder_e2e::{keys, BitDepth, OutputSpec, Pattern, Reply, Selection, Session, Transform};
 
 let session = Session::start(&[
     OutputSpec::new(1920, 1080),                               // HEADLESS-1
@@ -41,6 +41,11 @@ let out = session.command(env!("CARGO_BIN_EXE_hoarder")).arg("--version").output
 let app = session.client()?;
 app.paint(session.output("HEADLESS-1"), &Pattern::Quadrants)?;        // 1:1 physical pixels
 app.set_selection(Selection::Clipboard, &[("text/plain", b"hi".as_slice())])?; // served until exit
+app.set_selection_replying(Selection::Clipboard, vec![                // a slow or stuck source
+    ("text/plain", Reply::After(Duration::from_millis(300), b"late".to_vec())),
+    ("text/html", Reply::Never),
+])?;
+assert!(app.owns_selection(Selection::Clipboard)?);                    // not cancelled by anyone
 app.open_window("org.example.app")?;                                  // focused probe window
 let frame = app.capture(session.output("HEADLESS-2"))?;               // raw buffer, native depth
 app.exit();                                                           // like the app quitting
@@ -59,7 +64,7 @@ What it guarantees:
 
 - **Session**: outputs are named `HEADLESS-1`… in the order given and laid out left to right. `Session::start` returns once every output is active. `Session::swaymsg` runs IPC commands against it.
 - **Painting**: a background layer-shell surface per output. The buffer is the output's physical size, mapped 1:1 through `wp_viewporter`, so the pattern lands on physical pixels at any scale or rotation. `paint_as(…, PixelFormat::Xrgb2101010)` paints 10-bit values; `Rgb10` colours with no 8-bit equivalent come back bit-exact from `capture` on a 10-bit output. `Pattern::Ramp` covers every 10-bit value of every channel; `Pattern::Checker { cell: 1 }` shows any resampling. Each call returns after the frame is presented.
-- **Selections**: set over `ext-data-control-v1`, so no focus is needed; payloads of any size are written off-thread. `exit()` (or dropping the client) closes the connection, and the compositor clears the Selection exactly as it does when a real app quits.
+- **Selections**: set over `ext-data-control-v1`, so no focus is needed; payloads of any size are written off-thread. `exit()` (or dropping the client) closes the connection, and the compositor clears the Selection exactly as it does when a real app quits. `Reply` scripts how each type answers a paste (`Now`, `After(delay)`, `Never`), which is how the Reader's time limits are tested. `owns_selection` says whether the compositor has cancelled the client's source: the independent check that the Daemon never takes a live app's Selection.
 - **Input**: `wlr-virtual-pointer` with absolute motion in output-logical coordinates, and `zwp-virtual-keyboard` with a US keymap. The harness tracks modifiers itself, because the protocol leaves that to the client. Every call returns after the compositor has processed it.
 - **Probe windows**: plain `xdg_toplevel`s that Sway tiles and focuses like any new app. They record `InputEvent`s (enter, motion, buttons, keys, modifiers).
 
@@ -76,7 +81,11 @@ cmd.env("HOARDER_HIDE_GLOBALS", "ext_image_copy_capture_manager_v1");
 cmd.env("HOARDER_HIDE_GLOBALS", "ext_image_copy_capture_manager_v1,zwlr_screencopy_manager_v1");
 ```
 
-It is also handy for bug reports: a user can check whether a capture problem follows one protocol.
+It is also handy for bug reports: a user can check whether a capture problem follows one protocol. Hiding `ext_data_control_manager_v1` sends the Daemon to its `wlr-data-control` fallback.
+
+## The Daemon (`crates/hoarder/tests/e2e_daemon.rs`)
+
+The Daemon tests start `hoarder daemon` in the session and judge it only by what a user or Front end can see: `wl-paste` after the source app exits (Takeover and the Reader rules), the source still owning its Selection, socket responses, `/proc` context switches for idle wakeups, and exit codes. The `status` op's `reading` flag tells a test when the Daemon has finished reading an Offer, so a source is never quit mid-read by accident. `hoarder service` runs against a stand-in `systemctl` placed first on `PATH`, so no test touches your real user manager.
 
 ## Driving the Overlay
 
@@ -88,7 +97,9 @@ The hint bar retires after 20 uses, counted in `$XDG_STATE_HOME/hoarder/state.to
 
 ## Timings and budgets
 
-With `HOARDER_TIMINGS` set, `hoarder shot` prints stage timings on stderr, measured from the start of `shot`: `frozen_ms`, `surfaces_created_ms` and `overlay_visible_ms` (the first frame callback of every Overlay surface).
+With `HOARDER_TIMINGS` set, `hoarder shot` prints stage timings on stderr, measured from the start of `shot`: `frozen_ms`, `surfaces_created_ms` and `overlay_visible_ms` (the first frame callback of every Overlay surface). With `--live` there is no `frozen_ms`; `overlay_hidden_ms` marks the frame callback of the transparent Overlay, after which the desktop is captured. With `--delay`, timings start when the countdown ends.
+
+`--delay` and `--live` are covered by `e2e_delay.rs` and `e2e_live.rs`.
 
 `budget_overlay_visible_on_4k` (in `e2e_overlay.rs`) checks the "key press → Overlay visible on 4K < 60 ms" budget (PLAN.md §12). The test only enforces it in optimised builds:
 
@@ -102,7 +113,7 @@ Recorded results (headless Sway 1.12, pixman, one 3840×2160 output, release bui
 |---|---|---|---|
 | 2026-11-07 | #61, first cut: full Argb8888 chrome painted before the first frame | 59.5 ms | |
 | 2026-11-07 | #61: idle chrome is one `wp_single_pixel_buffer_v1` pixel stretched by the viewporter | 39.9 ms | freeze 14, Overlay surfaces and frame upload 11, compositor's first frame 13 |
-| 2026-11-07 | #63 on top of #62, #68 and #81: the freeze also takes the cursor (cursor session); Loupe, hint bar and cursor layer are subsurfaces drawn after the first frame | 46.7 ms | freeze 15 |
+| 2026-11-07 | #63 on top of #62, #68, #69, #71 and #81: the freeze also takes the cursor (cursor session); Loupe, hint bar and cursor layer are subsurfaces drawn after the first frame | 49.0 ms | freeze 15 |
 
 This is within budget, so ADR-0007 stands. The next easy win is giving the freeze's memfd to the Overlay instead of copying the 33 MB frame (about 8 ms).
 

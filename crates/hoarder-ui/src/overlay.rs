@@ -8,16 +8,22 @@
 //! attached as is: same format, same transform, one buffer pixel per physical
 //! pixel. So the compositor blends the frame, and the CPU only repaints the
 //! chrome where it changed.
+//!
+//! With `--live` ([`run_live`]) there is no Frozen Frame: the chrome is drawn
+//! over the live desktop, and before returning the Overlay turns transparent
+//! and waits for the compositor to present that, so a Capture taken next
+//! holds none of its pixels.
 
 use std::cell::Cell;
 use std::io::Write as _;
 use std::os::fd::AsFd;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use hoarder_wayland::{Frozen, FrozenFrame};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, FrameCallbackData},
     delegate_registry,
+    dispatch2::Dispatch2,
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
@@ -45,9 +51,9 @@ use wayland_client::{
     Connection, EventQueue, QueueHandle, delegate_noop,
     globals::registry_queue_init,
     protocol::{
-        wl_buffer::WlBuffer, wl_keyboard::WlKeyboard, wl_output::WlOutput, wl_pointer::WlPointer,
-        wl_seat::WlSeat, wl_shm, wl_shm_pool::WlShmPool, wl_subsurface::WlSubsurface,
-        wl_surface::WlSurface,
+        wl_buffer::WlBuffer, wl_callback::WlCallback, wl_keyboard::WlKeyboard, wl_output::WlOutput,
+        wl_pointer::WlPointer, wl_seat::WlSeat, wl_shm, wl_shm_pool::WlShmPool,
+        wl_subsurface::WlSubsurface, wl_surface::WlSurface,
     },
 };
 use wayland_protocols::wp::{
@@ -56,7 +62,7 @@ use wayland_protocols::wp::{
     viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
 };
 
-use crate::chrome::{DIM, Fonts, Palette, Scene};
+use crate::chrome::{CLEAR, DIM, Fonts, Palette, Scene};
 use crate::geom::Rect;
 use crate::layers::{Context, Layers, ViewLayers};
 use crate::select::{Action, Key, Selector};
@@ -144,12 +150,44 @@ fn failed(e: impl std::fmt::Display) -> OverlayError {
     OverlayError::Failed(e.to_string())
 }
 
+/// How long to wait for the compositor to present the hidden Overlay before
+/// capturing anyway.
+const HIDE_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// Show the Overlay over `frozen` and wait for the user to pick a Target or
 /// cancel, drawn in `options.theme`. `started` is when the user asked for the
 /// Capture; with [`TIMINGS_ENV`] set, the time until the Overlay is visible is
 /// printed.
 pub fn run(frozen: &Frozen, started: Instant, options: &Options) -> Result<Outcome, OverlayError> {
     timing(started, "frozen");
+    show(Some(frozen), started, options)
+}
+
+/// Show the Overlay over the live desktop (`--live`) and wait for the user to
+/// pick a Target or cancel. On return the compositor has presented a frame
+/// without the Overlay, so the desktop can be captured as the user sees it.
+pub fn run_live(started: Instant, options: &Options) -> Result<Outcome, OverlayError> {
+    show(None, started, options)
+}
+
+/// What one output's Overlay shows and where.
+struct Screen<'a> {
+    output: WlOutput,
+    /// The output's name, e.g. `DP-1`.
+    name: String,
+    /// Layout position and size of the output (logical).
+    logical: (f64, f64, f64, f64),
+    /// Physical size of the output, upright.
+    size: (u32, u32),
+    /// The Frozen Frame to show under the chrome, or none for the live desktop.
+    frame: Option<&'a FrozenFrame>,
+}
+
+fn show(
+    frozen: Option<&Frozen>,
+    started: Instant,
+    options: &Options,
+) -> Result<Outcome, OverlayError> {
     let conn = Connection::connect_to_env().map_err(failed)?;
     let (globals, mut queue): (_, EventQueue<App>) = registry_queue_init(&conn).map_err(failed)?;
     let qh = queue.handle();
@@ -190,24 +228,54 @@ pub fn run(frozen: &Frozen, started: Instant, options: &Options) -> Result<Outco
         outcome: None,
         started,
         visible_reported: false,
+        single_pixel,
     };
     // Learn the outputs' names so each Frozen Frame lands on its own output.
     queue.roundtrip(&mut app).map_err(failed)?;
 
-    for frame in &frozen.frames {
-        let output = app
-            .outputs
-            .outputs()
-            .find(|o| app.outputs.info(o).and_then(|i| i.name).as_deref() == Some(&frame.output))
-            .ok_or_else(|| failed(format!("output {} went away", frame.output)))?;
-        let dim = match &single_pixel {
+    let screens: Vec<Screen> = match frozen {
+        Some(frozen) => frozen
+            .frames
+            .iter()
+            .map(|frame| {
+                let output = app
+                    .outputs
+                    .outputs()
+                    .find(|o| {
+                        app.outputs.info(o).and_then(|i| i.name).as_deref() == Some(&frame.output)
+                    })
+                    .ok_or_else(|| failed(format!("output {} went away", frame.output)))?;
+                let l = frame.logical;
+                Ok(Screen {
+                    output,
+                    name: frame.output.clone(),
+                    logical: (l.x as f64, l.y as f64, l.width as f64, l.height as f64),
+                    size: frame.upright_size(),
+                    frame: Some(frame),
+                })
+            })
+            .collect::<Result<_, OverlayError>>()?,
+        None => {
+            // xdg-output's logical geometry arrives a roundtrip later.
+            queue.roundtrip(&mut app).map_err(failed)?;
+            app.outputs
+                .outputs()
+                .filter_map(|output| live_screen(output, &app.outputs))
+                .collect()
+        }
+    };
+    if screens.is_empty() {
+        return Err(failed("the compositor has no outputs"));
+    }
+
+    for screen in &screens {
+        let dim = match &app.single_pixel {
             // Premultiplied, full range: black at DIM's alpha.
             Some(m) => m.create_u32_rgba_buffer(0, 0, 0, DIM[3] as u32 * 0x0101_0101, &qh, ()),
             None => pixel_buffer(DIM, &app.shm, &qh).map_err(failed)?,
         };
         let view = View::new(
-            frame,
-            &output,
+            screen,
             &compositor,
             &subcompositor,
             &layer_shell,
@@ -230,34 +298,28 @@ pub fn run(frozen: &Frozen, started: Instant, options: &Options) -> Result<Outco
         if app.outcome.is_some() {
             break;
         }
-        queue.flush().map_err(failed)?;
-        let Some(guard) = queue.prepare_read() else {
-            continue;
-        };
         // Sleep until the compositor speaks or a layer's timer is due.
-        let timeout = app
-            .layers
-            .deadline(Instant::now())
-            .map(|due| due.saturating_duration_since(Instant::now()))
-            .map(|d| rustix::event::Timespec::try_from(d).unwrap_or_default());
-        let fd = guard.connection_fd();
-        let mut fds = [rustix::event::PollFd::new(
-            &fd,
-            rustix::event::PollFlags::IN | rustix::event::PollFlags::ERR,
-        )];
-        match rustix::event::poll(&mut fds, timeout.as_ref()) {
-            Ok(0) | Err(rustix::io::Errno::INTR) => drop(guard),
-            Ok(_) => match guard.read() {
-                Ok(_) => {}
-                Err(wayland_client::backend::WaylandError::Io(e))
-                    if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                Err(e) => return Err(failed(e)),
-            },
-            Err(e) => return Err(failed(e)),
-        }
+        let deadline = app.layers.deadline(now);
+        crate::wait::dispatch_once(&mut queue, deadline).map_err(failed)?;
     }
     options.cursor.set(app.layers.cursor);
+    for view in &mut app.views {
+        view.layers.hide();
+    }
     let outcome = app.outcome.take().expect("loop ended on an outcome");
+    if frozen.is_none() && outcome != Outcome::Cancelled {
+        // The caller captures the live desktop next: it must not see us.
+        app.hide(&qh).map_err(failed)?;
+        let deadline = Instant::now() + HIDE_TIMEOUT;
+        let hidden = crate::wait::dispatch_until(&mut queue, &mut app, deadline, |a| {
+            a.views.iter().all(|v| v.hidden == Hidden::Shown)
+        })
+        .map_err(failed)?;
+        if !hidden {
+            eprintln!("hoarder: the compositor did not confirm the Overlay was hidden");
+        }
+        timing(started, "overlay_hidden");
+    }
     // Take the Overlay down before the caller encodes and delivers.
     app.views.clear();
     queue.roundtrip(&mut app).map_err(failed)?;
@@ -270,16 +332,15 @@ struct View {
     output: String,
     /// Layout position and size of the output (logical).
     logical: (f64, f64, f64, f64),
-    /// Dropped before the surfaces they float over.
+    /// The Loupe, hint bar and cursor layer; dropped before the surfaces
+    /// they float over.
     layers: ViewLayers,
     /// Physical size of the chrome buffer: the upright Frozen Frame size.
     size: (u32, u32),
     layer: LayerSurface,
     root_viewport: WpViewport,
-    frame_surface: WlSurface,
-    frame_subsurface: WlSubsurface,
-    frame_viewport: WpViewport,
-    frame_buffer: WlBuffer,
+    /// The Frozen Frame below the chrome; none over the live desktop.
+    frame: Option<FrameLayer>,
     /// Until there is a selection, the chrome is this one dim pixel stretched
     /// over the output: nothing to paint, nothing to upload.
     dim_buffer: WlBuffer,
@@ -290,6 +351,36 @@ struct View {
     configured: bool,
     frame_pending: bool,
     presented: bool,
+    hidden: Hidden,
+    /// What the chrome shows once hidden: one transparent pixel.
+    clear_buffer: Option<WlBuffer>,
+}
+
+/// Whether a View has been made transparent for a live Capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hidden {
+    No,
+    /// A transparent buffer is committed; its frame callback is pending.
+    Committed,
+    /// The compositor has presented the transparent Overlay.
+    Shown,
+}
+
+/// A Frozen Frame shown 1:1 in a subsurface below the chrome.
+struct FrameLayer {
+    surface: WlSurface,
+    subsurface: WlSubsurface,
+    viewport: WpViewport,
+    buffer: WlBuffer,
+}
+
+impl Drop for FrameLayer {
+    fn drop(&mut self) {
+        self.viewport.destroy();
+        self.subsurface.destroy();
+        self.surface.destroy();
+        self.buffer.destroy();
+    }
 }
 
 /// A chrome buffer and the areas that went stale while it was not on screen.
@@ -301,8 +392,7 @@ struct ChromeBuffer {
 impl View {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        frame: &FrozenFrame,
-        output: &WlOutput,
+        screen: &Screen,
         compositor: &CompositorState,
         subcompositor: &SubcompositorState,
         layer_shell: &LayerShell,
@@ -318,28 +408,39 @@ impl View {
             root,
             Layer::Overlay,
             Some("hoarder-overlay"),
-            Some(output),
+            Some(&screen.output),
         );
         layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
         layer.set_exclusive_zone(-1);
         layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
         let root_viewport = viewporter.get_viewport(layer.wl_surface(), qh, ());
 
-        let (frame_subsurface, frame_surface) =
-            subcompositor.create_subsurface(layer.wl_surface().clone(), qh);
-        frame_subsurface.place_below(layer.wl_surface());
-        frame_subsurface.set_position(0, 0);
-        let frame_viewport = viewporter.get_viewport(&frame_surface, qh, ());
-        let frame_buffer = frozen_buffer(frame, shm, qh)?;
-        let l = frame.logical;
-        frame_surface.set_buffer_transform(frame.transform.to_wl());
-        frame_viewport.set_destination(l.width as i32, l.height as i32);
-        frame_surface.attach(Some(&frame_buffer), 0, 0);
-        frame_surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
-        frame_surface.commit();
+        let frame = match screen.frame {
+            Some(frame) => {
+                let (subsurface, surface) =
+                    subcompositor.create_subsurface(layer.wl_surface().clone(), qh);
+                subsurface.place_below(layer.wl_surface());
+                subsurface.set_position(0, 0);
+                let viewport = viewporter.get_viewport(&surface, qh, ());
+                let buffer = frozen_buffer(frame, shm, qh)?;
+                let l = frame.logical;
+                surface.set_buffer_transform(frame.transform.to_wl());
+                viewport.set_destination(l.width as i32, l.height as i32);
+                surface.attach(Some(&buffer), 0, 0);
+                surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
+                surface.commit();
+                Some(FrameLayer {
+                    surface,
+                    subsurface,
+                    viewport,
+                    buffer,
+                })
+            }
+            None => None,
+        };
         let layers = ViewLayers::new(
             layer.wl_surface(),
-            &frame_surface,
+            frame.as_ref().map(|f| &f.surface),
             compositor,
             subcompositor,
             viewporter,
@@ -348,16 +449,13 @@ impl View {
         layer.commit();
 
         Ok(View {
-            output: frame.output.clone(),
-            logical: (l.x as f64, l.y as f64, l.width as f64, l.height as f64),
+            output: screen.name.clone(),
+            logical: screen.logical,
             layers,
-            size: frame.upright_size(),
+            size: screen.size,
             layer,
             root_viewport,
-            frame_surface,
-            frame_subsurface,
-            frame_viewport,
-            frame_buffer,
+            frame,
             dim_buffer,
             palette,
             buffers: Vec::new(),
@@ -366,6 +464,8 @@ impl View {
             configured: false,
             frame_pending: false,
             presented: false,
+            hidden: Hidden::No,
+            clear_buffer: None,
         })
     }
 
@@ -396,7 +496,7 @@ impl View {
 
     /// Draw `wanted` if the compositor is ready for a new frame.
     fn redraw(&mut self, pool: &mut SlotPool, qh: &QueueHandle<App>) -> std::io::Result<()> {
-        if !self.configured || self.frame_pending {
+        if !self.configured || self.frame_pending || self.hidden != Hidden::No {
             return Ok(());
         }
         let first = self.buffers.is_empty();
@@ -480,11 +580,11 @@ impl View {
 
 impl Drop for View {
     fn drop(&mut self) {
-        self.frame_viewport.destroy();
-        self.frame_subsurface.destroy();
-        self.frame_surface.destroy();
-        self.frame_buffer.destroy();
+        self.frame.take();
         self.dim_buffer.destroy();
+        if let Some(b) = self.clear_buffer.take() {
+            b.destroy();
+        }
         self.root_viewport.destroy();
     }
 }
@@ -567,7 +667,7 @@ pub(crate) struct App {
     views: Vec<View>,
     fonts: Fonts,
     theme: Theme,
-    /// The Loupe, the hint bar and the cursor layer.
+    /// What the Loupe, the hint bar and the cursor layer show.
     layers: Layers,
     selector: Selector,
     /// Where the pointer last was, in global logical coordinates.
@@ -575,9 +675,56 @@ pub(crate) struct App {
     outcome: Option<Outcome>,
     started: Instant,
     visible_reported: bool,
+    single_pixel: Option<WpSinglePixelBufferManagerV1>,
 }
 
 impl App {
+    /// Bring every output's Loupe, hint bar and cursor layer up to date.
+    fn refresh_layers(&mut self, frozen: Option<&Frozen>, now: Instant) {
+        for (i, view) in self.views.iter_mut().enumerate() {
+            if !view.presented {
+                continue;
+            }
+            let cx = Context {
+                frame: frozen.map(|f| &f.frames[i]),
+                logical: (view.logical.2, view.logical.3),
+                scale: view.size.0 as f64 / view.logical.2.max(1.0),
+                fonts: &mut self.fonts,
+                theme: &self.theme,
+                pool: &mut self.pool,
+            };
+            match view.layers.refresh(&self.layers, i, now, cx) {
+                Ok(true) => view.layer.commit(),
+                Ok(false) => {}
+                Err(e) => {
+                    eprintln!("hoarder: cannot draw the Overlay: {e}");
+                    self.outcome = Some(Outcome::Cancelled);
+                }
+            }
+        }
+    }
+
+    /// Make every View transparent and ask to hear when that is on screen.
+    fn hide(&mut self, qh: &QueueHandle<App>) -> std::io::Result<()> {
+        for (i, view) in self.views.iter_mut().enumerate() {
+            let clear = match &self.single_pixel {
+                Some(m) => m.create_u32_rgba_buffer(0, 0, 0, 0, qh, ()),
+                None => pixel_buffer(CLEAR, &self.shm, qh)?,
+            };
+            view.frame.take();
+            let surface = view.layer.wl_surface();
+            view.root_viewport
+                .set_destination(view.logical.2 as i32, view.logical.3 as i32);
+            surface.attach(Some(&clear), 0, 0);
+            surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
+            surface.frame(qh, HiddenFrame(i));
+            view.layer.commit();
+            view.hidden = Hidden::Committed;
+            view.clear_buffer = Some(clear);
+        }
+        Ok(())
+    }
+
     fn view_of(&self, surface: &WlSurface) -> Option<usize> {
         self.views
             .iter()
@@ -602,31 +749,6 @@ impl App {
     /// The size of one physical pixel at `at`, in logical pixels.
     fn pixel_at(&self, at: (f64, f64)) -> f64 {
         self.view_at(at).map_or(1.0, |v| 1.0 / v.scale().0)
-    }
-
-    /// Bring every output's Loupe, hint bar and cursor layer up to date.
-    fn refresh_layers(&mut self, frozen: &Frozen, now: Instant) {
-        for (i, view) in self.views.iter_mut().enumerate() {
-            if !view.presented {
-                continue;
-            }
-            let cx = Context {
-                frame: &frozen.frames[i],
-                logical: (view.logical.2, view.logical.3),
-                scale: view.size.0 as f64 / view.logical.2.max(1.0),
-                fonts: &mut self.fonts,
-                theme: &self.theme,
-                pool: &mut self.pool,
-            };
-            match view.layers.refresh(&self.layers, i, now, cx) {
-                Ok(true) => view.layer.commit(),
-                Ok(false) => {}
-                Err(e) => {
-                    eprintln!("hoarder: cannot draw the Overlay: {e}");
-                    self.outcome = Some(Outcome::Cancelled);
-                }
-            }
-        }
     }
 
     /// Act on what the selection asked for.
@@ -759,6 +881,48 @@ impl App {
             _ => {}
         }
     }
+}
+
+/// The frame callback of a View's transparent commit.
+struct HiddenFrame(usize);
+
+impl Dispatch2<WlCallback, App> for HiddenFrame {
+    fn event(
+        &self,
+        app: &mut App,
+        _: &WlCallback,
+        _: wayland_client::protocol::wl_callback::Event,
+        _: &Connection,
+        _: &QueueHandle<App>,
+    ) {
+        if let Some(view) = app.views.get_mut(self.0) {
+            view.hidden = Hidden::Shown;
+        }
+    }
+}
+
+/// A live output as the Overlay covers it, from what the compositor reports.
+fn live_screen(output: WlOutput, outputs: &OutputState) -> Option<Screen<'static>> {
+    use wayland_client::protocol::wl_output::Transform as T;
+    let info = outputs.info(&output)?;
+    let mode = info.modes.iter().find(|m| m.current)?;
+    let (w, h) = (mode.dimensions.0 as u32, mode.dimensions.1 as u32);
+    let size = match info.transform {
+        T::_90 | T::_270 | T::Flipped90 | T::Flipped270 => (h, w),
+        _ => (w, h),
+    };
+    let (x, y) = info.logical_position.unwrap_or(info.location);
+    let scale = info.scale_factor.max(1);
+    let (lw, lh) = info
+        .logical_size
+        .unwrap_or((size.0 as i32 / scale, size.1 as i32 / scale));
+    Some(Screen {
+        output,
+        name: info.name.clone().unwrap_or_default(),
+        logical: (x as f64, y as f64, lw as f64, lh as f64),
+        size,
+        frame: None,
+    })
 }
 
 /// The key a keysym stands for in the Overlay, if any.

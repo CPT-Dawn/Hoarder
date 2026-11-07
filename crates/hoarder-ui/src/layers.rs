@@ -141,7 +141,9 @@ impl Layers {
 
 /// What one output's layers need from the Overlay to draw.
 pub(crate) struct Context<'a> {
-    pub frame: &'a FrozenFrame,
+    /// The Frozen Frame; none over the live desktop (`--live`), where there
+    /// is neither a Loupe nor a cursor layer.
+    pub frame: Option<&'a FrozenFrame>,
     /// Logical size of the output.
     pub logical: (f64, f64),
     /// Physical pixels per logical pixel.
@@ -169,7 +171,7 @@ impl ViewLayers {
     /// Overlay dims it with the frame.
     pub(crate) fn new(
         root: &WlSurface,
-        frame: &WlSurface,
+        frame: Option<&WlSurface>,
         compositor: &CompositorState,
         subcompositor: &SubcompositorState,
         viewporter: &WpViewporter,
@@ -178,7 +180,7 @@ impl ViewLayers {
         let sprite =
             |sibling| Sprite::new(root, sibling, compositor, subcompositor, viewporter, qh);
         ViewLayers {
-            cursor: sprite(Some(frame)),
+            cursor: sprite(frame),
             hint: sprite(None),
             loupe: sprite(None),
             loupe_drawn: None,
@@ -206,7 +208,8 @@ impl ViewLayers {
         };
 
         // The cursor layer.
-        match (&cx.frame.cursor, layers.cursor) {
+        let cursor = cx.frame.and_then(|f| f.cursor.as_ref());
+        match (cursor, layers.cursor) {
             (Some(c), true) if !self.cursor.is_shown() => {
                 let at = (
                     (c.x as f64 / s).floor() as i32,
@@ -259,9 +262,9 @@ impl ViewLayers {
         }
 
         // The Loupe.
-        match layers.loupe_on(index) {
-            Some(at) => {
-                let (fw, fh) = cx.frame.upright_size();
+        match layers.loupe_on(index).zip(cx.frame) {
+            Some((at, frame)) => {
+                let (fw, fh) = frame.upright_size();
                 let pixel = (
                     ((at.0 * s).floor().max(0.0) as u32).min(fw.saturating_sub(1)),
                     ((at.1 * s).floor().max(0.0) as u32).min(fh.saturating_sub(1)),
@@ -273,7 +276,7 @@ impl ViewLayers {
                     let place = loupe::place(at, size, cx.logical);
                     commit |= self.loupe.move_to(place);
                 } else {
-                    let picture = loupe::render(cx.frame, pixel, s, cx.fonts, cx.theme);
+                    let picture = loupe::render(frame, pixel, s, cx.fonts, cx.theme);
                     let size = logical_of(picture.size);
                     let place = loupe::place(at, size, cx.logical);
                     commit |= self
@@ -287,5 +290,12 @@ impl ViewLayers {
             None => self.loupe.hide(),
         }
         Ok(commit)
+    }
+
+    /// Hide everything, e.g. before the live desktop is captured.
+    pub(crate) fn hide(&mut self) {
+        self.loupe.hide();
+        self.hint.hide();
+        self.cursor.hide();
     }
 }

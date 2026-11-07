@@ -8,7 +8,7 @@ use crate::geom::Rect;
 use crate::theme::Theme;
 
 /// `Argb8888` pixels as little-endian bytes (premultiplied).
-const CLEAR: [u8; 4] = [0, 0, 0, 0];
+pub(crate) const CLEAR: [u8; 4] = [0, 0, 0, 0];
 /// Black at 45% opacity: what the Overlay dims the unselected frame with.
 pub(crate) const DIM: [u8; 4] = [0, 0, 0, 115];
 

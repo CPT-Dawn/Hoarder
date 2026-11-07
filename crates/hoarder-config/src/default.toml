@@ -54,6 +54,7 @@ format = "hex"            # hex | rgb | hsl
 persist = true
 deny_types = []
 max_offer_mb = 64
+no_takeover_apps = []     # app_ids whose copies are never kept alive after they exit
 on_clip = ""
 [clipboard.primary]
 persist = false

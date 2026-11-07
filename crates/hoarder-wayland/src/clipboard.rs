@@ -282,7 +282,7 @@ fn advertises(globals: &GlobalList, interface: &str) -> bool {
         .with_list(|list| list.iter().any(|g| g.interface == interface))
 }
 
-fn hidden_globals() -> HashSet<String> {
+pub(crate) fn hidden_globals() -> HashSet<String> {
     std::env::var(HIDE_GLOBALS_ENV)
         .unwrap_or_default()
         .split(',')
