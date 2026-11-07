@@ -16,7 +16,8 @@ use std::sync::mpsc;
 
 use calloop::LoopHandle;
 use calloop::channel::{Event, channel};
-use hoarder_ipc::{ClipSummary, ErrorCode, Failure, Got, Value};
+use hoarder_ipc::{Cleared, ClipSummary, ErrorCode, Failure, Got, Value};
+use hoarder_store::retention::Limits;
 use hoarder_store::{Clip, Store};
 
 use super::keyring;
@@ -25,9 +26,15 @@ use super::{Daemon, Representation};
 /// Work for the History thread. `client` and `id` say whom to answer.
 #[derive(Debug)]
 pub(super) enum Job {
+    /// Record a Clip, then apply retention.
     Record {
         reprs: Vec<Representation>,
         app: Option<String>,
+        limits: Limits,
+    },
+    /// Apply retention (the hourly run, or after a config change).
+    Retain {
+        limits: Limits,
     },
     List {
         client: u64,
@@ -53,6 +60,30 @@ pub(super) enum Job {
     },
     /// `history.encrypt` changed: migrate the History to match.
     Encrypt(bool),
+    Pin {
+        client: u64,
+        id: u64,
+        clip: i64,
+        pinned: bool,
+    },
+    Clear {
+        client: u64,
+        id: u64,
+        pinned: bool,
+    },
+}
+
+/// The retention limits `history` sets; 0 means no limit.
+pub(super) fn limits(history: &hoarder_config::History) -> Limits {
+    const MB: u64 = 1024 * 1024;
+    const DAY_MS: i64 = 24 * 60 * 60 * 1000;
+    let some = |v: u32| (v > 0).then_some(u64::from(v));
+    Limits {
+        max_clips: some(history.max_clips.get()).map(|v| v as usize),
+        max_age_ms: some(history.max_age_days.get()).map(|d| d as i64 * DAY_MS),
+        max_clip_bytes: some(history.max_clip_mb.get()).map(|v| v * MB),
+        max_total_bytes: some(history.max_total_mb.get()).map(|v| v * MB),
+    }
 }
 
 /// What the History thread hands back to the loop.
@@ -234,15 +265,22 @@ fn worker(mut vault: Vault, jobs: mpsc::Receiver<Job>, done: calloop::channel::S
                 vault.set_encrypt(encrypt);
                 continue;
             }
-            Job::Record { reprs, app } => {
+            Job::Record { reprs, app, limits } => {
                 // Unavailable (say, a locked keyring): drop it, never store it plain.
                 let Ok(store) = vault.store() else {
                     continue;
                 };
                 let reprs: Vec<(&str, &[u8])> =
                     reprs.iter().map(|(m, d)| (m.as_str(), &d[..])).collect();
-                if let Err(e) = store.record(&reprs, app.as_deref(), now()) {
-                    eprintln!("hoarder: cannot record a Clip: {e}");
+                match store.record(&reprs, app.as_deref(), now()) {
+                    Ok(_) => retain(store, &limits),
+                    Err(e) => eprintln!("hoarder: cannot record a Clip: {e}"),
+                }
+                continue;
+            }
+            Job::Retain { limits } => {
+                if let Ok(store) = vault.store() {
+                    retain(store, &limits);
                 }
                 continue;
             }
@@ -286,10 +324,44 @@ fn worker(mut vault: Vault, jobs: mpsc::Receiver<Job>, done: calloop::channel::S
                 });
                 reply(client, id, result)
             }
+            Job::Pin {
+                client,
+                id,
+                clip,
+                pinned,
+            } => {
+                let result = vault
+                    .store()
+                    .and_then(|store| match store.pin(clip, pinned) {
+                        Ok(true) => store
+                            .clip(clip)
+                            .map_err(failed)
+                            .and_then(|c| c.ok_or(not_found(clip)))
+                            .map(|c| to_value(&summary(&c))),
+                        Ok(false) => Err(not_found(clip)),
+                        Err(e) => Err(failed(e)),
+                    });
+                reply(client, id, result)
+            }
+            Job::Clear { client, id, pinned } => {
+                let result = vault.store().and_then(|store| {
+                    store
+                        .clear(pinned)
+                        .map(|n| to_value(&Cleared { deleted: n as u64 }))
+                        .map_err(failed)
+                });
+                reply(client, id, result)
+            }
         };
         if done.send(out).is_err() {
             return;
         }
+    }
+}
+
+fn retain(store: &mut Store, limits: &Limits) {
+    if let Err(e) = store.retain(limits, now()) {
+        eprintln!("hoarder: cannot apply History limits: {e}");
     }
 }
 

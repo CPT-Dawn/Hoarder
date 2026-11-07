@@ -14,8 +14,8 @@ blake3.workspace = true
 rusqlite.workspace = true
 zeroize.workspace = true
 
-[lints]
-workspace = true
-
 [dev-dependencies]
 tempfile.workspace = true
+
+[lints]
+workspace = true

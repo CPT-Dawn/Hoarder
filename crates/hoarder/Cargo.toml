@@ -21,11 +21,14 @@ image.workspace = true
 jiff.workspace = true
 oo7.workspace = true
 png.workspace = true
+regex.workspace = true
+region.workspace = true
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 webp.workspace = true
 zbus.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 # A stand-in notification server on a private bus.
