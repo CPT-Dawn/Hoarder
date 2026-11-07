@@ -217,3 +217,98 @@ fn shot_all_keeps_every_bit_of_a_10bit_output_in_a_16bit_png() {
     assert_eq!(png.rgb(0, 0), [0, 3 << 6, 0xffff]);
     assert_eq!(png.rgb(1023 % 640, 1023 / 640), [0xffff, 0xff3f, 0]);
 }
+
+#[test]
+fn shot_all_falls_back_to_wlr_screencopy_without_ext_capture() {
+    let spec = OutputSpec::new(600, 480)
+        .scale(1.25)
+        .transform(Transform::Rotate90);
+    let session = Session::start(&[spec]).unwrap();
+    let client = session.client().unwrap();
+    client
+        .paint(session.output("HEADLESS-1"), &Pattern::Quadrants)
+        .unwrap();
+
+    let out = session
+        .command(env!("CARGO_BIN_EXE_hoarder"))
+        .args(["shot", "all", "-o", "-"])
+        .env("HOARDER_HIDE_GLOBALS", "ext_image_copy_capture_manager_v1")
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "screencopy fallback failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let png = Png::decode(&out.stdout);
+    let size = spec.physical_size();
+    assert_eq!((png.width, png.height), size);
+    assert_pattern_8bit(&png, &Pattern::Quadrants, 0, size, "wlr-screencopy");
+}
+
+#[test]
+fn shot_all_exits_3_on_a_compositor_without_capture_protocols() {
+    let session = Session::start_default().unwrap();
+
+    let out = session
+        .command(env!("CARGO_BIN_EXE_hoarder"))
+        .args(["shot", "all", "-o", "-"])
+        .env(
+            "HOARDER_HIDE_GLOBALS",
+            "ext_image_copy_capture_manager_v1,zwlr_screencopy_manager_v1",
+        )
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(3), "exit code: {out:?}");
+    assert!(out.stdout.is_empty(), "nothing is written on failure");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for needle in ["ext-image-copy-capture-v1", "wlr-screencopy", "KWin"] {
+        assert!(
+            stderr.contains(needle),
+            "stderr should mention {needle}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn shot_all_lays_out_every_output_side_by_side_in_a_file() {
+    let left = OutputSpec::new(320, 240);
+    let right = OutputSpec::new(200, 300);
+    let session = Session::start(&[left, right]).unwrap();
+    let client = session.client().unwrap();
+    client
+        .paint(session.output("HEADLESS-1"), &Pattern::Quadrants)
+        .unwrap();
+    client
+        .paint(session.output("HEADLESS-2"), &Pattern::Checker { cell: 1 })
+        .unwrap();
+    let path = session.runtime_dir().join("all.png");
+
+    let out = session
+        .command(env!("CARGO_BIN_EXE_hoarder"))
+        .args(["shot", "all", "-o"])
+        .arg(&path)
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.stdout.is_empty(), "-o PATH writes nothing to stdout");
+    let png = Png::decode(&std::fs::read(&path).unwrap());
+    assert_eq!((png.width, png.height), (520, 300));
+    assert_pattern_8bit(&png, &Pattern::Quadrants, 0, (320, 240), "HEADLESS-1");
+    assert_pattern_8bit(
+        &png,
+        &Pattern::Checker { cell: 1 },
+        320,
+        (200, 300),
+        "HEADLESS-2",
+    );
+    // Below the shorter output there is no desktop: opaque black.
+    assert_eq!(png.rgb(0, 299), [0, 0, 0]);
+}
