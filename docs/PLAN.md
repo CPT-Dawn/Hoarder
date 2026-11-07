@@ -406,6 +406,8 @@ Tests go through as few seams as possible, and as high up as possible.
 
 ## 14. Milestones
 
+> Work is tracked as vertical-slice tickets #57–#86 under spec #56, grouped into the GitHub milestones below; v1.1 stays in epic #50. The lists here describe scope, not ticket boundaries. M0's spikes were folded into #58 (fidelity), #61 (rendering budgets) and #72 (Takeover app matrix).
+
 ### M0: De-risking prototypes
 1. **Takeover prototype:** a minimal data-control daemon implementing ADR-0005, run against the app matrix. It produces a compatibility report and confirms or revises the reader deny list.
 2. **Fidelity spike:** freeze outputs at native size, shown 1:1 through a viewporter subsurface, on fractional, rotated and 10-bit outputs, with byte-exact crop verification.
