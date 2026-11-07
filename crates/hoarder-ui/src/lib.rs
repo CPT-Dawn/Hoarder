@@ -10,6 +10,7 @@ mod chrome;
 pub mod countdown;
 pub mod flash;
 mod geom;
+mod icon;
 mod layers;
 mod loupe;
 pub mod overlay;

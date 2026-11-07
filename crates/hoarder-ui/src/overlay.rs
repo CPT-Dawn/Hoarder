@@ -223,6 +223,7 @@ fn show(frozen: Option<&Frozen>, started: Instant, options: &Options) -> Result<
         started,
         visible_reported: false,
         single_pixel,
+        icons: Default::default(),
     };
     if options.pick {
         app.layers.pin_loupe();
@@ -740,6 +741,8 @@ pub(crate) struct App {
     started: Instant,
     visible_reported: bool,
     single_pixel: Option<WpSinglePixelBufferManagerV1>,
+    /// App icons for window labels, by app_id, looked up once each.
+    icons: std::collections::HashMap<String, Option<tiny_skia::Pixmap>>,
 }
 
 impl App {
@@ -949,11 +952,19 @@ impl App {
         } else {
             &window.title
         };
+        let icon = self
+            .icons
+            .entry(window.app_id.clone())
+            .or_insert_with(|| crate::icon::lookup(&window.app_id));
         let label = (!text.is_empty()).then(|| {
             let sx = view.ui_scale();
-            let mut l = self
-                .fonts
-                .label(&ellipsize(text, 80), sx, 0, 0, &self.theme);
+            let mut l = self.fonts.window_label(
+                &ellipsize(text, 80),
+                icon.as_ref(),
+                &window.app_id,
+                sx,
+                &self.theme,
+            );
             // Centred on the part of the window this output shows.
             l.rect.x = shown.x + ((shown.w - l.rect.w) / 2).max(0);
             l.rect.y = shown.y + ((shown.h - l.rect.h) / 2).max(0);
