@@ -502,3 +502,60 @@ fn migrate(db: &mut Connection) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A History written before the `clips_text` index (schema version 1)
+    /// upgrades in place: old Clips become searchable, deletes reach the new
+    /// index, and new Clips land in it too.
+    #[test]
+    fn a_version_1_history_migrates_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let db = Connection::open(dir.path().join("history.db")).unwrap();
+            db.execute_batch(MIGRATIONS[0]).unwrap();
+            db.pragma_update(None, "user_version", 1).unwrap();
+            for (id, preview) in [(1, "an old needle"), (2, "another old needle")] {
+                db.execute(
+                    "INSERT INTO clips(id, created_at, last_used_at, kind, preview, size, hash)
+                     VALUES (?1, ?1, ?1, 'text', ?2, ?3, ?4)",
+                    (id, preview, preview.len() as i64, [id as u8; 32]),
+                )
+                .unwrap();
+                db.execute(
+                    "INSERT INTO reprs(clip_id, ord, mime, inline) VALUES (?1, 0, 'text/plain', ?2)",
+                    (id, preview.as_bytes()),
+                )
+                .unwrap();
+            }
+        }
+
+        let mut store = Store::open(dir.path()).unwrap();
+        let version: i64 = store
+            .db
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, MIGRATIONS.len() as i64);
+
+        let ids = |store: &Store| -> Vec<i64> {
+            store
+                .search("needle", 10)
+                .unwrap()
+                .into_iter()
+                .map(|c| c.id)
+                .collect()
+        };
+        assert_eq!(ids(&store), [2, 1]);
+
+        assert!(store.delete(1).unwrap());
+        assert_eq!(ids(&store), [2]);
+
+        let new = store
+            .record(&[("text/plain", b"a new needle")], None, 3)
+            .unwrap()
+            .id;
+        assert_eq!(ids(&store), [new, 2]);
+    }
+}
