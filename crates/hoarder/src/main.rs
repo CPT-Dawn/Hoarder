@@ -1,5 +1,7 @@
 mod clipboard;
+mod config;
 mod image;
+mod save;
 mod shot;
 
 use std::path::PathBuf;
@@ -13,6 +15,9 @@ use clap::{Parser, Subcommand};
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
+    /// Override a setting for this run only, e.g. `--set screenshot.save=false`.
+    #[arg(long = "set", global = true, value_name = "KEY=VALUE", value_parser = config::parse_override)]
+    overrides: Vec<(String, String)>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -21,10 +26,11 @@ enum Command {
     Shot {
         /// What to capture.
         target: shot::Target,
-        /// Write the image to PATH, or to stdout with `-`.
+        /// Write the image to PATH, or to stdout with `-`, instead of saving it
+        /// to `screenshot.dir`.
         #[arg(short = 'o', long = "output", value_name = "PATH")]
         output: Option<PathBuf>,
-        /// Leave the clipboard alone.
+        /// Leave the clipboard alone (`screenshot.copy = false` for this run).
         #[arg(long)]
         no_copy: bool,
     },
@@ -35,14 +41,19 @@ enum Command {
     /// Serve an Offer read from stdin; started by Hoarder itself.
     #[command(name = clipboard::SERVE_SUBCOMMAND, hide = true)]
     ServeOffer(clipboard::ServeArgs),
+    /// Read, change and check `config.toml`.
+    #[command(subcommand)]
+    Config(config::ConfigCommand),
 }
 
-/// Process exit codes (PLAN.md §10). Usage errors (2) come from clap.
+/// Process exit codes (PLAN.md §10). clap exits 2 on its own usage errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exit {
     Success = 0,
     /// Cancelled by the user, or (for `paste`) nothing to paste.
     Cancelled = 1,
+    /// Bad arguments or an invalid config.
+    Usage = 2,
     /// Unsupported compositor or protocol.
     Unsupported = 3,
     Io = 4,
@@ -61,10 +72,14 @@ fn main() -> ExitCode {
             target,
             output,
             no_copy,
-        }) => shot::run(target, output.as_deref(), !no_copy),
+        }) => config::effective(&cli.overrides).and_then(|mut config| {
+            config.screenshot.copy &= !no_copy;
+            shot::run(target, output.as_deref(), &config)
+        }),
         Some(Command::Copy(args)) => clipboard::copy(args),
         Some(Command::Paste(args)) => clipboard::paste(args),
         Some(Command::ServeOffer(args)) => clipboard::serve_child(args),
+        Some(Command::Config(command)) => config::run(command, &cli.overrides),
         None => Ok(()),
     };
     match result {
