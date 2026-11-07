@@ -213,6 +213,11 @@ clips_fts(preview)                                                              
 - **Dedup:** a repeat hash bumps `last_used_at`.
 - **Retention:** 1,000 Clips, 30 days for unpinned Clips, 64 MB per Clip, 1 GB in total, evicting the oldest unpinned first. It runs on insert and on an hourly timer.
 - **Encryption:** off by default. `history.encrypt = true` encrypts with age, using a key held in the Secret Service keyring (`oo7`).
+  - Sealed: every representation (inline and blob files), thumbnails and previews. Search uses an in-memory FTS index (`temp.clips_fts`, which shadows the on-disk one), rebuilt from the sealed previews on unlock; the on-disk index stays empty.
+  - The dedup `hash` and blob file names are blake3 keyed with a key derived from the History key, so they can't confirm a guessed copy.
+  - Left readable: times, pinned, source app, kind, MIME types and sizes, which ordering and retention need.
+  - Toggling the setting (live or at start) migrates History both ways, then scrubs the old form: superseded blob files are deleted, and `secure_delete`, `VACUUM` and a truncating WAL checkpoint clean the database. Copy-on-write filesystems and SSDs may still hold old blocks; full-disk encryption covers those.
+  - With no Secret Service, a locked keyring, or a key missing from it, History is unavailable and says why. Nothing is recorded in plain text in the meantime, and the next request tries again. Hoarder never prompts, and it never makes a new key over an encrypted History.
 - **Migrations:** the database stores a `user_version` and is upgraded forward only.
 
 ### 5.4 Restore and auto-paste
