@@ -189,7 +189,7 @@ selection(null)  ─► the previous Selection was Normal or Concealed, the Daem
   - Built-in patterns: PEM private keys, AWS `AKIA…`, GCP service-account JSON, GitHub `gh[pousr]_…`, Slack `xox[abpr]-`, Stripe `sk_live_`, JWT, and Luhn-valid 13–19-digit card numbers.
 - **Pause** (`hoarder pause [duration]`): nothing is recorded. Persistence and Takeover still work.
 
-**Concealed handling:** buffers are allocated with `memsec` mlock and wrapped in `secrecy`, and zeroized when dropped. They are never written to SQLite. At TTL expiry, if Hoarder still owns the Selection, it clears it.
+**Concealed handling:** bytes are copied into their own pages, locked out of swap with `region::lock`, and zeroized (`zeroize`) when dropped ([ADR-0009](adr/0009-concealed-memory-without-unsafe.md): no `unsafe`, so no `memsec`). They are never written to SQLite. At TTL expiry, if Hoarder still owns the Selection, it clears it.
 
 ### 5.2 `hoarder copy` / `hoarder paste` and the Compat shims
 
