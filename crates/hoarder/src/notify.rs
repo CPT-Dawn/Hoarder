@@ -241,6 +241,53 @@ async fn serve(args: NotifyArgs) -> zbus::Result<()> {
     }
 }
 
+/// Side of the swatch in `hoarder pick`'s toast, in pixels.
+const SWATCH: i32 = 64;
+
+/// Toast a picked colour: `value` as the summary, a swatch of `rgb` as the
+/// image. Without a bus or a notification server there is just no toast.
+pub fn swatch(value: &str, rgb: [u8; 3]) {
+    if let Err(e) = zbus::block_on(toast_swatch(value, rgb)) {
+        eprintln!("hoarder: cannot show the notification: {e}");
+    }
+}
+
+async fn toast_swatch(value: &str, rgb: [u8; 3]) -> zbus::Result<()> {
+    let Ok(conn) = zbus::Connection::session().await else {
+        return Ok(());
+    };
+    let proxy = NotificationsProxy::new(&conn).await?;
+    // The spec's `image-data`: width, height, rowstride, alpha, bits per
+    // sample, channels, pixels.
+    let pixels = rgb.repeat((SWATCH * SWATCH) as usize);
+    let image = (SWATCH, SWATCH, SWATCH * 3, false, 8i32, 3i32, pixels);
+    let hints = HashMap::from([
+        ("desktop-entry", Variant::from("hoarder")),
+        ("image-data", Variant::from(image)),
+    ]);
+    match proxy
+        .notify(
+            "Hoarder",
+            0,
+            "color-picker",
+            value,
+            "Copied to the clipboard",
+            &[],
+            hints,
+            -1,
+        )
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(zbus::Error::MethodError(name, _, _))
+            if name.as_str() == "org.freedesktop.DBus.Error.ServiceUnknown" =>
+        {
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Open in an annotation tool if one is installed, else the default app.
 fn edit(path: &Path) {
     let editors: [(&str, &str); 2] = [("satty", "--filename"), ("swappy", "-f")];
