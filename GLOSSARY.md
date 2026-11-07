@@ -36,6 +36,14 @@ _Avoid_: snap, screengrab, shot (except as the CLI verb)
 The full-screen selection surface shown while the user chooses what to Capture.
 _Avoid_: selector, slurp UI
 
+**Frozen Frame**:
+The native-resolution copy of one output taken before the Overlay appears; the Overlay shows it and the Capture is cut from it.
+_Avoid_: freeze, snapshot, background
+
+**Target**:
+What a Capture covers: a **Region** (user-drawn rectangle), a **Window**, an **Output** (one monitor), or **All Outputs**.
+_Avoid_: mode, area, screen (for Output)
+
 ### System
 
 **Daemon**:
@@ -49,6 +57,10 @@ _Avoid_: client (ambiguous with Wayland clients)
 **Picker**:
 Hoarder's own popup for browsing, searching and restoring Clips.
 _Avoid_: menu, launcher, clipboard manager window
+
+**Zenith module**:
+The `clipboard` module inside the Zenith bar: a Front end showing Daemon state and recent Clips in a popover.
+_Avoid_: applet, widget, bar plugin
 
 **Compat shims**:
 Optional `wl-copy` / `wl-paste` commands that accept wl-clipboard's flags and forward to Hoarder.

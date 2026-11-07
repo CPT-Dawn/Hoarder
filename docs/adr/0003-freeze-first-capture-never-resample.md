@@ -1,0 +1,3 @@
+# Freeze-first Capture: crop from the original buffers, never resample
+
+Every Capture copies all outputs once, at their native buffer size, *before* the Overlay appears; the Overlay displays those exact buffers 1:1 (viewporter) and the final image is cropped from them in buffer pixels. This deliberately differs from grim+slurp (select on the live screen, then capture) and from grimblast/Hyprshot freeze (show a screencopy, then capture the overlay again), which resample once or twice and leak cursors, selection borders and animations into the image. Freeze-first is what makes "what you see is exactly what you get, pixel for pixel" possible. `--live` opts out for cases that need a fresh frame.
