@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+default-members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+# MSRV policy: current stable minus two releases (PLAN.md §3).
+rust-version = "1.97"
+license = "MIT"
+repository = "https://github.com/CPT-Dawn/Hoarder"
+authors = ["Swastik Patel <CPT-Dawn@users.noreply.github.com>"]
+
+[workspace.dependencies]
+hoarder-config = { path = "crates/hoarder-config", version = "0.1.0" }
+hoarder-e2e = { path = "crates/hoarder-e2e" }
+hoarder-ipc = { path = "crates/hoarder-ipc", version = "0.1.0" }
+hoarder-store = { path = "crates/hoarder-store", version = "0.1.0" }
+hoarder-ui = { path = "crates/hoarder-ui", version = "0.1.0" }
+hoarder-wayland = { path = "crates/hoarder-wayland", version = "0.1.0" }
+
+clap = { version = "4.6", features = ["derive"] }
+rustix = { version = "1.1", features = ["event", "fs", "pipe"] }
+tempfile = "3.27"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

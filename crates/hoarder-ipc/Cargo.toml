@@ -1,0 +1,14 @@
+[package]
+name = "hoarder-ipc"
+description = "Request, response and event types for the Hoarder JSON-lines IPC API, plus a framing codec."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true
