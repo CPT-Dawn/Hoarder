@@ -57,6 +57,10 @@ use wayland_client::{
 };
 use wayland_protocols::wp::{
     cursor_shape::v1::client::wp_cursor_shape_device_v1::{Shape, WpCursorShapeDeviceV1},
+    fractional_scale::v1::client::{
+        wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1,
+        wp_fractional_scale_v1::{self, WpFractionalScaleV1},
+    },
     single_pixel_buffer::v1::client::wp_single_pixel_buffer_manager_v1::WpSinglePixelBufferManagerV1,
     viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
 };
@@ -193,6 +197,9 @@ fn show(frozen: Option<&Frozen>, started: Instant, options: &Options) -> Result<
         .map_err(missing("wp_viewporter"))?;
     let cursor_shapes = CursorShapeManager::bind(&globals, &qh).ok();
     let single_pixel: Option<WpSinglePixelBufferManagerV1> = globals.bind(&qh, 1..=1, ()).ok();
+    // The scale the compositor prefers for each output, for the chrome's
+    // text and strokes; the buffers are physical size either way.
+    let fractional: Option<WpFractionalScaleManagerV1> = globals.bind(&qh, 1..=1, ()).ok();
 
     let mut app = App {
         registry: RegistryState::new(&globals),
@@ -287,7 +294,12 @@ fn show(frozen: Option<&Frozen>, started: Instant, options: &Options) -> Result<
             &qh,
         )
         .map_err(failed)?;
+        let index = app.views.len();
         app.views.push(view);
+        if let Some(m) = &fractional {
+            let surface = app.views[index].layer.wl_surface().clone();
+            app.views[index].fractional = Some(m.get_fractional_scale(&surface, &qh, index));
+        }
     }
     // Live, the caller had no Frozen Frames to judge the scales by, so the
     // outputs' own scales decide whether a selection must stay on one.
@@ -361,6 +373,9 @@ struct View {
     /// When the fade-in started, and the step on screen.
     fade_start: Option<Instant>,
     fade_shown: Option<usize>,
+    /// `wp_fractional_scale_v1` for the chrome, and the scale it prefers.
+    fractional: Option<WpFractionalScaleV1>,
+    preferred_scale: Option<f64>,
     palette: Palette,
     buffers: Vec<ChromeBuffer>,
     drawn: Scene,
@@ -478,6 +493,8 @@ impl View {
             fade,
             fade_start: None,
             fade_shown: None,
+            fractional: None,
+            preferred_scale: None,
             palette,
             buffers: Vec::new(),
             drawn: Scene::default(),
@@ -496,6 +513,13 @@ impl View {
             self.size.0 as f64 / self.logical.2.max(1.0),
             self.size.1 as f64 / self.logical.3.max(1.0),
         )
+    }
+
+    /// The scale to size the chrome's text, handles and strokes by: what
+    /// the compositor prefers (`wp_fractional_scale_v1`), or else what the
+    /// buffer's size says.
+    fn ui_scale(&self) -> f64 {
+        self.preferred_scale.unwrap_or(self.scale().0)
     }
 
     /// Whether the global logical point `(x, y)` lies on this output.
@@ -616,6 +640,9 @@ impl Drop for View {
         for pixel in self.fade.drain(..) {
             pixel.destroy();
         }
+        if let Some(f) = self.fractional.take() {
+            f.destroy();
+        }
         if let Some(b) = self.clear_buffer.take() {
             b.destroy();
         }
@@ -725,7 +752,7 @@ impl App {
             let cx = Context {
                 frame: frozen.map(|f| &f.frames[i]),
                 logical: (view.logical.2, view.logical.3),
-                scale: view.size.0 as f64 / view.logical.2.max(1.0),
+                scale: view.ui_scale(),
                 fonts: &mut self.fonts,
                 theme: &self.theme,
                 pool: &mut self.pool,
@@ -869,7 +896,7 @@ impl App {
                     match keep {
                         Some(l) => Some(l.clone()),
                         None => {
-                            let (sx, _) = view.scale();
+                            let sx = view.ui_scale();
                             let mut l = self.fonts.label(&text, sx, sel.x, 0, &self.theme);
                             l.rect.y = label_y(sel, l.rect.h, view.size.1);
                             Some(l)
@@ -879,7 +906,7 @@ impl App {
                 _ => None,
             };
             let handles = match selection {
-                Some(sel) if refining => handles(sel, view.scale().0),
+                Some(sel) if refining => handles(sel, view.ui_scale()),
                 _ => Vec::new(),
             };
             let view = &mut self.views[i];
@@ -923,7 +950,7 @@ impl App {
             &window.title
         };
         let label = (!text.is_empty()).then(|| {
-            let (sx, _) = view.scale();
+            let sx = view.ui_scale();
             let mut l = self
                 .fonts
                 .label(&ellipsize(text, 80), sx, 0, 0, &self.theme);
@@ -1374,5 +1401,23 @@ delegate_noop!(App: WpViewporter);
 delegate_noop!(App: WpViewport);
 delegate_noop!(App: wayland_client::protocol::wl_region::WlRegion);
 delegate_noop!(App: WpSinglePixelBufferManagerV1);
+delegate_noop!(App: WpFractionalScaleManagerV1);
+
+impl wayland_client::Dispatch<WpFractionalScaleV1, usize> for App {
+    fn event(
+        app: &mut Self,
+        _: &WpFractionalScaleV1,
+        event: wp_fractional_scale_v1::Event,
+        &view: &usize,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wp_fractional_scale_v1::Event::PreferredScale { scale } = event
+            && let Some(v) = app.views.get_mut(view)
+        {
+            v.preferred_scale = Some(f64::from(scale) / 120.0);
+        }
+    }
+}
 delegate_noop!(App: WlShmPool);
 delegate_noop!(App: ignore WlBuffer);
