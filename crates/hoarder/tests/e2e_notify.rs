@@ -451,3 +451,44 @@ fn shot_is_silent_and_successful_without_a_notification_server() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!stderr.contains("notif"), "stderr: {stderr}");
 }
+
+/// A 1× output beside a 2× one.
+fn one_by_two() -> Session {
+    Session::start(&[
+        OutputSpec::new(320, 240),
+        OutputSpec::new(640, 480).scale(2.0),
+    ])
+    .unwrap()
+}
+
+#[test]
+fn a_mixed_scale_capture_carries_its_badge() {
+    let session = one_by_two();
+    let bus = Bus::start(&session);
+
+    hoarder(&session, None, &["shot", "all"]);
+
+    let n = bus.notified(1);
+    assert!(n.body.contains("1280 × 480"), "body: {}", n.body);
+    assert!(n.body.contains("mixed scale"), "body: {}", n.body);
+}
+
+#[test]
+fn a_split_capture_announces_each_file() {
+    let session = one_by_two();
+    let bus = Bus::start(&session);
+
+    hoarder(
+        &session,
+        None,
+        &["shot", "all", "--set", "screenshot.mixed_scale=split"],
+    );
+
+    let bodies = [bus.notified(1).body, bus.notified(2).body];
+    assert!(bodies.iter().any(|b| b.contains("320 × 240")), "{bodies:?}");
+    assert!(bodies.iter().any(|b| b.contains("640 × 480")), "{bodies:?}");
+    assert!(
+        !bodies.iter().any(|b| b.contains("mixed scale")),
+        "{bodies:?}"
+    );
+}

@@ -36,6 +36,9 @@ pub struct NotifyArgs {
     width: u32,
     #[arg(long)]
     height: u32,
+    /// A badge such as `mixed scale` or `HDR`; may be repeated.
+    #[arg(long = "badge")]
+    badges: Vec<String>,
 }
 
 #[zbus::proxy(
@@ -92,6 +95,9 @@ fn try_spawn(capture: &Delivered) -> Result<(), String> {
         .arg(capture.width.to_string())
         .arg("--height")
         .arg(capture.height.to_string());
+    for badge in capture.badges.labels() {
+        cmd.arg("--badge").arg(badge);
+    }
     if let Some(path) = &capture.path {
         cmd.arg("--path")
             .arg(std::path::absolute(path).map_err(|e| e.to_string())?);
@@ -148,6 +154,9 @@ async fn serve(args: NotifyArgs) -> zbus::Result<()> {
         "Screenshot taken"
     };
     let mut body = format!("{} × {}", args.width, args.height);
+    for badge in &args.badges {
+        body = format!("{body} · {badge}");
+    }
     let mut hints = HashMap::from([("desktop-entry", Variant::from("hoarder"))]);
     let mut buttons: Vec<&str> = Vec::new();
     let uri = args.path.as_deref().map(file_uri);

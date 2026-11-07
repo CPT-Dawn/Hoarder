@@ -1,17 +1,18 @@
 //! `hoarder shot`: freeze, cut the Target, deliver (PLAN.md §4.1).
 
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use clap::ValueEnum;
-use hoarder_config::{Config, Screenshot, State, StoredRegion};
+use hoarder_config::{Config, MixedScale, Screenshot, State, StoredRegion};
 use hoarder_ui::{Options, Outcome, OverlayError, Region, Theme, countdown, overlay};
-use hoarder_wayland::{CaptureError, Frozen};
+use hoarder_wayland::{CaptureError, Frozen, Window};
 
 use crate::Exit;
 use crate::after::Delivered;
+use crate::cut;
 use crate::image::Image;
 
 /// What a Capture covers.
@@ -69,6 +70,9 @@ pub fn run(
             height: r.height,
         }),
         theme: Theme::load(&config.theme),
+        // Both decided in `from_overlay`, for the moment the Overlay shows.
+        clamp_to_output: false,
+        windows: Vec::new(),
         hint_bar: state.hint_bar_due(),
         cursor: config.screenshot.cursor.into(),
     };
@@ -76,51 +80,136 @@ pub fn run(
         countdown::run(delay, &options).map_err(overlay_error)?;
     }
     let started = Instant::now();
-    let (image, name) = match target {
+    let (cut, name) = match target {
         Target::All => {
             let mut frozen = freeze()?;
             if config.screenshot.cursor {
                 composite_cursor(&mut frozen);
             }
-            (Image::all_outputs(&frozen.frames), target.name())
+            (
+                cut::cut(&frozen.frames, None, &config.screenshot),
+                target.name(),
+            )
         }
-        Target::Region => from_overlay(when.live, started, &options, &mut state)?,
+        Target::Region => from_overlay(when.live, started, &options, &mut state, config)?,
     };
-    let image = Arc::new(image);
-    // The file is encoded on a worker thread, started before the clipboard
+    // Also on stderr, for runs that end up in a pipe rather than a notification.
+    for badge in cut.badges.labels() {
+        eprintln!("hoarder: {badge}: {}", explain(badge));
+    }
+    let main = Arc::new(cut.main_part().image.clone());
+    let parts: Vec<(Option<String>, Arc<Image>)> = cut
+        .parts
+        .into_iter()
+        .map(|p| (p.output, Arc::new(p.image)))
+        .collect();
+    // The files are encoded on worker threads, started before the clipboard
     // copy, so a slow format (AVIF takes seconds at 4K) never delays it.
-    let saving = (output.is_none() && config.screenshot.save)
-        .then(|| crate::save::spawn(image.clone(), name, None, config.screenshot.clone()));
+    let savings: Vec<_> = if output.is_none() && config.screenshot.save {
+        parts
+            .iter()
+            .map(|(part, image)| {
+                crate::save::spawn(
+                    image.clone(),
+                    name,
+                    None,
+                    part.clone(),
+                    config.screenshot.clone(),
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     // Only now the Target is chosen: never over the Overlay, never in the Capture.
     let _flash = crate::after::flash(&config.screenshot);
     if config.screenshot.copy {
         let mut png = Vec::new();
-        image
-            .write_png(&mut png)
+        main.write_png(&mut png)
             .map_err(|e| (Exit::Io, format!("cannot encode the Capture: {e}")))?;
         crate::clipboard::copy_capture(&png)?;
     }
-    let path = match (output, saving) {
-        (Some(output), _) => {
-            deliver(&image, output, &config.screenshot)
-                .map_err(|e| (Exit::Io, format!("cannot write {}: {e}", output.display())))?;
-            (output != Path::new("-")).then(|| output.to_owned())
-        }
-        (None, Some(saving)) => {
-            let path = saving.wait()?;
-            println!("{}", path.display());
-            Some(path)
-        }
-        (None, None) => None,
-    };
-    let delivered = Delivered {
+    let delivered = |image: &Image, path: Option<PathBuf>| Delivered {
         path,
         width: image.width,
         height: image.height,
         target: name,
+        badges: cut.badges,
+    };
+    let delivered: Vec<Delivered> = match output {
+        Some(output) => {
+            let write = |image: &Image, path: &Path| {
+                deliver(image, path, &config.screenshot)
+                    .map_err(|e| (Exit::Io, format!("cannot write {}: {e}", path.display())))
+            };
+            match parts.as_slice() {
+                _ if output == Path::new("-") => {
+                    if parts.len() > 1 {
+                        eprintln!(
+                            "hoarder: stdout takes one image; writing the largest of the {} split parts",
+                            parts.len()
+                        );
+                    }
+                    write(&main, output)?;
+                    vec![delivered(&main, None)]
+                }
+                [(_, image)] => {
+                    write(image, output)?;
+                    vec![delivered(image, Some(output.to_owned()))]
+                }
+                _ => parts
+                    .iter()
+                    .map(|(name, image)| {
+                        let path = beside(output, name.as_deref().unwrap_or_default());
+                        write(image, &path)?;
+                        Ok(delivered(image, Some(path)))
+                    })
+                    .collect::<Result<_, _>>()?,
+            }
+        }
+        None if savings.is_empty() => vec![delivered(&main, None)],
+        None => savings
+            .into_iter()
+            .zip(&parts)
+            .map(|(saving, (_, image))| {
+                let path = saving.wait()?;
+                println!("{}", path.display());
+                Ok(delivered(image, Some(path)))
+            })
+            .collect::<Result<_, (Exit, String)>>()?,
     };
     crate::after::run(&delivered, &config.screenshot);
     Ok(())
+}
+
+/// What a badge means, for the stderr note.
+fn explain(badge: &str) -> &'static str {
+    match badge {
+        "mixed scale" => "lower-scale outputs were enlarged by nearest neighbour",
+        "HDR" => "taken from an HDR output without tone mapping",
+        _ => "",
+    }
+}
+
+/// `path` with `_SUFFIX` added to its file stem: `a/shot.png` → `a/shot_DP-1.png`.
+fn beside(path: &Path, suffix: &str) -> PathBuf {
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let name = match path.extension() {
+        Some(ext) => format!("{stem}_{suffix}.{}", ext.to_string_lossy()),
+        None => format!("{stem}_{suffix}"),
+    };
+    path.with_file_name(name)
+}
+
+/// The windows the Overlay can snap to. Without a provider there are none;
+/// if the compositor cannot tell, say why and carry on without them.
+fn windows() -> Vec<Window> {
+    hoarder_wayland::windows::detect()
+        .windows()
+        .unwrap_or_else(|e| {
+            eprintln!("hoarder: no window snapping: {e}");
+            Vec::new()
+        })
 }
 
 fn freeze() -> Result<Frozen, (Exit, String)> {
@@ -141,7 +230,7 @@ fn overlay_error(e: OverlayError) -> (Exit, String) {
     (code, e.to_string())
 }
 
-/// Show the Overlay and cut out the Target picked there; returns the image
+/// Show the Overlay and cut out the Target picked there; returns the Cut
 /// and the Target's name for file names. With `live`, the Overlay goes over
 /// the live desktop and the freeze comes after it, Overlay already hidden.
 fn from_overlay(
@@ -149,23 +238,45 @@ fn from_overlay(
     started: Instant,
     options: &Options,
     state: &mut State,
-) -> Result<(Image, &'static str), (Exit, String)> {
-    let (mut frozen, outcome) = if live {
-        let outcome = overlay::run_live(started, options);
-        count_hint_bar(options, state);
+    config: &Config,
+) -> Result<(cut::Cut, &'static str), (Exit, String)> {
+    let settings = &config.screenshot;
+    let (mut frozen, outcome, cursor) = if live {
+        // No Frozen Frames yet to judge the scales by: the Overlay clamps only
+        // if the live outputs it covers turn out to differ in scale.
+        // The windows as they are now, on the desktop the Overlay goes over.
+        let options = Options {
+            clamp_to_output: settings.mixed_scale == MixedScale::Clamp,
+            windows: windows(),
+            ..options.clone()
+        };
+        let outcome = overlay::run_live(started, &options);
+        count_hint_bar(&options, state);
         let outcome = outcome.map_err(overlay_error)?;
         if outcome == Outcome::Cancelled {
             return Err((Exit::Cancelled, "cancelled".into()));
         }
-        (freeze()?, outcome)
+        (freeze()?, outcome, options.cursor.get())
     } else {
+        // Ask where the windows are while the outputs freeze, so both
+        // describe the same moment.
+        let windows = std::thread::spawn(windows);
         let frozen = freeze()?;
-        let outcome = overlay::run(&frozen, started, options);
-        count_hint_bar(options, state);
-        (frozen, outcome.map_err(overlay_error)?)
+        let options = Options {
+            clamp_to_output: cut::clamps_regions(&frozen.frames, settings),
+            windows: windows.join().unwrap_or_default(),
+            ..options.clone()
+        };
+        let outcome = overlay::run(&frozen, started, &options);
+        count_hint_bar(&options, state);
+        (
+            frozen,
+            outcome.map_err(overlay_error)?,
+            options.cursor.get(),
+        )
     };
     // The user's last word on the cursor layer (PLAN.md §4.1 step 6).
-    if options.cursor.get() {
+    if cursor {
         composite_cursor(&mut frozen);
     }
     Ok(match outcome {
@@ -177,7 +288,7 @@ fn from_overlay(
                 height: r.height,
             });
             save_state(state);
-            (Image::region(&frozen.frames, &r), "region")
+            (cut::cut(&frozen.frames, Some(&r), settings), "region")
         }
         Outcome::Output(name) => {
             let frame = frozen
@@ -185,9 +296,28 @@ fn from_overlay(
                 .iter()
                 .find(|f| f.output == name)
                 .ok_or_else(|| (Exit::Io, format!("output {name} went away")))?;
-            (Image::upright(frame), "output")
+            let whole = Region {
+                x: frame.logical.x as f64,
+                y: frame.logical.y as f64,
+                width: frame.logical.width as f64,
+                height: frame.logical.height as f64,
+            };
+            (cut::cut(&frozen.frames, Some(&whole), settings), "output")
         }
-        Outcome::AllOutputs => (Image::all_outputs(&frozen.frames), "all"),
+        Outcome::Window(window) => {
+            // What you saw: the window's rectangle cut from the Frozen Frames,
+            // popups and anything over it included, under the same mixed-scale
+            // and depth policies as any Region.
+            let r = window.rect;
+            let region = Region {
+                x: r.x as f64,
+                y: r.y as f64,
+                width: r.width as f64,
+                height: r.height as f64,
+            };
+            (cut::cut(&frozen.frames, Some(&region), settings), "window")
+        }
+        Outcome::AllOutputs => (cut::cut(&frozen.frames, None, settings), "all"),
         Outcome::Cancelled => return Err((Exit::Cancelled, "cancelled".into())),
     })
 }

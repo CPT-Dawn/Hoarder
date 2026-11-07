@@ -770,6 +770,8 @@ name = "hoarder-wayland"
 version = "0.1.0"
 dependencies = [
  "rustix",
+ "serde",
+ "serde_json",
  "wayland-client",
  "wayland-protocols",
  "wayland-protocols-wlr",

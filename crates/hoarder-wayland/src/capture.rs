@@ -32,6 +32,12 @@ use wayland_protocols::ext::image_copy_capture::v1::client::{
     ext_image_copy_capture_manager_v1::{ExtImageCopyCaptureManagerV1, Options},
     ext_image_copy_capture_session_v1::{self, ExtImageCopyCaptureSessionV1},
 };
+use wayland_protocols::wp::color_management::v1::client::{
+    wp_color_management_output_v1::WpColorManagementOutputV1,
+    wp_color_manager_v1::{TransferFunction, WpColorManagerV1},
+    wp_image_description_info_v1::{self, WpImageDescriptionInfoV1},
+    wp_image_description_v1::{self, WpImageDescriptionV1},
+};
 use wayland_protocols::xdg::xdg_output::zv1::client::{
     zxdg_output_manager_v1::ZxdgOutputManagerV1,
     zxdg_output_v1::{self, ZxdgOutputV1},
@@ -49,6 +55,7 @@ pub const HIDE_GLOBALS_ENV: &str = "HOARDER_HIDE_GLOBALS";
 const EXT_CAPTURE: &str = "ext_image_copy_capture_manager_v1";
 const EXT_OUTPUT_SOURCE: &str = "ext_output_image_capture_source_manager_v1";
 const WLR_SCREENCOPY: &str = "zwlr_screencopy_manager_v1";
+const COLOR_MANAGER: &str = "wp_color_manager_v1";
 
 /// Which protocol took the Frozen Frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -284,6 +291,9 @@ pub struct FrozenFrame {
     pub transform: Transform,
     /// Rows are stored bottom-up.
     pub y_invert: bool,
+    /// The output shows HDR (a PQ or HLG transfer function, as reported by
+    /// `wp-color-management-v1`); its pixels are not tone mapped.
+    pub hdr: bool,
     pub data: Vec<u8>,
     /// The pointer cursor over this output when it was frozen, kept apart
     /// from `data`, which is asked for without it.
@@ -405,6 +415,8 @@ pub fn freeze() -> Result<Frozen, CaptureError> {
         state: State::default(),
     };
     freezer.discover_outputs(&mut queue)?;
+    // Asked now, answered while the outputs are being copied.
+    freezer.ask_colour();
 
     let backend = if freezer.has(EXT_CAPTURE) && freezer.has(EXT_OUTPUT_SOURCE) {
         Backend::ExtImageCopyCapture
@@ -423,6 +435,7 @@ pub fn freeze() -> Result<Frozen, CaptureError> {
         Backend::ExtImageCopyCapture => freezer.capture_ext(&mut queue)?,
         Backend::WlrScreencopy => freezer.capture_wlr(&mut queue)?,
     }
+    freezer.collect_colour(&mut queue)?;
 
     let frames = freezer
         .state
@@ -442,6 +455,7 @@ pub fn freeze() -> Result<Frozen, CaptureError> {
                 stride,
                 transform,
                 y_invert: copy.y_invert,
+                hdr: o.hdr,
                 data: copy.data,
                 cursor: o.cursor.take().and_then(CursorCopy::finish),
             }
@@ -540,6 +554,37 @@ impl Freezer {
         let conn_err = |e: wayland_client::DispatchError| CaptureError::Failed(e.to_string());
         queue.roundtrip(&mut self.state).map_err(conn_err)?;
         queue.roundtrip(&mut self.state).map_err(conn_err)?;
+        Ok(())
+    }
+
+    /// Ask `wp-color-management-v1`, if offered, how each output encodes
+    /// colour, so HDR outputs can be badged.
+    fn ask_colour(&mut self) {
+        let Ok(manager) = self.bind::<WpColorManagerV1>(COLOR_MANAGER, 1..=1) else {
+            return;
+        };
+        for (i, o) in self.state.outputs.iter_mut().enumerate() {
+            let output = manager.get_output(&o.wl, &self.qh, ());
+            output.get_image_description(&self.qh, i);
+            output.destroy();
+            o.colour_pending = true;
+        }
+        manager.destroy();
+    }
+
+    /// Wait for the answers to [`ask_colour`](Self::ask_colour): a
+    /// description is `ready`, then its information follows. A compositor
+    /// still silent after two roundtrips leaves the output counted as SDR,
+    /// rather than holding up the Capture.
+    fn collect_colour(&mut self, queue: &mut EventQueue<State>) -> Result<(), CaptureError> {
+        for _ in 0..2 {
+            if !self.state.outputs.iter().any(|o| o.colour_pending) {
+                break;
+            }
+            queue
+                .roundtrip(&mut self.state)
+                .map_err(|e| CaptureError::Failed(format!("colour information: {e}")))?;
+        }
         Ok(())
     }
 
@@ -769,6 +814,9 @@ struct OutputState {
     logical_size: Option<(i32, i32)>,
     copy: Option<Copy>,
     cursor: Option<CursorCopy>,
+    /// Waiting for the output's colour information.
+    colour_pending: bool,
+    hdr: bool,
 }
 
 impl OutputState {
@@ -784,6 +832,8 @@ impl OutputState {
             logical_size: None,
             copy: None,
             cursor: None,
+            colour_pending: false,
+            hdr: false,
         }
     }
 
@@ -1138,6 +1188,60 @@ impl Dispatch<ZwlrScreencopyFrameV1, usize> for State {
     }
 }
 
+impl Dispatch<WpImageDescriptionV1, usize> for State {
+    fn event(
+        state: &mut Self,
+        description: &WpImageDescriptionV1,
+        event: wp_image_description_v1::Event,
+        &i: &usize,
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        use wp_image_description_v1::Event as E;
+        match event {
+            E::Ready { .. } | E::Ready2 { .. } => {
+                description.get_information(qh, i);
+                description.destroy();
+            }
+            E::Failed { .. } => {
+                state.outputs[i].colour_pending = false;
+                description.destroy();
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<WpImageDescriptionInfoV1, usize> for State {
+    fn event(
+        state: &mut Self,
+        _: &WpImageDescriptionInfoV1,
+        event: wp_image_description_info_v1::Event,
+        &i: &usize,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        use wp_image_description_info_v1::Event as E;
+        match event {
+            E::TfNamed { tf } => {
+                state.outputs[i].hdr = is_hdr(tf);
+            }
+            E::Done => state.outputs[i].colour_pending = false,
+            _ => {}
+        }
+    }
+}
+
+/// HDR transfer functions: perceptual quantizer and hybrid log-gamma.
+fn is_hdr(tf: WEnum<TransferFunction>) -> bool {
+    matches!(
+        tf,
+        WEnum::Value(TransferFunction::St2084Pq | TransferFunction::Hlg)
+    )
+}
+
+delegate_noop!(State: ignore WpColorManagerV1);
+delegate_noop!(State: ignore WpColorManagementOutputV1);
 delegate_noop!(State: ignore WlShm);
 delegate_noop!(State: ignore WlPointer);
 delegate_noop!(State: WlShmPool);
@@ -1205,6 +1309,7 @@ mod tests {
                 stride: 8,
                 transform: Transform::Normal,
                 y_invert: false,
+                hdr: false,
                 data: white.to_le_bytes().repeat(2),
                 // Half-transparent black at x = 1, and one pixel off the frame.
                 cursor: Some(FrozenCursor {

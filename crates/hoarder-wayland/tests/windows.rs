@@ -1,0 +1,125 @@
+//! Window geometry providers: what they make of their compositor's IPC
+//! replies. The Sway fixture is a real `get_tree` from headless Sway 1.12;
+//! the Hyprland ones follow `j/clients` and `j/monitors` from Hyprland
+//! 0.57.1, with titles made up.
+
+use hoarder_wayland::LogicalRect;
+use hoarder_wayland::windows::{HyprlandIpc, SwayIpc, Window};
+
+fn rect(x: i32, y: i32, width: u32, height: u32) -> LogicalRect {
+    LogicalRect {
+        x,
+        y,
+        width,
+        height,
+    }
+}
+
+fn summary(windows: &[Window]) -> Vec<(&str, LogicalRect)> {
+    windows.iter().map(|w| (w.title.as_str(), w.rect)).collect()
+}
+
+/// HEADLESS-2 (logical x 640) shows tiled `probe.d`; HEADLESS-1 shows tiled
+/// `probe.b` under floating `probe.a` (4 px border); `probe.c` is in the
+/// scratchpad.
+#[test]
+fn sway_lists_visible_windows_topmost_first_by_their_content() {
+    let windows =
+        SwayIpc::parse_tree(include_bytes!("fixtures/sway-get-tree.json")).expect("parses");
+    assert_eq!(
+        summary(&windows),
+        vec![
+            ("probe.a", rect(104, 64, 192, 112)),
+            ("probe.b", rect(0, 0, 640, 480)),
+            ("probe.d", rect(640, 0, 400, 300)),
+        ]
+    );
+    assert_eq!(windows[0].app_id, "probe.a");
+}
+
+#[test]
+fn sway_puts_fullscreen_windows_on_top_and_reads_xwayland_classes() {
+    let tree = br#"{
+      "type": "root", "name": "root", "rect": {"x":0,"y":0,"width":800,"height":600},
+      "nodes": [{
+        "type": "output", "name": "HEADLESS-1", "rect": {"x":0,"y":0,"width":800,"height":600},
+        "nodes": [{
+          "type": "workspace", "name": "1", "rect": {"x":0,"y":0,"width":800,"height":600},
+          "nodes": [
+            {"type": "con", "name": "fullscreen game", "app_id": null,
+             "window_properties": {"class": "Game", "title": "fullscreen game"},
+             "rect": {"x":0,"y":0,"width":800,"height":600},
+             "window_rect": {"x":0,"y":0,"width":800,"height":600},
+             "visible": true, "fullscreen_mode": 1, "nodes": [], "floating_nodes": []},
+            {"type": "con", "name": "hidden tab", "app_id": "foot",
+             "rect": {"x":0,"y":0,"width":800,"height":600},
+             "window_rect": {"x":0,"y":0,"width":800,"height":600},
+             "visible": false, "fullscreen_mode": 0, "nodes": [], "floating_nodes": []}
+          ],
+          "floating_nodes": [
+            {"type": "floating_con", "name": "dialog", "app_id": "zenity",
+             "rect": {"x":100,"y":100,"width":200,"height":100},
+             "deco_rect": {"x":0,"y":-24,"width":200,"height":24},
+             "window_rect": {"x":2,"y":0,"width":196,"height":98},
+             "visible": true, "fullscreen_mode": 0, "nodes": [], "floating_nodes": []}
+          ]
+        }]
+      }]
+    }"#;
+    let windows = SwayIpc::parse_tree(tree).expect("parses");
+    assert_eq!(
+        summary(&windows),
+        vec![
+            ("fullscreen game", rect(0, 0, 800, 600)),
+            ("dialog", rect(102, 100, 196, 98)),
+        ]
+    );
+    assert_eq!(windows[0].app_id, "Game");
+}
+
+#[test]
+fn hyprland_lists_windows_on_shown_workspaces_in_approximate_stacking_order() {
+    let windows = HyprlandIpc::parse(
+        include_bytes!("fixtures/hyprland-clients.json"),
+        include_bytes!("fixtures/hyprland-monitors.json"),
+    )
+    .expect("parses");
+    assert_eq!(
+        summary(&windows),
+        vec![
+            // The open special workspace is drawn over everything.
+            ("scratchpad terminal", rect(1800, 100, 800, 600)),
+            // Floating over tiled.
+            ("floating mixer", rect(2000, 200, 600, 400)),
+            // Tiled, most recently focused first.
+            ("tiled browser", rect(1541, 5, 950, 1070)),
+            ("laptop terminal", rect(2, 34, 1532, 924)),
+        ]
+    );
+    assert_eq!(windows[1].app_id, "pavucontrol");
+}
+
+#[test]
+fn hyprland_before_0_42_had_a_boolean_fullscreen() {
+    let clients = br#"[
+      {"mapped": true, "hidden": false, "at": [0, 0], "size": [100, 100],
+       "workspace": {"id": 1, "name": "1"}, "floating": false, "pinned": false,
+       "fullscreen": false, "focusHistoryID": 0, "class": "a", "title": "tiled"},
+      {"mapped": true, "hidden": false, "at": [0, 0], "size": [1920, 1080],
+       "workspace": {"id": 1, "name": "1"}, "floating": false, "pinned": false,
+       "fullscreen": true, "focusHistoryID": 1, "class": "b", "title": "fullscreen"}
+    ]"#;
+    let monitors = br#"[{"activeWorkspace": {"id": 1, "name": "1"},
+                         "specialWorkspace": {"id": 0, "name": ""}}]"#;
+    let windows = HyprlandIpc::parse(clients, monitors).expect("parses");
+    assert_eq!(
+        windows.iter().map(|w| w.title.as_str()).collect::<Vec<_>>(),
+        ["fullscreen", "tiled"]
+    );
+}
+
+#[test]
+fn garbage_is_an_error_not_a_panic() {
+    assert!(SwayIpc::parse_tree(b"not json").is_err());
+    assert!(HyprlandIpc::parse(b"[]", b"{").is_err());
+}

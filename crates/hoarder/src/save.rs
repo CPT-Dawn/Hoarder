@@ -29,19 +29,22 @@ pub fn spawn(
     image: Arc<Image>,
     target: &'static str,
     app: Option<String>,
+    output: Option<String>,
     settings: Screenshot,
 ) -> Saving {
     Saving(std::thread::spawn(move || {
-        save(&image, target, app.as_deref(), &settings)
+        save(&image, target, app.as_deref(), output.as_deref(), &settings)
     }))
 }
 
 /// Encode `image` and write it to a new file in `settings.dir`; returns its path.
 /// A name that is already taken gets `_1`, `_2`, … rather than overwriting.
+/// With `output` (one Part of a split Capture), the name ends in `_OUTPUT`.
 pub fn save(
     image: &Image,
     target: &str,
     app: Option<&str>,
+    output: Option<&str>,
     settings: &Screenshot,
 ) -> Result<PathBuf, (Exit, String)> {
     let dir = hoarder_config::expand_dir(&settings.dir)
@@ -59,6 +62,10 @@ pub fn save(
         width: image.width,
         height: image.height,
     });
+    let stem = match output {
+        Some(output) => format!("{stem}_{output}"),
+        None => stem,
+    };
     let mut bytes = Vec::new();
     crate::encode::encode(image, settings.format, settings, &mut bytes)
         .map_err(|e| (Exit::Io, e))?;
@@ -104,7 +111,7 @@ mod tests {
         let image = Image::new(320, 240, Depth::Eight);
 
         let start = std::time::Instant::now();
-        let saving = spawn(std::sync::Arc::new(image), "all", None, settings);
+        let saving = spawn(std::sync::Arc::new(image), "all", None, None, settings);
         let returned = start.elapsed();
         let path = saving.wait().unwrap();
         let saved = start.elapsed();

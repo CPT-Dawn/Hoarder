@@ -66,7 +66,7 @@ What it guarantees:
 - **Painting**: a background layer-shell surface per output. The buffer is the output's physical size, mapped 1:1 through `wp_viewporter`, so the pattern lands on physical pixels at any scale or rotation. `paint_as(…, PixelFormat::Xrgb2101010)` paints 10-bit values; `Rgb10` colours with no 8-bit equivalent come back bit-exact from `capture` on a 10-bit output. `Pattern::Ramp` covers every 10-bit value of every channel; `Pattern::Checker { cell: 1 }` shows any resampling. Each call returns after the frame is presented.
 - **Selections**: set over `ext-data-control-v1`, so no focus is needed; payloads of any size are written off-thread. `exit()` (or dropping the client) closes the connection, and the compositor clears the Selection exactly as it does when a real app quits. `Reply` scripts how each type answers a paste (`Now`, `After(delay)`, `Never`), which is how the Reader's time limits are tested. `owns_selection` says whether the compositor has cancelled the client's source: the independent check that the Daemon never takes a live app's Selection.
 - **Input**: `wlr-virtual-pointer` with absolute motion in output-logical coordinates, and `zwp-virtual-keyboard` with a US keymap. The harness tracks modifiers itself, because the protocol leaves that to the client. Every call returns after the compositor has processed it.
-- **Probe windows**: plain `xdg_toplevel`s that Sway tiles and focuses like any new app. They record `InputEvent`s (enter, motion, buttons, keys, modifiers).
+- **Probe windows**: plain `xdg_toplevel`s that Sway tiles and focuses like any new app, filled with one colour (grey `#808080`, or any `Rgb8` through `open_window_coloured`, so stacked windows can be told apart in a Capture). They record `InputEvent`s (enter, motion, buttons, keys, modifiers). Float and place them with `Session::swaymsg`, e.g. `[app_id=…] floating enable, resize set 200 120, move absolute position 100 60`.
 
 Every helper call times out after 10 s with an error rather than hanging the test.
 
@@ -86,6 +86,10 @@ It is also handy for bug reports: a user can check whether a capture problem fol
 ## The Daemon (`crates/hoarder/tests/e2e_daemon.rs`)
 
 The Daemon tests start `hoarder daemon` in the session and judge it only by what a user or Front end can see: `wl-paste` after the source app exits (Takeover and the Reader rules), the source still owning its Selection, socket responses, `/proc` context switches for idle wakeups, and exit codes. The `status` op's `reading` flag tells a test when the Daemon has finished reading an Offer, so a source is never quit mid-read by accident. `hoarder service` runs against a stand-in `systemctl` placed first on `PATH`, so no test touches your real user manager.
+
+## Window geometry providers
+
+`hoarder` picks its window-geometry provider from the environment: `HYPRLAND_INSTANCE_SIGNATURE` means Hyprland IPC, `SWAYSOCK` means Sway IPC, and neither means no provider (no hover highlighting). `Session::command` sets `SWAYSOCK`, so the end-to-end tests (`e2e_window.rs`) snap through Sway's `get_tree`; `cmd.env_remove("SWAYSOCK")` gives the no-provider path. Hyprland can't run headless in CI, so its parsing is covered by fixture tests (`crates/hoarder-wayland/tests/windows.rs`) and its live behaviour by the manual release checklist.
 
 ## Driving the Overlay
 
@@ -113,7 +117,7 @@ Recorded results (headless Sway 1.12, pixman, one 3840×2160 output, release bui
 |---|---|---|---|
 | 2026-11-07 | #61, first cut: full Argb8888 chrome painted before the first frame | 59.5 ms | |
 | 2026-11-07 | #61: idle chrome is one `wp_single_pixel_buffer_v1` pixel stretched by the viewporter | 39.9 ms | freeze 14, Overlay surfaces and frame upload 11, compositor's first frame 13 |
-| 2026-11-07 | #63 on top of #62, #68, #69, #71 and #81: the freeze also takes the cursor (cursor session); Loupe, hint bar and cursor layer are subsurfaces drawn after the first frame | 49.0 ms | freeze 15 |
+| 2026-11-07 | #63, merged with everything up to #64 and #66: the freeze also takes the cursor (cursor session); Loupe, hint bar and cursor layer are subsurfaces drawn after the first frame | 46.0 ms | freeze 15 |
 
 This is within budget, so ADR-0007 stands. The next easy win is giving the freeze's memfd to the Overlay instead of copying the 33 MB frame (about 8 ms).
 

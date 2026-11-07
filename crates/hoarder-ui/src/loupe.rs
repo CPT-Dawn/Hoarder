@@ -169,6 +169,7 @@ mod tests {
             stride: 16,
             transform: Transform::Normal,
             y_invert: false,
+            hdr: false,
             data: pixel.to_le_bytes().repeat(8),
             cursor: None,
         }

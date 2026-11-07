@@ -19,7 +19,7 @@ use std::io::Write as _;
 use std::os::fd::AsFd;
 use std::time::{Duration, Instant};
 
-use hoarder_wayland::{Frozen, FrozenFrame};
+use hoarder_wayland::{Frozen, FrozenFrame, Window};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, FrameCallbackData},
     delegate_registry,
@@ -62,10 +62,11 @@ use wayland_protocols::wp::{
     viewporter::client::{wp_viewport::WpViewport, wp_viewporter::WpViewporter},
 };
 
-use crate::chrome::{CLEAR, DIM, Fonts, Palette, Scene};
+use crate::chrome::{CLEAR, DIM, Fonts, Highlight, Palette, Scene};
 use crate::geom::Rect;
 use crate::layers::{Context, Layers, ViewLayers};
 use crate::select::{Action, Key, Selector};
+use crate::snap::Hover;
 use crate::theme::Theme;
 
 /// Set to print how long the Overlay took to become visible.
@@ -92,6 +93,8 @@ pub enum Outcome {
     Region(Region),
     /// The Output with this name (`O`, or a click on empty desktop).
     Output(String),
+    /// A click on the highlighted window.
+    Window(Window),
     /// `A`.
     AllOutputs,
     /// Esc or right-click.
@@ -114,6 +117,14 @@ pub struct Options {
     /// `screenshot.cursor`). The Overlay flips it as the user presses `C`,
     /// so after [`run`] it holds the user's final choice.
     pub cursor: Cell<bool>,
+    /// A selection cannot leave the output where its drag started
+    /// (`screenshot.mixed_scale = "clamp"`). With `run_live`, only when the
+    /// outputs differ in scale.
+    pub clamp_to_output: bool,
+    /// The windows hovering highlights and a click captures, topmost first,
+    /// as a [`WindowGeometry`](hoarder_wayland::WindowGeometry) gives them.
+    /// Empty without a provider: no highlighting.
+    pub windows: Vec<Window>,
 }
 
 /// Everything that can stop the Overlay.
@@ -225,6 +236,7 @@ fn show(
         layers: Layers::new(options.hint_bar, options.cursor.get()),
         selector: Selector::new(options.confirm, options.last_region),
         pointer_at: None,
+        hover: Hover::new(options.windows.clone()),
         outcome: None,
         started,
         visible_reported: false,
@@ -287,6 +299,17 @@ fn show(
         )
         .map_err(failed)?;
         app.views.push(view);
+    }
+    // Live, the caller had no Frozen Frames to judge the scales by, so the
+    // outputs' own scales decide whether a selection must stay on one.
+    let mixed = || {
+        app.views
+            .windows(2)
+            .any(|w| w[0].scale().0 != w[1].scale().0)
+    };
+    if options.clamp_to_output && (frozen.is_some() || mixed()) {
+        app.selector
+            .clamp_to(app.views.iter().map(|v| v.logical).collect());
     }
     timing(started, "surfaces_created");
 
@@ -672,6 +695,7 @@ pub(crate) struct App {
     selector: Selector,
     /// Where the pointer last was, in global logical coordinates.
     pointer_at: Option<(f64, f64)>,
+    hover: Hover,
     outcome: Option<Outcome>,
     started: Instant,
     visible_reported: bool,
@@ -763,6 +787,13 @@ impl App {
 
     /// A key went down (or up, for `released`).
     fn key_event(&mut self, keysym: Keysym, released: bool, qh: &QueueHandle<App>) {
+        if matches!(keysym, Keysym::w | Keysym::W) {
+            if !released {
+                self.hover.cycle();
+                self.update(qh);
+            }
+            return;
+        }
         let Some(key) = key_of(keysym) else {
             return;
         };
@@ -797,7 +828,13 @@ impl App {
     fn update(&mut self, qh: &QueueHandle<App>) {
         let region = self.selector.region();
         let refining = self.selector.refining();
+        // Hovering highlights a window until a selection takes over.
+        let hovered = self
+            .hover
+            .current()
+            .filter(|_| !refining && region.is_none_or(|r| r.width == 0.0 && r.height == 0.0));
         for i in 0..self.views.len() {
+            let window = hovered.and_then(|w| self.highlight(i, w));
             let view = &self.views[i];
             let selection = region
                 .map(|r| view.to_physical(&r))
@@ -828,6 +865,7 @@ impl App {
             };
             let view = &mut self.views[i];
             view.wanted = Scene {
+                window,
                 selection,
                 label,
                 handles,
@@ -837,6 +875,45 @@ impl App {
                 eprintln!("hoarder: cannot draw the Overlay: {e}");
             }
         }
+    }
+
+    /// Window `index` as highlighted on output `view`, if it shows there.
+    fn highlight(&mut self, view: usize, index: usize) -> Option<Highlight> {
+        let view = &self.views[view];
+        let window = self.hover.window(index);
+        let r = window.rect;
+        let rect = view.to_physical(&Region {
+            x: r.x as f64,
+            y: r.y as f64,
+            width: r.width as f64,
+            height: r.height as f64,
+        });
+        let shown = rect.intersect(&Rect::new(0, 0, view.size.0 as i32, view.size.1 as i32));
+        if shown.is_empty() {
+            return None;
+        }
+        if let Some(h) = &view.drawn.window
+            && h.index == index
+            && h.rect == rect
+        {
+            return Some(h.clone());
+        }
+        let text = if window.title.is_empty() {
+            &window.app_id
+        } else {
+            &window.title
+        };
+        let label = (!text.is_empty()).then(|| {
+            let (sx, _) = view.scale();
+            let mut l = self
+                .fonts
+                .label(&ellipsize(text, 80), sx, 0, 0, &self.theme);
+            // Centred on the part of the window this output shows.
+            l.rect.x = shown.x + ((shown.w - l.rect.w) / 2).max(0);
+            l.rect.y = shown.y + ((shown.h - l.rect.h) / 2).max(0);
+            l
+        });
+        Some(Highlight { index, rect, label })
     }
 
     fn pointer_event(&mut self, event: &PointerEvent, qh: &QueueHandle<App>) {
@@ -858,6 +935,8 @@ impl App {
                 if let Some(device) = &self.cursor_device {
                     device.set_shape(serial, Shape::Crosshair);
                 }
+                self.hover.point(at);
+                self.update(qh);
             }
             PointerEventKind::Press {
                 button: BTN_LEFT, ..
@@ -867,11 +946,16 @@ impl App {
             }
             PointerEventKind::Motion { .. } => {
                 self.selector.motion(at);
+                self.hover.point(at);
                 self.update(qh);
             }
             PointerEventKind::Release {
                 button: BTN_LEFT, ..
             } => match self.selector.release(at, self.pixel_at(at)) {
+                // A click: the highlighted window, if any, else the Output.
+                Some(Action::OutputAt(_)) if let Some(w) = self.hover.current() => {
+                    self.outcome = Some(Outcome::Window(self.hover.window(w).clone()));
+                }
                 Some(action) => self.act(action),
                 None => self.update(qh),
             },
@@ -923,6 +1007,16 @@ fn live_screen(output: WlOutput, outputs: &OutputState) -> Option<Screen<'static
         size,
         frame: None,
     })
+}
+
+/// `text`, cut to at most `max` characters with an ellipsis.
+fn ellipsize(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let mut out: String = text.chars().take(max - 1).collect();
+    out.push('…');
+    out
 }
 
 /// The key a keysym stands for in the Overlay, if any.
