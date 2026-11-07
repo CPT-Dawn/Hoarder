@@ -1,0 +1,49 @@
+[package]
+name = "hoarder"
+description = "Pixel-exact screenshots and a clipboard that outlives the app that set it, for Wayland."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Shipped through the AUR and release tarballs, never crates.io.
+publish = false
+
+[dependencies]
+calloop.workspace = true
+clap.workspace = true
+clap_complete.workspace = true
+clap_mangen.workspace = true
+futures-util.workspace = true
+hoarder-config.workspace = true
+hoarder-ipc.workspace = true
+hoarder-store.workspace = true
+hoarder-ui.workspace = true
+hoarder-wayland.workspace = true
+image.workspace = true
+jiff.workspace = true
+oo7.workspace = true
+png.workspace = true
+regex.workspace = true
+region.workspace = true
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+webp.workspace = true
+zbus.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+# A stand-in notification server on a private bus.
+zbus = { workspace = true, features = ["service"] }
+hoarder-e2e.workspace = true
+image.workspace = true
+png.workspace = true
+# Holds History's database locked, to keep the Daemon's History thread busy.
+rusqlite.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,506 @@
+//! The Overlay chrome: everything drawn on top of a Frozen Frame (dimming,
+//! window highlight, selection border, labels), painted into an `Argb8888`
+//! buffer in physical pixels and only where it changed.
+
+use cosmic_text::{Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache};
+
+use crate::geom::Rect;
+use crate::theme::Theme;
+
+/// `Argb8888` pixels as little-endian bytes (premultiplied).
+pub(crate) const CLEAR: [u8; 4] = [0, 0, 0, 0];
+/// Black at 45% opacity: what the Overlay dims the unselected frame with.
+pub(crate) const DIM: [u8; 4] = [0, 0, 0, 115];
+
+/// The theme's colours as premultiplied `Argb8888` bytes, ready to fill with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Palette {
+    /// Borders, Refine's handles and (at a quarter) the window tint.
+    pub accent: [u8; 4],
+}
+
+impl Palette {
+    pub fn of(theme: &Theme) -> Palette {
+        Palette {
+            accent: argb(theme.accent),
+        }
+    }
+}
+
+/// `colour` as premultiplied `Argb8888` bytes (BGRA in memory).
+pub(crate) fn argb(c: hoarder_config::Colour) -> [u8; 4] {
+    let p = |v: u8| (v as u32 * c.a as u32 / 255) as u8;
+    [p(c.b), p(c.g), p(c.r), c.a]
+}
+
+/// The tint over a hovered window: `accent` (premultiplied `Argb8888`) at
+/// a quarter of its opacity.
+fn tint(accent: [u8; 4]) -> [u8; 4] {
+    accent.map(|v| v / 4)
+}
+
+/// What one output's chrome shows, in that output's physical pixels.
+/// Layers, bottom first: dimming, the window highlight, the selection, and
+/// then their labels.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Scene {
+    /// The window under the pointer.
+    pub window: Option<Highlight>,
+    /// The selected pixels: shown undimmed with a border just outside.
+    pub selection: Option<Rect>,
+    pub label: Option<Label>,
+    /// Refine's resize handles, filled with the accent colour.
+    pub handles: Vec<Rect>,
+    /// Refine's toolbar: one pill per action, the focused one in the accent.
+    pub toolbar: Vec<Label>,
+}
+
+/// A hovered window: tinted, with a border just outside and its title.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Highlight {
+    /// Which window (an index into the Overlay's window list).
+    pub index: usize,
+    /// The window's pixels; may reach past the output's edges.
+    pub rect: Rect,
+    pub label: Option<Label>,
+}
+
+impl Scene {
+    /// Every pixel that differs between `self` and `next` lies in one of these.
+    pub fn damage(&self, next: &Scene) -> Vec<Rect> {
+        let mut out = Vec::new();
+        let rect = |s: &Scene| s.window.as_ref().map(|w| w.rect);
+        framed_damage(rect(self), rect(next), &mut out);
+        framed_damage(self.selection, next.selection, &mut out);
+        let label = |s: &Scene| s.window.as_ref().and_then(|w| w.label.clone());
+        let (a, b) = (label(self), label(next));
+        if a != b {
+            out.extend(a.map(|l| l.rect));
+            out.extend(b.map(|l| l.rect));
+        }
+        if self.label != next.label {
+            out.extend(self.label.as_ref().map(|l| l.rect));
+            out.extend(next.label.as_ref().map(|l| l.rect));
+        }
+        if self.handles != next.handles {
+            out.extend(&self.handles);
+            out.extend(&next.handles);
+        }
+        if self.toolbar != next.toolbar {
+            out.extend(self.toolbar.iter().map(|l| l.rect));
+            out.extend(next.toolbar.iter().map(|l| l.rect));
+        }
+        out.retain(|r| !r.is_empty());
+        out
+    }
+
+    /// Repaint `area` of `canvas` (`width` pixels per row, stride `4 * width`).
+    pub fn paint(&self, canvas: &mut [u8], width: u32, height: u32, area: Rect, palette: Palette) {
+        let area = area.intersect(&Rect::new(0, 0, width as i32, height as i32));
+        if area.is_empty() {
+            return;
+        }
+        let stride = width as usize * 4;
+        for y in area.y..area.bottom() {
+            let row = &mut canvas[y as usize * stride..(y as usize + 1) * stride];
+            for (x0, x1, colour) in self.row_spans(y, palette.accent) {
+                let (x0, x1) = (x0.max(area.x), x1.min(area.right()));
+                if x0 < x1 {
+                    row[x0 as usize * 4..x1 as usize * 4]
+                        .as_chunks_mut::<4>()
+                        .0
+                        .fill(colour);
+                }
+            }
+        }
+        for handle in &self.handles {
+            let r = handle.intersect(&area);
+            for y in r.y..r.bottom() {
+                let row = &mut canvas[y as usize * stride..(y as usize + 1) * stride];
+                row[r.x as usize * 4..r.right() as usize * 4]
+                    .as_chunks_mut::<4>()
+                    .0
+                    .fill(palette.accent);
+            }
+        }
+        let window_label = self.window.as_ref().and_then(|w| w.label.as_ref());
+        for label in window_label
+            .into_iter()
+            .chain(&self.label)
+            .chain(&self.toolbar)
+        {
+            label.blend_into(canvas, width, area);
+        }
+    }
+
+    /// Row `y` as `(start, end, colour)` spans covering every x, in order.
+    fn row_spans(&self, y: i32, accent: [u8; 4]) -> Vec<(i32, i32, [u8; 4])> {
+        let mut spans = vec![(i32::MIN, i32::MAX, DIM)];
+        if let Some(w) = &self.window {
+            framed_row(&mut spans, w.rect, (accent, tint(accent)), y);
+        }
+        if let Some(s) = self.selection {
+            framed_row(&mut spans, s, (accent, CLEAR), y);
+        }
+        spans
+    }
+}
+
+/// What changes when a rectangle framed by a one-pixel border moves from
+/// `a` to `b`.
+fn framed_damage(a: Option<Rect>, b: Option<Rect>, out: &mut Vec<Rect>) {
+    match (a, b) {
+        (a, b) if a == b => {}
+        (Some(a), Some(b)) => {
+            out.extend(a.subtract(&b));
+            out.extend(b.subtract(&a));
+            out.extend(a.ring());
+            out.extend(b.ring());
+        }
+        (Some(r), None) | (None, Some(r)) => out.push(r.inflate(1)),
+        (None, None) => {}
+    }
+}
+
+/// Lay row `y` of `r`, filled with `fill` inside a `border` just outside
+/// it, over `spans`.
+fn framed_row(
+    spans: &mut Vec<(i32, i32, [u8; 4])>,
+    r: Rect,
+    (border, fill): ([u8; 4], [u8; 4]),
+    y: i32,
+) {
+    let ring = r.inflate(1);
+    if y < ring.y || y >= ring.bottom() {
+        return;
+    }
+    cover(spans, ring.x, ring.right(), border);
+    if y != ring.y && y != ring.bottom() - 1 {
+        cover(spans, r.x, r.right(), fill);
+    }
+}
+
+/// Paint `[x0, x1)` with `colour` over ordered spans that cover every x.
+fn cover(spans: &mut Vec<(i32, i32, [u8; 4])>, x0: i32, x1: i32, colour: [u8; 4]) {
+    if x0 >= x1 {
+        return;
+    }
+    let mut out = Vec::with_capacity(spans.len() + 2);
+    for &(a, b, c) in spans.iter() {
+        if a < x0 {
+            out.push((a, b.min(x0), c));
+        }
+        if b > x1 {
+            out.push((a.max(x1), b, c));
+        }
+    }
+    let at = out.iter().position(|s| s.0 >= x1).unwrap_or(out.len());
+    out.insert(at, (x0, x1, colour));
+    *spans = out;
+}
+
+/// A rendered size pill, e.g. `1280 × 720`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Label {
+    pub text: String,
+    /// Where it sits, in the output's physical pixels.
+    pub rect: Rect,
+    /// Premultiplied `Argb8888` bytes, `rect.w * 4` per row.
+    pixels: Vec<u8>,
+}
+
+/// Fonts for labels, loaded off the critical path (a full fontconfig scan
+/// takes tens of milliseconds).
+#[derive(Debug)]
+pub struct Fonts {
+    loading: Option<std::thread::JoinHandle<FontSystem>>,
+    ready: Option<(FontSystem, SwashCache)>,
+}
+
+impl Fonts {
+    /// Start loading the system fonts on a background thread.
+    pub fn load() -> Fonts {
+        Fonts {
+            loading: Some(std::thread::spawn(system_fonts)),
+            ready: None,
+        }
+    }
+
+    pub(crate) fn get(&mut self) -> &mut (FontSystem, SwashCache) {
+        self.ready.get_or_insert_with(|| {
+            let fonts = self
+                .loading
+                .take()
+                .and_then(|h| h.join().ok())
+                .unwrap_or_else(system_fonts);
+            (fonts, SwashCache::new())
+        })
+    }
+
+    /// Render `text` as a pill in `theme`'s surface, text colour, font and
+    /// radius, at `scale` physical pixels per logical pixel, with its top-left
+    /// corner at `(x, y)`.
+    pub fn label(&mut self, text: &str, scale: f64, x: i32, y: i32, theme: &Theme) -> Label {
+        self.pill(text, None, scale, x, y, theme)
+    }
+
+    /// [`label`](Self::label) for a window, led by its app's `icon`, or by
+    /// the first letter of `app_id` in an accent square when it has none
+    /// (or only an SVG one).
+    pub(crate) fn window_label(
+        &mut self,
+        text: &str,
+        icon: Option<&tiny_skia::Pixmap>,
+        app_id: &str,
+        scale: f64,
+        theme: &Theme,
+    ) -> Label {
+        let letter = app_id
+            .rsplit('.')
+            .next()
+            .and_then(|s| s.chars().next())
+            .map(|c| c.to_uppercase().to_string());
+        let lead = match (icon, letter) {
+            (Some(icon), _) => Some(Lead::Icon(icon)),
+            (None, Some(letter)) => Some(Lead::Letter(letter)),
+            (None, None) => None,
+        };
+        self.pill(text, lead, scale, 0, 0, theme)
+    }
+
+    fn pill(
+        &mut self,
+        text: &str,
+        lead: Option<Lead<'_>>,
+        scale: f64,
+        x: i32,
+        y: i32,
+        theme: &Theme,
+    ) -> Label {
+        let (fonts, cache) = self.get();
+        let family = installed_family(fonts, &theme.font);
+        let px = |v: f64| (v * scale).round().max(1.0) as f32;
+        let (size, pad_x, pad_y) = (px(13.0), px(6.0), px(3.0));
+        let mut buffer = Buffer::new(fonts, Metrics::new(size, (size * 1.3).ceil()));
+        buffer.set_size(None, None);
+        buffer.set_text(text, &Attrs::new().family(family), Shaping::Advanced, None);
+        buffer.shape_until_scroll(fonts, false);
+        let text_w = buffer
+            .layout_runs()
+            .map(|r| r.line_w)
+            .fold(0.0_f32, f32::max)
+            .ceil();
+        // A square as tall as a line of text, then a gap, before the text.
+        let side = (size * 1.3).ceil();
+        let lead_w = if lead.is_some() { side + pad_x } else { 0.0 };
+        let w = (lead_w + text_w + 2.0 * pad_x) as u32;
+        let h = (side + 2.0 * pad_y) as u32;
+        let mut pixmap = tiny_skia::Pixmap::new(w.max(1), h.max(1)).expect("non-empty label");
+        let mut paint = tiny_skia::Paint::default();
+        let bg = theme.surface;
+        paint.set_color_rgba8(bg.r, bg.g, bg.b, bg.a);
+        paint.anti_alias = true;
+        if let Some(path) = rounded_rect(w as f32, h as f32, px(theme.radius.into())) {
+            pixmap.fill_path(
+                &path,
+                &paint,
+                tiny_skia::FillRule::Winding,
+                tiny_skia::Transform::identity(),
+                None,
+            );
+        }
+        match &lead {
+            Some(Lead::Icon(icon)) => {
+                let fit = side / icon.width().max(icon.height()) as f32;
+                pixmap.draw_pixmap(
+                    0,
+                    0,
+                    icon.as_ref(),
+                    &tiny_skia::PixmapPaint {
+                        quality: tiny_skia::FilterQuality::Bicubic,
+                        ..Default::default()
+                    },
+                    tiny_skia::Transform::from_scale(fit, fit).post_translate(pad_x, pad_y),
+                    None,
+                );
+            }
+            Some(Lead::Letter(_)) => {
+                let a = theme.accent;
+                paint.set_color_rgba8(a.r, a.g, a.b, a.a);
+                if let Some(path) = rounded_rect(side, side, side / 4.0) {
+                    let at = tiny_skia::Transform::from_translate(pad_x, pad_y);
+                    pixmap.fill_path(&path, &paint, tiny_skia::FillRule::Winding, at, None);
+                }
+            }
+            None => {}
+        }
+        let (pw, ph) = (pixmap.width() as i32, pixmap.height() as i32);
+        let data = pixmap.data_mut();
+        if let Some(Lead::Letter(letter)) = &lead {
+            let mut glyph = Buffer::new(fonts, Metrics::new(size, side));
+            glyph.set_size(None, None);
+            glyph.set_text(
+                letter,
+                &Attrs::new().family(family),
+                Shaping::Advanced,
+                None,
+            );
+            glyph.shape_until_scroll(fonts, false);
+            let glyph_w = glyph
+                .layout_runs()
+                .map(|r| r.line_w)
+                .fold(0.0_f32, f32::max);
+            let left = pad_x as i32 + ((side - glyph_w) / 2.0).round() as i32;
+            let s = theme.surface;
+            glyph.draw(
+                fonts,
+                cache,
+                Color::rgba(s.r, s.g, s.b, 255),
+                |gx, gy, gw, gh, c| {
+                    blend_glyph(data, (pw, ph), (gx + left, gy + pad_y as i32), (gw, gh), c);
+                },
+            );
+        }
+        let text_x = (pad_x + lead_w) as i32;
+        buffer.draw(
+            fonts,
+            cache,
+            Color::rgba(theme.text.r, theme.text.g, theme.text.b, theme.text.a),
+            |gx, gy, gw, gh, c| {
+                blend_glyph(
+                    data,
+                    (pw, ph),
+                    (gx + text_x, gy + pad_y as i32),
+                    (gw, gh),
+                    c,
+                );
+            },
+        );
+        // tiny-skia is RGBA; Argb8888 is BGRA in memory.
+        let mut pixels = pixmap.take();
+        for p in pixels.as_chunks_mut::<4>().0 {
+            p.swap(0, 2);
+        }
+        Label {
+            text: text.to_owned(),
+            rect: Rect::new(x, y, w as i32, h as i32),
+            pixels,
+        }
+    }
+}
+
+/// What leads a window label: the app's icon, or a letter standing in.
+enum Lead<'a> {
+    Icon(&'a tiny_skia::Pixmap),
+    Letter(String),
+}
+
+/// Blend one glyph rectangle of colour `c` (alpha from coverage) into the
+/// premultiplied RGBA `data` of a `size` pixmap, at `at`.
+fn blend_glyph(data: &mut [u8], size: (i32, i32), at: (i32, i32), glyph: (u32, u32), c: Color) {
+    let (pw, ph) = size;
+    for dy in 0..glyph.1 as i32 {
+        for dx in 0..glyph.0 as i32 {
+            let (x, y) = (at.0 + dx, at.1 + dy);
+            if x < 0 || y < 0 || x >= pw || y >= ph {
+                continue;
+            }
+            let i = ((y * pw + x) * 4) as usize;
+            let a = c.a() as u32;
+            for (k, v) in [c.r(), c.g(), c.b()].into_iter().enumerate() {
+                let v = v as u32 * a / 255;
+                data[i + k] = (v + data[i + k] as u32 * (255 - a) / 255) as u8;
+            }
+            data[i + 3] = (a + data[i + 3] as u32 * (255 - a) / 255) as u8;
+        }
+    }
+}
+
+impl Label {
+    /// Blend over what `canvas` holds inside `area` (source over).
+    pub(crate) fn blend_into(&self, canvas: &mut [u8], width: u32, area: Rect) {
+        let r = self.rect.intersect(&area);
+        for y in r.y..r.bottom() {
+            for x in r.x..r.right() {
+                let s = (((y - self.rect.y) * self.rect.w + (x - self.rect.x)) * 4) as usize;
+                let d = ((y as u32 * width + x as u32) * 4) as usize;
+                let a = self.pixels[s + 3] as u32;
+                for k in 0..4 {
+                    canvas[d + k] =
+                        (self.pixels[s + k] as u32 + canvas[d + k] as u32 * (255 - a) / 255) as u8;
+                }
+            }
+        }
+    }
+}
+
+/// The system's fonts, as `FontSystem::new` finds them, less every face
+/// that is not regular weight and upright: everything Hoarder draws is.
+///
+/// Matching a family weighs every face, and for each one of another weight
+/// cosmic-text opens the font file to look for a variable weight axis. With
+/// a couple of thousand faces installed that took 10–20 ms on the first
+/// line drawn, on the Picker's critical path; without them it takes well
+/// under one.
+fn system_fonts() -> FontSystem {
+    use cosmic_text::fontdb::{Database, Style, Weight};
+    let mut db = Database::new();
+    db.load_system_fonts();
+    // What `FontSystem::new` sets.
+    db.set_monospace_family("Noto Sans Mono");
+    db.set_sans_serif_family("Open Sans");
+    db.set_serif_family("DejaVu Serif");
+    let unused: Vec<_> = db
+        .faces()
+        .filter(|f| f.weight != Weight::NORMAL || f.style != Style::Normal)
+        .map(|f| f.id)
+        .collect();
+    for id in unused {
+        db.remove_face(id);
+    }
+    let locale = std::env::var("LC_ALL")
+        .ok()
+        .or_else(|| std::env::var("LANG").ok())
+        .and_then(|l| l.split(['.', '@']).next().map(|l| l.replace('_', "-")))
+        .filter(|l| !l.is_empty() && l != "C" && l != "POSIX")
+        .unwrap_or_else(|| "en-US".to_owned());
+    FontSystem::new_with_locale_and_db(locale, db)
+}
+
+/// The first family of the CSS-style `stack` that is installed (generic names
+/// always are), or sans-serif.
+pub(crate) fn installed_family<'a>(fonts: &FontSystem, stack: &'a str) -> Family<'a> {
+    stack
+        .split(',')
+        .map(|f| f.trim().trim_matches(['"', '\'']).trim())
+        .find_map(|name| match name.to_ascii_lowercase().as_str() {
+            "sans-serif" => Some(Family::SansSerif),
+            "serif" => Some(Family::Serif),
+            "monospace" => Some(Family::Monospace),
+            "cursive" => Some(Family::Cursive),
+            "fantasy" => Some(Family::Fantasy),
+            "" => None,
+            _ => fonts
+                .db()
+                .faces()
+                .any(|f| f.families.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)))
+                .then_some(Family::Name(name)),
+        })
+        .unwrap_or(Family::SansSerif)
+}
+
+pub(crate) fn rounded_rect(w: f32, h: f32, r: f32) -> Option<tiny_skia::Path> {
+    let r = r.min(w / 2.0).min(h / 2.0);
+    let mut pb = tiny_skia::PathBuilder::new();
+    pb.move_to(r, 0.0);
+    pb.line_to(w - r, 0.0);
+    pb.quad_to(w, 0.0, w, r);
+    pb.line_to(w, h - r);
+    pb.quad_to(w, h, w - r, h);
+    pb.line_to(r, h);
+    pb.quad_to(0.0, h, 0.0, h - r);
+    pb.line_to(0.0, r);
+    pb.quad_to(0.0, 0.0, r, 0.0);
+    pb.close();
+    pb.finish()
+}

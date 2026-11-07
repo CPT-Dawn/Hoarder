@@ -1,0 +1,24 @@
+[package]
+name = "hoarder-config"
+description = "Typed configuration schema, defaults, validation and live reload for Hoarder."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Shipped through the AUR and release tarballs, never crates.io.
+publish = false
+
+[dependencies]
+inotify.workspace = true
+jiff.workspace = true
+rustix.workspace = true
+serde.workspace = true
+toml_edit.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

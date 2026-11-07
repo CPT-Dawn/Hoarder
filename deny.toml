@@ -1,0 +1,55 @@
+# cargo-deny: supply-chain checks run in CI (see docs/testing.md).
+# https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+all-features = true
+
+[advisories]
+# Every RustSec advisory fails the build unless it is explicitly ignored here
+# with a reason.
+ignore = [
+    # `paste` is archived (unmaintained, no vulnerability). It is a build-time
+    # proc-macro pulled in by rav1e for AVIF encoding; nothing of it ships.
+    { id = "RUSTSEC-2024-0436", reason = "build-time proc-macro of rav1e (AVIF); no replacement upstream yet" },
+    # ttf-parser is unmaintained (no vulnerability). It comes in through
+    # cosmic-text 0.19 -> fontdb 0.23 (ADR-0007), which has no release without
+    # it yet; revisit when cosmic-text moves fontdb to skrifa.
+    { id = "RUSTSEC-2026-0192", reason = "unmaintained, via cosmic-text/fontdb; no alternative release yet" },
+    # basic-toml and proc-macro-error2 are archived (unmaintained, no
+    # vulnerability). Both are build-time only: age's i18n-embed-fl and
+    # i18n-embed-impl proc-macros read its Fluent config with them. Every age
+    # release has them; revisit when i18n-embed moves to `toml`/`manyhow`.
+    { id = "RUSTSEC-2026-0374", reason = "build-time proc-macro dep of age (i18n-config); no age release without it" },
+    { id = "RUSTSEC-2026-0173", reason = "build-time proc-macro dep of age (i18n-embed-fl); no age release without it" },
+]
+
+[licenses]
+# Permissive licences compatible with shipping Hoarder under MIT.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    # nucleo-matcher (the Picker's fuzzy match): file-level copyleft, unmodified.
+    "MPL-2.0",
+    # libfuzzer-sys, a cfg(fuzzing)-only dependency of rav1e (AVIF).
+    "NCSA",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+# The list is policy, not inventory: licences not yet in the tree are fine.
+unused-allowed-license = "allow"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Path dependencies inside the workspace carry no version on purpose.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

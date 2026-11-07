@@ -1,0 +1,21 @@
+[package]
+name = "hoarder-e2e"
+description = "End-to-end test harness: a headless Sway session plus a scriptable helper Wayland client."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+rustix.workspace = true
+tempfile.workspace = true
+wayland-client.workspace = true
+wayland-protocols.workspace = true
+wayland-protocols-misc.workspace = true
+wayland-protocols-wlr.workspace = true
+
+[lints]
+workspace = true

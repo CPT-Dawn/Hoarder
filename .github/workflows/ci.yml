@@ -1,0 +1,178 @@
+# Hoarder CI — what each job does and how to run it locally: docs/testing.md
+name: CI
+
+on:
+  push:
+    branches: [main, "integration/**", "ticket/**", "fix/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install xkbcommon (smithay-client-toolkit links it)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libxkbcommon-dev
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  msrv:
+    name: MSRV (1.97)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97
+      - name: Install xkbcommon (smithay-client-toolkit links it)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libxkbcommon-dev
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets --locked
+
+  test:
+    name: tests (headless Sway)
+    runs-on: ubuntu-latest
+    # Arch ships a current Sway (1.11+: ext-data-control, ext-image-copy-capture);
+    # Ubuntu's is too old for the protocols Hoarder targets.
+    # Docker's default 64 MB /dev/shm can't hold several 4K SHM frames at
+    # once: Sway then dies with SIGBUS and grim fails (#87).
+    container:
+      image: archlinux:latest
+      options: --shm-size=2g
+    env:
+      CARGO_HOME: /cargo
+    steps:
+      - name: Install Sway, grim, wl-clipboard, libavif, zsh, man-db and Rust
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git rust sway grim wl-clipboard libavif xdg-utils shared-mime-info file xkeyboard-config dbus socat jq sudo zsh man-db
+          # Arch gives sway cap_sys_nice, which an unprivileged container cannot
+          # grant, so exec fails with EPERM. Headless tests don't need it.
+          setcap -r "$(command -v sway)"
+          sway --version
+          cargo --version
+      - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
+      # Sway is not meant to run as root, so the tests run as an unprivileged user.
+      - name: Create test user
+        run: |
+          useradd --create-home tester
+          mkdir -p "$CARGO_HOME"
+          chown -R tester: "$CARGO_HOME" "$GITHUB_WORKSPACE"
+          # A second user the socket must refuse (e2e_ipc, SO_PEERCRED).
+          useradd intruder
+          echo 'tester ALL=(intruder) NOPASSWD: ALL' > /etc/sudoers.d/intruder
+          chmod 0440 /etc/sudoers.d/intruder
+      - name: cargo test
+        run: runuser -u tester -- env HOARDER_TEST_INTRUDER=intruder cargo test --workspace --locked
+
+  # Latency budgets mean nothing in a debug build, so they run optimised, on
+  # this change and on its base on the same runner (scripts/budgets.sh).
+  budgets:
+    name: budgets (headless Sway, release)
+    runs-on: ubuntu-latest
+    # Docker's default 64 MB /dev/shm can't hold several 4K SHM frames at
+    # once: Sway then dies with SIGBUS and grim fails (#87).
+    container:
+      image: archlinux:latest
+      options: --shm-size=2g
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_HOME: /cargo
+      # Shared runners measure 1.3-1.7x a desktop on the 4K budgets; 3x keeps
+      # the absolute check from flaking. The comparison with the base is what
+      # catches a change that makes things slower (docs/testing.md).
+      HOARDER_BUDGET_SCALE: "3"
+    steps:
+      - name: Install Sway, grim, wl-clipboard and Rust
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git rust sway grim wl-clipboard libavif xdg-utils shared-mime-info file xkeyboard-config dbus
+          setcap -r "$(command -v sway)"
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: Swatinem/rust-cache@v2
+      - name: Create test user
+        run: |
+          useradd --create-home tester
+          mkdir -p "$CARGO_HOME"
+          chown -R tester: "$CARGO_HOME" "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "*"
+          mkdir -p "$RUNNER_TEMP/budgets"
+          chown tester: "$RUNNER_TEMP/budgets"
+      # What the change is measured against: the PR's merge base, or the
+      # commit a push moved the branch from. None for a brand-new branch.
+      - name: Find the base
+        id: base
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          base=""
+          if [ -n "$PR_BASE" ]; then
+            base=$(git merge-base "$PR_BASE" HEAD || true)
+          elif [ -n "$BEFORE" ] && ! [[ "$BEFORE" =~ ^0+$ ]] && git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            base=$BEFORE
+          fi
+          echo "sha=$base" >> "$GITHUB_OUTPUT"
+          echo "Base: ${base:-none}"
+      - name: Measure this change
+        run: >-
+          runuser -u tester -- env HOARDER_BUDGET_SCALE="$HOARDER_BUDGET_SCALE"
+          scripts/budgets.sh measure "$GITHUB_WORKSPACE" "$RUNNER_TEMP/budgets/head.tsv"
+      - name: Measure the base
+        if: steps.base.outputs.sha != ''
+        env:
+          BASE: ${{ steps.base.outputs.sha }}
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/base" "$BASE"
+          chown -R tester: "$RUNNER_TEMP/base"
+          # The base may be over budget itself or lack a budget test; only its
+          # numbers matter here. Sharing the target dir keeps the build warm.
+          runuser -u tester -- env HOARDER_BUDGET_SCALE="$HOARDER_BUDGET_SCALE" \
+            CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" \
+            "$GITHUB_WORKSPACE/scripts/budgets.sh" measure "$RUNNER_TEMP/base" "$RUNNER_TEMP/budgets/base.tsv" || true
+      - name: Fail on a regression of more than 20%
+        if: steps.base.outputs.sha != ''
+        run: |
+          set -o pipefail
+          scripts/budgets.sh compare "$RUNNER_TEMP/budgets/base.tsv" "$RUNNER_TEMP/budgets/head.tsv" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Report (no base to compare with)
+        if: steps.base.outputs.sha == ''
+        run: |
+          printf '| Budget | Measured |\n|---|---|\n' >> "$GITHUB_STEP_SUMMARY"
+          awk -F'\t' '{ printf "| %s | %s %s |\n", $1, $2, $3 }' "$RUNNER_TEMP/budgets/head.tsv" >> "$GITHUB_STEP_SUMMARY"
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check

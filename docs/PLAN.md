@@ -55,11 +55,13 @@ Hoarder replaces grim, slurp, grimblast/Hyprshot, hyprpicker, wl-clipboard, wl-c
 | Crate | Responsibility |
 |---|---|
 | `hoarder` | Binary, CLI (clap), subcommand wiring, notifications (zbus) |
-| `hoarder-ipc` | Request/response/event types plus a framing codec. Versioned and **published to crates.io** for Zenith and third parties. |
+| `hoarder-ipc` | Request/response/event types plus a framing codec. Versioned with the protocol `v`; Zenith and third parties depend on it **by git, pinned to a release tag** (`tag = "v1.0.0"`). |
 | `hoarder-wayland` | Protocol bindings (`wayland-protocols` `staging`, `-wlr`, vendored Hyprland XML), capture, data-control, the virtual keyboard, and the window-geometry providers (Hyprland/Sway IPC) |
 | `hoarder-store` | SQLite schema and migrations, blobs, dedup, retention, FTS search |
 | `hoarder-ui` | Shared SCTK layer-shell plumbing, tiny-skia drawing, cosmic-text, widgets (list, text field, loupe, toast), theme tokens ([ADR-0007](adr/0007-custom-ui-stack-no-toolkit.md)) |
 | `hoarder-config` | Typed schema (serde), defaults, `toml_edit` writes, validation with line numbers, live reload |
+
+No crate is published to crates.io (every crate has `publish = false`): Hoarder ships through the AUR and the GitHub release tarballs only.
 
 Rust 2024 edition; MSRV is the current stable minus two releases.
 
@@ -113,7 +115,7 @@ Idle ──press──► Dragging ──release──► Capture
 | `C` | Toggle the cursor layer |
 | `O`, `A` | Capture the Output / All Outputs |
 | `W` | Cycle through the windows under the pointer |
-| `Tab` (in Refine) | Move between the Refine toolbar actions |
+| `Tab` / `Shift+Tab` (in Refine) | Move between the Refine toolbar actions: Capture (focused first, so Enter still captures), Cursor (toggles the cursor layer) and Cancel; Enter or a click runs one |
 
 **Visual spec.**
 - Outside the selection, the frame is dimmed to 45%.
@@ -189,7 +191,7 @@ selection(null)  ─► the previous Selection was Normal or Concealed, the Daem
   - Built-in patterns: PEM private keys, AWS `AKIA…`, GCP service-account JSON, GitHub `gh[pousr]_…`, Slack `xox[abpr]-`, Stripe `sk_live_`, JWT, and Luhn-valid 13–19-digit card numbers.
 - **Pause** (`hoarder pause [duration]`): nothing is recorded. Persistence and Takeover still work.
 
-**Concealed handling:** buffers are allocated with `memsec` mlock and wrapped in `secrecy`, and zeroized when dropped. They are never written to SQLite. At TTL expiry, if Hoarder still owns the Selection, it clears it.
+**Concealed handling:** bytes are copied into their own pages, locked out of swap with `region::lock`, and zeroized (`zeroize`) when dropped ([ADR-0009](adr/0009-concealed-memory-without-unsafe.md): no `unsafe`, so no `memsec`). They are never written to SQLite. At TTL expiry, if Hoarder still owns the Selection, it clears it.
 
 ### 5.2 `hoarder copy` / `hoarder paste` and the Compat shims
 
@@ -213,6 +215,11 @@ clips_fts(preview)                                                              
 - **Dedup:** a repeat hash bumps `last_used_at`.
 - **Retention:** 1,000 Clips, 30 days for unpinned Clips, 64 MB per Clip, 1 GB in total, evicting the oldest unpinned first. It runs on insert and on an hourly timer.
 - **Encryption:** off by default. `history.encrypt = true` encrypts with age, using a key held in the Secret Service keyring (`oo7`).
+  - Sealed: every representation (inline and blob files), thumbnails, and each Clip's preview and search text (`clips.sealed`). Search uses in-memory FTS indexes (`temp.clips_fts` and `temp.clips_text`, which shadow the on-disk ones by name), rebuilt from the sealed text on unlock. The on-disk indexes stay empty.
+  - The dedup `hash` and blob file names are blake3 keyed with a key derived from the History key, so they can't confirm a guessed copy.
+  - Left readable: times, pinned, source app, kind, MIME types and sizes, which ordering and retention need.
+  - Toggling the setting (live or at start) migrates History both ways, then scrubs the old form: superseded blob files are deleted, and `secure_delete`, `VACUUM` and a truncating WAL checkpoint clean the database. Copy-on-write filesystems and SSDs may still hold old blocks; full-disk encryption covers those.
+  - With no Secret Service, a locked keyring, or a key missing from it, History is unavailable and says why. Nothing is recorded in plain text in the meantime, and the next request tries again. Hoarder never prompts, and it never makes a new key over an encrypted History.
 - **Migrations:** the database stores a `user_version` and is upgraded forward only.
 
 ### 5.4 Restore and auto-paste
@@ -250,6 +257,7 @@ The Zenith module only restores; it never auto-pastes.
   - `Del`: delete.
   - `Ctrl+1–9`: quick restore.
   - `Alt`: reveal Concealed Clips.
+  - `Shift+Arrows`: scroll an image bigger than the preview pane.
   - `Esc`: close.
 - **v1.1 transforms** (`Ctrl+T`): trim, join lines, change case, encode or decode base64/URL/JSON.
 
@@ -267,17 +275,21 @@ This lives in the Zenith repo as a separate PR. It is a new `ModuleId::Clipboard
 
 ## 8. Theming
 
-`theme = "zenith"` (default when `~/.config/zenith-bar` exists) or one of `midnight-bloom`, `tokyo-night`, `catppuccin-mocha`, `gruvbox-dark`, or `custom`.
+`[theme] name = "zenith"` (the default) or one of `midnight-bloom`, `tokyo-night`, `catppuccin-mocha`, `gruvbox-dark`, or `custom` (Midnight Bloom as a base for overrides). This mirrors Zenith's own `[theme]` table: a name plus override keys in one table.
 
-- `zenith`: Hoarder parses the active Zenith theme CSS plus the user's `style.css` for the `--zb-*` colour, font and radius variables, and follows changes live.
-- `[theme]` keys override any token: `accent`, `surface`, `text`, `muted`, `dim`, `radius`, `font`, `mono_font`.
+- `zenith`: Hoarder rebuilds Zenith's cascade: the built-in palette named by Zenith's `[theme] name`, then Zenith's `[theme]` overrides (`accent`, `surface_opacity`, `module_radius`), then the `:root` `--zb-*` variables in `style.css` (simple `var()` references resolve; anything unparsable such as `color-mix()` is skipped). It reads them afresh for every Overlay and Picker, so a Zenith theme change shows on the next one. With no (or a broken) Zenith config it falls back to Midnight Bloom, Zenith's default.
+- The other keys of `[theme]` override any token and beat every theme value: `accent`, `surface`, `text`, `muted`, `dim` (CSS colours: `#rgb[a]`, `#rrggbb[aa]`, `rgb()`/`rgba()`), `radius` (0–64 logical px), `font`, `mono_font` (font stacks, first installed family wins). `""` keeps the theme's value.
+
+Token sources in Zenith: `accent` ← `--zb-accent`, `surface` ← `--zb-surface-color` at `--zb-surface-opacity`, `text`/`muted`/`dim` ← `--zb-text`/`--zb-text-muted`/`--zb-text-dim`, `radius` ← `--zb-module-radius`, `font` ← `--zb-font-family`, `mono_font` ← `--zb-mono`.
 
 ## 9. Configuration
 
 `~/.config/hoarder/config.toml` reloads live. `hoarder config get|set|edit|reset|check|path`, and any setting can be overridden for one run with a flag.
 
 ```toml
-theme = "zenith"
+[theme]
+name = "zenith"
+accent = ""               # "" keeps the theme's; or "#rrggbb", "rgb(r g b / a)"
 
 [screenshot]
 dir = "~/Pictures/Screenshots"
@@ -290,8 +302,6 @@ confirm = false           # always enter Refine
 freeze = true             # false = --live
 cursor = false
 window_source = "frame"   # frame | toplevel
-mixed_scale = "upscale"   # upscale | clamp | split
-depth = "auto"            # auto | 8
 sound = false
 flash = false
 on_capture = ""           # shell hook
@@ -307,6 +317,10 @@ quality = 92
 quality = 80
 speed = 6
 
+[capture]
+mixed_scale = "upscale"   # upscale | clamp | split
+depth = "auto"            # auto | 8
+
 [pick]
 format = "hex"
 
@@ -314,7 +328,8 @@ format = "hex"
 persist = true
 deny_types = []
 max_offer_mb = 64
-on_clip = ""
+no_takeover_apps = []     # escape hatch: app_ids whose copies are never taken over
+on_clip = ""              # shell hook per Normal copy, the copy on stdin
 [clipboard.primary]
 persist = false
 history = false
@@ -342,7 +357,7 @@ terminal_apps = ["kitty", "foot", "Alacritty", "org.wezfurlong.wezterm", "com.mi
 
 ```
 hoarder                         status, plus an offer to enable the service if it isn't running
-hoarder shot [region|window|output|all|last] [--list] [--delay N] [--cursor] [--live]
+hoarder shot [region|window|output|all|last] [--list [TITLE]] [--delay N] [--cursor] [--live]
              [--confirm] [--format F] [-o PATH|-] [--no-save] [--no-copy] [--no-notify]
 hoarder pick [--format hex|rgb|hsl]
 hoarder copy [wl-copy flags]    hoarder paste [wl-paste flags]
@@ -357,6 +372,8 @@ hoarder doctor
 hoarder completions bash|zsh|fish
 ```
 
+`hoarder setup <wm> --apply` writes the recommended bindings and the login-time service start to a file of Hoarder's own (`hypr/hoarder.conf`, `sway/config.d/hoarder`, `niri/hoarder.kdl`) and prints the line the main config needs; it never edits the main config. A Hyprland config dir with `hyprland.lua` is a Lua config (Hyprland 0.57 loads it and ignores `hyprland.conf`): the file is then the module `hypr/hoarder.lua` (`hl.bind`, `hl.on("hyprland.start", …)`), pulled in by `require("hoarder")`. `hoarder service enable` reports the Daemon running only once its socket answers `hello`, and after a 5 s deadline says it did not and points at `journalctl --user -u hoarder`.
+
 Exit codes: 0 on success, 1 when cancelled by the user, 2 for usage errors, 3 for unsupported compositor or protocol, 4 for I/O errors.
 
 ## 11. IPC API (v1)
@@ -364,29 +381,38 @@ Exit codes: 0 on success, 1 when cancelled by the user, 2 for usage errors, 3 fo
 One JSON object per line, sent over `$XDG_RUNTIME_DIR/hoarder/hoarder.sock`. The directory has mode 0700, and the peer's uid is checked with `SO_PEERCRED`.
 
 ```jsonc
-→ {"v":1,"id":7,"op":"list","limit":10,"filter":"img:"}
-← {"v":1,"id":7,"ok":[{"id":412,"kind":"image","preview":"1920×1080","app":"firefox","at":"…","pinned":false,"sensitivity":"normal"}]}
+→ {"v":1,"id":7,"op":"list","limit":10}
+← {"v":1,"id":7,"ok":[{"id":412,"kind":"image","preview":"1920×1080","app":"firefox","at":"…","created":"…","pinned":false,"size":48213,"types":["image/png"]}]}
 → {"v":1,"id":8,"op":"subscribe"}
 ← {"v":1,"event":"clip_added","clip":{…}}
 ← {"v":1,"event":"state","state":"paused","until":"…"}
+← {"v":1,"event":"selection","selection":"clipboard","types":["text/plain",…]}
 ```
 
-**Ops:** `hello` (version negotiation), `status`, `list`, `get` (the representation is streamed over a passed fd), `thumb`, `restore`, `offer` (Capture or `copy` data; fd passing), `delete`, `pin`, `unpin`, `clear`, `pause`, `resume`, `subscribe`, `reload`.
+**Ops:** `hello` (version negotiation), `status`, `list`, `search`, `get` (the representation is streamed over a passed fd), `thumb`, `restore`, `offer` (Capture or `copy` data in a passed memfd), `paste` (the current Selection, streamed from its source into a passed pipe; what `paste --watch` reads through), `delete`, `pin`, `unpin`, `clear` (the clipboard), `clear_history`, `pause`, `resume`, `subscribe`, `reload`.
 
-**Compatibility:** additive changes keep `v:1`; breaking changes bump `v` and the `hoarder-ipc` major version.
+**Events:** `selection`, `clip_added`, `clip_removed`, `state`.
+
+Filtering by kind (the Picker's `img:` and similar prefixes) happens in the Front end over `list`; the Daemon offers only `search` for text.
+
+**Concealed Clips** show up in `list` only when it asks with `"concealed":true`, among History's Clips by time: negative ids, `"sensitivity":"concealed"`, an `expires` time and a masked preview. Their text comes only through `get`, so a Front end keeps them masked until the user asks (the Picker: while `Alt` is held). `restore` and `delete` take their ids too; `restore` with `"plain":true` serves only the plain text (Shift+Enter).
+
+**Compatibility:** additive changes keep `v:1`; breaking changes bump `v`. Clients pin `hoarder-ipc` to a release tag; `v` is what keeps an older pin working against a newer Daemon.
+
+The full reference, with every op, event and error code and runnable `socat`/`jq` examples, is [docs/ipc.md](ipc.md).
 
 ## 12. Budgets
 
 | Metric | Budget |
 |---|---|
 | Daemon idle CPU | 0 wakeups/s (no timers except the hourly retention run) |
-| Daemon RSS (idle, 1,000 Clips) | < 12 MB |
+| Daemon RSS (idle, 1,000 Clips) | Tracked for regressions only (about 14.5 MB on 2026-11-08) |
 | Key press → Overlay visible (4K) | < 60 ms |
 | Release → PNG on clipboard (4K) | < 150 ms |
 | Picker first frame | < 50 ms |
-| Stripped binary | < 8 MB |
+| Stripped binary | Tracked for regressions only (about 14.3 MB on 2026-11-08) |
 
-The budgets are checked in CI with a benchmark job on the headless Sway session. A regression of more than 20% fails the job.
+The budgets are checked in CI with a benchmark job on the headless Sway session. A regression of more than 20% fails the job. The binary size and the Daemon's memory have no fixed ceiling: the earlier 8 MB and 12 MB targets were dropped (2026-11-08) as acceptable at their current figures, and only that 20%-against-the-base check holds them.
 
 ## 13. Testing
 
@@ -423,7 +449,7 @@ Daemon skeleton (calloop, service) · IPC server and `hoarder-ipc` crate · Sele
 hoarder-ui widgets (list, text field) · Picker layout and search · preview pane · keys and quick restore · auto-paste through the virtual keyboard · theming (`zenith` follower plus built-ins) · Zenith `clipboard` module PR.
 
 ### M4: Ship v1.0
-`hoarder doctor` · `hoarder setup <wm>` · completions and man pages (clap_mangen) · systemd unit · README, docs site and GIF demos · CONTRIBUTING and issue templates · release workflow (git-cliff, crates.io, GitHub release artefacts) · AUR packages `hoarder`, `hoarder-bin`, `hoarder-git`, `hoarder-wl-compat` · release checklist pass.
+`hoarder doctor` · `hoarder setup <wm>` · completions and man pages (clap_mangen) · systemd unit · README, docs site and GIF demos · CONTRIBUTING and issue templates · release workflow (git-cliff, GitHub release artefacts; nothing on crates.io) · AUR packages `hoarder`, `hoarder-bin`, `hoarder-git`, `hoarder-wl-compat` · release checklist pass.
 
 ### v1.1
 In-place annotation in Refine (arrow, box, text, highlighter, numbered steps, blur/pixelate) · Picker transforms · OCR (optional `tesseract`) · QR decode · `text-input-v3` IME in the Picker.

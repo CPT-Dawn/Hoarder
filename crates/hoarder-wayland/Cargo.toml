@@ -1,0 +1,24 @@
+[package]
+name = "hoarder-wayland"
+description = "Wayland protocol bindings, capture, data-control and window geometry for Hoarder."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Shipped through the AUR and release tarballs, never crates.io.
+publish = false
+
+[dependencies]
+rustix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+wayland-client.workspace = true
+wayland-protocols.workspace = true
+wayland-protocols-misc.workspace = true
+wayland-protocols-wlr.workspace = true
+wayland-scanner.workspace = true
+
+[lints]
+workspace = true

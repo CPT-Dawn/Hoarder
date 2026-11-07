@@ -1,0 +1,85 @@
+# Hoarder configuration. Every key is optional: a missing key keeps its default.
+# Edit with `hoarder config set KEY VALUE` or `hoarder config edit`; check with
+# `hoarder config check`. Changes apply live, without a restart.
+
+[theme]
+# zenith follows Zenith's active theme and style.css live (Midnight Bloom
+# without Zenith); or midnight-bloom | tokyo-night | catppuccin-mocha |
+# gruvbox-dark | custom (Midnight Bloom, meant to be overridden).
+name = "zenith"
+# Overrides beat the theme; "" keeps the theme's value. Colours are
+# "#rrggbb", "#rrggbbaa" or "rgb(r g b / a)".
+accent = ""
+surface = ""
+text = ""
+muted = ""
+dim = ""
+radius = ""               # pixels, 0-64
+font = ""                 # a stack: "Inter, sans-serif"
+mono_font = ""
+
+[screenshot]
+dir = "$XDG_PICTURES_DIR/Screenshots"
+# Tokens: {%…} strftime of the Capture time, {target}, {app}, {w}, {h}
+name = "Hoarder_{%Y-%m-%d_%H-%M-%S}"
+format = "png"            # png | webp | jpeg | avif | qoi
+save = true
+copy = true
+notify = true
+confirm = false           # always enter Refine
+freeze = true             # false = --live
+cursor = false
+window_source = "frame"   # frame | toplevel
+sound = false
+flash = false
+on_capture = ""           # shell hook
+
+[screenshot.png]
+level = "best"            # fast | best | 0-9
+[screenshot.webp]
+lossless = true
+quality = 90
+[screenshot.jpeg]
+quality = 92
+[screenshot.avif]
+quality = 80
+speed = 6
+
+[capture]
+# A Target across outputs of different scales: upscale | clamp | split
+mixed_scale = "upscale"
+depth = "auto"            # auto | 8
+
+[pick]
+format = "hex"            # hex | rgb | hsl
+
+[clipboard]
+persist = true
+deny_types = []
+max_offer_mb = 64
+no_takeover_apps = []     # app_ids whose copies are never kept alive after they exit
+# Run for each Normal copy, the copy on stdin (like wl-paste --watch);
+# $HOARDER_MIME, $HOARDER_TYPES and $HOARDER_APP describe it
+on_clip = ""
+[clipboard.primary]
+persist = false
+history = false
+
+[history]
+enabled = true
+# Limits: 0 means none. Pinned Clips count toward them but are never evicted.
+max_clips = 1000
+max_age_days = 30
+max_clip_mb = 64
+max_total_mb = 1024
+encrypt = false
+
+[privacy]
+exclude_apps = ["org.keepassxc.KeePassXC", "Bitwarden", "1Password", "proton-pass", "org.gnome.World.Secrets"]
+patterns = true           # built-in secret patterns
+extra_patterns = []
+concealed_ttl_secs = 120
+
+[picker]
+auto_paste = true
+terminal_apps = ["kitty", "foot", "Alacritty", "org.wezfurlong.wezterm", "com.mitchellh.ghostty", "org.kde.konsole"]

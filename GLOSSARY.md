@@ -61,7 +61,7 @@ The native-resolution copy of one output taken before the Overlay appears; the O
 _Avoid_: freeze, snapshot, background
 
 **Refine**:
-The optional step after drawing a Region where it can be resized and confirmed before the Capture is taken.
+The optional step after drawing a Region where it can be resized and confirmed before the Capture is taken. Its toolbar (Capture, Cursor, Cancel) is walked with Tab.
 _Avoid_: edit mode, adjust mode, confirm screen
 
 **Loupe**:
@@ -89,6 +89,10 @@ _Avoid_: menu, launcher, clipboard manager window
 **Zenith module**:
 The `clipboard` module inside the Zenith bar: a Front end showing Daemon state and recent Clips in a popover.
 _Avoid_: applet, widget, bar plugin
+
+**Theme**:
+The named set of tokens (accent, surface, text, muted, dim, radius, font, mono font) the Overlay and Picker draw with; `zenith` follows the Zenith bar's active theme and `style.css`, and `[theme]` overrides beat any theme value.
+_Avoid_: skin, palette (for the whole set), style
 
 **Compat shims**:
 Optional `wl-copy` / `wl-paste` commands that accept wl-clipboard's flags and forward to Hoarder.

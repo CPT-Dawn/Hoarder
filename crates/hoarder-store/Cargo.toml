@@ -1,0 +1,23 @@
+[package]
+name = "hoarder-store"
+description = "SQLite-backed History store for Hoarder: schema, blobs, dedup, retention and search."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# Shipped through the AUR and release tarballs, never crates.io.
+publish = false
+
+[dependencies]
+age.workspace = true
+blake3.workspace = true
+rusqlite.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
