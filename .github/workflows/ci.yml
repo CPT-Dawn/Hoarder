@@ -1,0 +1,84 @@
+# Hoarder CI — what each job does and how to run it locally: docs/testing.md
+name: CI
+
+on:
+  push:
+    branches: [main, "integration/**", "ticket/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  msrv:
+    name: MSRV (1.97)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.97
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets --locked
+
+  test:
+    name: tests (headless Sway)
+    runs-on: ubuntu-latest
+    # Arch ships a current Sway (1.11+: ext-data-control, ext-image-copy-capture);
+    # Ubuntu's is too old for the protocols Hoarder targets.
+    container: archlinux:latest
+    env:
+      CARGO_HOME: /cargo
+    steps:
+      - name: Install Sway, grim, wl-clipboard and Rust
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git rust sway grim wl-clipboard xkeyboard-config
+          sway --version
+          cargo --version
+      - uses: actions/checkout@v5
+      - uses: Swatinem/rust-cache@v2
+      # Sway is not meant to run as root, so the tests run as an unprivileged user.
+      - name: Create test user
+        run: |
+          useradd --create-home tester
+          mkdir -p "$CARGO_HOME"
+          chown -R tester: "$CARGO_HOME" "$GITHUB_WORKSPACE"
+      - name: cargo test
+        run: runuser -u tester -- cargo test --workspace --locked
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
