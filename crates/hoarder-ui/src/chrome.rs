@@ -28,7 +28,7 @@ impl Palette {
 }
 
 /// `colour` as premultiplied `Argb8888` bytes (BGRA in memory).
-fn argb(c: hoarder_config::Colour) -> [u8; 4] {
+pub(crate) fn argb(c: hoarder_config::Colour) -> [u8; 4] {
     let p = |v: u8| (v as u32 * c.a as u32 / 255) as u8;
     [p(c.b), p(c.g), p(c.r), c.a]
 }
@@ -240,7 +240,7 @@ impl Fonts {
 
 impl Label {
     /// Blend over what `canvas` holds inside `area` (source over).
-    fn blend_into(&self, canvas: &mut [u8], width: u32, area: Rect) {
+    pub(crate) fn blend_into(&self, canvas: &mut [u8], width: u32, area: Rect) {
         let r = self.rect.intersect(&area);
         for y in r.y..r.bottom() {
             for x in r.x..r.right() {

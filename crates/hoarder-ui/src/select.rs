@@ -25,6 +25,8 @@ pub enum Key {
     Space,
     Output,
     AllOutputs,
+    /// Toggle the cursor layer; the selection ignores it.
+    Cursor,
     Left,
     Right,
     Up,
@@ -328,6 +330,7 @@ impl Selector {
             Key::Escape => return Some(Action::Cancel),
             Key::AllOutputs => return Some(Action::AllOutputs),
             Key::Output => return None, // resolved by the caller, which knows the pointer
+            Key::Cursor => return None,
             Key::Enter => {
                 return match self.state {
                     State::Idle => self.last_region.map(Action::Region),

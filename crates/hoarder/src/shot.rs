@@ -36,7 +36,7 @@ impl Target {
 /// Capture `target`. `output` (`-o`) replaces saving to `screenshot.dir`.
 pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(), (Exit, String)> {
     let started = Instant::now();
-    let frozen = hoarder_wayland::freeze().map_err(|e| {
+    let mut frozen = hoarder_wayland::freeze().map_err(|e| {
         let code = match e {
             CaptureError::NoWayland(_) | CaptureError::Unsupported(_) => Exit::Unsupported,
             CaptureError::Failed(_) | CaptureError::Io(_) => Exit::Io,
@@ -44,8 +44,13 @@ pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(),
         (code, e.to_string())
     })?;
     let (image, name) = match target {
-        Target::All => (Image::all_outputs(&frozen.frames), target.name()),
-        Target::Region => from_overlay(&frozen, started, config)?,
+        Target::All => {
+            if config.screenshot.cursor {
+                composite_cursor(&mut frozen);
+            }
+            (Image::all_outputs(&frozen.frames), target.name())
+        }
+        Target::Region => from_overlay(&mut frozen, started, config)?,
     };
     let image = Arc::new(image);
     // The file is encoded on a worker thread, started before the clipboard
@@ -87,7 +92,7 @@ pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(),
 /// Show the Overlay and cut out the Target picked there; returns the image
 /// and the Target's name for file names.
 fn from_overlay(
-    frozen: &hoarder_wayland::Frozen,
+    frozen: &mut hoarder_wayland::Frozen,
     started: Instant,
     config: &Config,
 ) -> Result<(Image, &'static str), (Exit, String)> {
@@ -101,8 +106,18 @@ fn from_overlay(
             height: r.height,
         }),
         theme: Theme::load(&config.theme),
+        hint_bar: state.hint_bar_due(),
+        cursor: config.screenshot.cursor.into(),
     };
-    let outcome = overlay::run(frozen, started, &options).map_err(|e| {
+    let outcome = overlay::run(frozen, started, &options);
+    if options.hint_bar {
+        state.record_hint_bar_use();
+        save_state(&state);
+    }
+    if options.cursor.get() {
+        composite_cursor(frozen);
+    }
+    let outcome = outcome.map_err(|e| {
         let code = match e {
             OverlayError::Unsupported(_) => Exit::Unsupported,
             OverlayError::Failed(_) => Exit::Io,
@@ -117,12 +132,7 @@ fn from_overlay(
                 width: r.width,
                 height: r.height,
             });
-            if let Err(e) = state.save() {
-                eprintln!(
-                    "hoarder: cannot remember the Region in {}: {e}",
-                    hoarder_config::state_path().display()
-                );
-            }
+            save_state(&state);
             (Image::region(&frozen.frames, &r), "region")
         }
         Outcome::Output(name) => {
@@ -136,6 +146,23 @@ fn from_overlay(
         Outcome::AllOutputs => (Image::all_outputs(&frozen.frames), "all"),
         Outcome::Cancelled => return Err((Exit::Cancelled, "cancelled".into())),
     })
+}
+
+/// Write `state.toml`; losing it costs a convenience, never the Capture.
+fn save_state(state: &State) {
+    if let Err(e) = state.save() {
+        eprintln!(
+            "hoarder: cannot write {}: {e}",
+            hoarder_config::state_path().display()
+        );
+    }
+}
+
+/// Put the cursor layer into the Frozen Frames (PLAN.md §4.1 step 6).
+fn composite_cursor(frozen: &mut hoarder_wayland::Frozen) {
+    for frame in &mut frozen.frames {
+        frame.composite_cursor();
+    }
 }
 
 fn deliver(image: &Image, output: &Path, settings: &Screenshot) -> std::io::Result<()> {

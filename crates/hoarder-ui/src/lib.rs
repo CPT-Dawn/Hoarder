@@ -6,8 +6,11 @@
 
 mod chrome;
 mod geom;
+mod layers;
+mod loupe;
 pub mod overlay;
 mod select;
+mod sprite;
 pub mod theme;
 
 pub use overlay::{Options, Outcome, OverlayError, Region};

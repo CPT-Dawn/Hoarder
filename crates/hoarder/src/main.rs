@@ -48,6 +48,10 @@ enum Command {
         /// No notification for this Capture (`screenshot.notify = false`).
         #[arg(long)]
         no_notify: bool,
+        /// Include the pointer cursor (`screenshot.cursor = true`); `C` in
+        /// the Overlay toggles it.
+        #[arg(long)]
+        cursor: bool,
     },
     /// Copy stdin or text to the clipboard (accepts every wl-copy flag).
     Copy(clipboard::CopyArgs),
@@ -105,6 +109,7 @@ fn main() -> ExitCode {
             no_save,
             no_copy,
             no_notify,
+            cursor,
         }) => {
             // Shot flags are one-run overrides, applied after any `--set`.
             let format = format.or_else(|| output.as_deref().and_then(format_of_path));
@@ -113,6 +118,7 @@ fn main() -> ExitCode {
                 no_save.then(|| ("screenshot.save", "false".into())),
                 no_copy.then(|| ("screenshot.copy", "false".into())),
                 no_notify.then(|| ("screenshot.notify", "false".into())),
+                cursor.then(|| ("screenshot.cursor", "true".into())),
             ];
             cli.overrides
                 .extend(flags.into_iter().flatten().map(|(k, v)| (k.into(), v)));
