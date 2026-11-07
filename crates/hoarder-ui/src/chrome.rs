@@ -12,8 +12,12 @@ const CLEAR: [u8; 4] = [0, 0, 0, 0];
 pub(crate) const DIM: [u8; 4] = [0, 0, 0, 115];
 /// The accent colour of borders, #3d8eff.
 const ACCENT: [u8; 4] = [0xff, 0x8e, 0x3d, 0xff];
-/// The accent at 25% opacity: the tint over a hovered window.
-const TINT: [u8; 4] = [0x40, 0x24, 0x0f, 0x40];
+
+/// The tint over a hovered window: `accent` (premultiplied `Argb8888`) at
+/// a quarter of its opacity.
+fn tint(accent: [u8; 4]) -> [u8; 4] {
+    accent.map(|v| v / 4)
+}
 
 /// What one output's chrome shows, in that output's physical pixels.
 /// Layers, bottom first: dimming, the window highlight, the selection, and
@@ -73,7 +77,7 @@ impl Scene {
         let stride = width as usize * 4;
         for y in area.y..area.bottom() {
             let row = &mut canvas[y as usize * stride..(y as usize + 1) * stride];
-            for (x0, x1, colour) in self.row_spans(y) {
+            for (x0, x1, colour) in self.row_spans(y, ACCENT) {
                 let (x0, x1) = (x0.max(area.x), x1.min(area.right()));
                 if x0 < x1 {
                     row[x0 as usize * 4..x1 as usize * 4]
@@ -100,13 +104,13 @@ impl Scene {
     }
 
     /// Row `y` as `(start, end, colour)` spans covering every x, in order.
-    fn row_spans(&self, y: i32) -> Vec<(i32, i32, [u8; 4])> {
+    fn row_spans(&self, y: i32, accent: [u8; 4]) -> Vec<(i32, i32, [u8; 4])> {
         let mut spans = vec![(i32::MIN, i32::MAX, DIM)];
         if let Some(w) = &self.window {
-            framed_row(&mut spans, w.rect, TINT, y);
+            framed_row(&mut spans, w.rect, (accent, tint(accent)), y);
         }
         if let Some(s) = self.selection {
-            framed_row(&mut spans, s, CLEAR, y);
+            framed_row(&mut spans, s, (accent, CLEAR), y);
         }
         spans
     }
@@ -128,14 +132,19 @@ fn framed_damage(a: Option<Rect>, b: Option<Rect>, out: &mut Vec<Rect>) {
     }
 }
 
-/// Lay row `y` of `r`, filled with `fill` inside an accent border just
-/// outside it, over `spans`.
-fn framed_row(spans: &mut Vec<(i32, i32, [u8; 4])>, r: Rect, fill: [u8; 4], y: i32) {
+/// Lay row `y` of `r`, filled with `fill` inside a `border` just outside
+/// it, over `spans`.
+fn framed_row(
+    spans: &mut Vec<(i32, i32, [u8; 4])>,
+    r: Rect,
+    (border, fill): ([u8; 4], [u8; 4]),
+    y: i32,
+) {
     let ring = r.inflate(1);
     if y < ring.y || y >= ring.bottom() {
         return;
     }
-    cover(spans, ring.x, ring.right(), ACCENT);
+    cover(spans, ring.x, ring.right(), border);
     if y != ring.y && y != ring.bottom() - 1 {
         cover(spans, r.x, r.right(), fill);
     }
