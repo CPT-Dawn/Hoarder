@@ -47,6 +47,29 @@ fn with_alpha(c: hoarder_config::Colour, a: u8) -> tiny_skia::Color {
 pub(crate) struct Extra<'a> {
     pub(crate) detail: Option<&'a Detail>,
     pub(crate) now_ms: i64,
+    /// How far an image too big for the preview pane is scrolled, in its
+    /// own pixels from the top left.
+    pub(crate) scroll: (u32, u32),
+}
+
+/// The preview pane, in logical pixels.
+fn preview_pane() -> Pane {
+    let footer_y = HEIGHT as f32 - FOOTER_H;
+    Pane {
+        x: LIST_W + PAD,
+        y: SEARCH_H + PAD,
+        w: WIDTH as f32 - LIST_W - 2.0 * PAD,
+        h: footer_y - SEARCH_H - 2.0 * PAD - SMALL * 1.3 - 8.0,
+    }
+}
+
+/// How far an image `width`×`height` can scroll in the preview pane at
+/// `scale`: its size less what shows, in its own pixels.
+pub(crate) fn scroll_room(width: u32, height: u32, scale: u32) -> (u32, u32) {
+    let pane = preview_pane();
+    let s = scale as f32;
+    let (pw, ph) = ((pane.w * s) as u32, (pane.h * s) as u32);
+    (width.saturating_sub(pw), height.saturating_sub(ph))
 }
 
 /// Paint the whole panel into `canvas` (`Argb8888`, `scale` physical
@@ -246,12 +269,7 @@ pub(crate) fn paint(
 
     // The preview pane.
     if let Some(clip) = selected_entry {
-        let pane = Pane {
-            x: LIST_W + PAD,
-            y: SEARCH_H + PAD,
-            w: WIDTH as f32 - LIST_W - 2.0 * PAD,
-            h: footer_y - SEARCH_H - 2.0 * PAD - SMALL * 1.3 - 8.0,
-        };
+        let pane = preview_pane();
         let detail = extra.detail;
         if clip.concealed {
             match model.revealed(clip.id) {
@@ -270,7 +288,7 @@ pub(crate) fn paint(
                     width,
                     height,
                     rgba,
-                }) => pen.image(*width, *height, rgba, &pane),
+                }) => pen.image(*width, *height, rgba, &pane, extra.scroll),
                 Some(Detail::Files(paths)) => {
                     let mut y = pane.y;
                     for path in paths {
@@ -532,7 +550,9 @@ impl Pen<'_> {
     /// Draw an image (straight RGBA) at its real pixel size, one image
     /// pixel per physical pixel: centred in `pane` if it fits, otherwise
     /// its top-left corner, cut to the pane.
-    fn image(&mut self, width: u32, height: u32, rgba: &[u8], pane: &Pane) {
+    /// `rgba` at its real pixel size, centred in `pane`; one bigger than
+    /// the pane shows the part `scroll` (in its own pixels) brings into view.
+    fn image(&mut self, width: u32, height: u32, rgba: &[u8], pane: &Pane, scroll: (u32, u32)) {
         let s = self.scale;
         let (px, py) = ((pane.x * s).round() as i32, (pane.y * s).round() as i32);
         let (pw, ph) = ((pane.w * s) as u32, (pane.h * s) as u32);
@@ -540,10 +560,11 @@ impl Pen<'_> {
         if cw == 0 || ch == 0 || rgba.len() < (width * height * 4) as usize {
             return;
         }
+        let (ox, oy) = (scroll.0.min(width - cw), scroll.1.min(height - ch));
         // Premultiplied, as tiny-skia wants, and cut to what shows.
         let mut data = Vec::with_capacity((cw * ch * 4) as usize);
-        for row in 0..ch {
-            let start = (row * width * 4) as usize;
+        for row in oy..oy + ch {
+            let start = ((row * width + ox) * 4) as usize;
             for p in rgba[start..start + (cw * 4) as usize].as_chunks::<4>().0 {
                 let a = p[3] as u32;
                 let pre = |v: u8| (v as u32 * a / 255) as u8;

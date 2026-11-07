@@ -255,6 +255,7 @@ The Zenith module only restores; it never auto-pastes.
   - `Del`: delete.
   - `Ctrl+1–9`: quick restore.
   - `Alt`: reveal Concealed Clips.
+  - `Shift+Arrows`: scroll an image bigger than the preview pane.
   - `Esc`: close.
 - **v1.1 transforms** (`Ctrl+T`): trim, join lines, change case, encode or decode base64/URL/JSON.
 

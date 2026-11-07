@@ -173,6 +173,7 @@ pub fn run(history: &mut dyn History, options: &Options) -> Result<Option<Pick>,
         started: options.started,
         model: None,
         detail: None,
+        scroll: (0, 0),
         keys: Vec::new(),
         mods: Modifiers::default(),
         scale: 1,
@@ -230,6 +231,8 @@ struct App {
     model: Option<Model>,
     /// The selected Clip's detail, by its id.
     detail: Option<(i64, Detail)>,
+    /// How far its image is scrolled (Shift+arrows), in its own pixels.
+    scroll: (u32, u32),
     /// Keys pressed and not yet acted on, with the modifiers held. The
     /// main loop acts on them, since it can ask History for full-text hits.
     keys: Vec<(KeyEvent, Modifiers)>,
@@ -301,6 +304,7 @@ impl App {
                 .filter(|(id, _)| Some(*id) == selected)
                 .map(|(_, d)| d),
             now_ms,
+            scroll: self.scroll,
         };
         paint::paint(canvas, scale, model, &extra, &self.theme, &mut self.fonts);
         if !self.shown {
@@ -333,6 +337,7 @@ impl App {
             return;
         }
         self.detail = Some((clip.id, history.detail(clip)));
+        self.scroll = (0, 0);
         self.dirty = true;
     }
 
@@ -396,6 +401,14 @@ impl App {
                     }));
                 }
             }
+            Keysym::Left | Keysym::Right | Keysym::Up | Keysym::Down if mods.shift => {
+                scroll_preview(
+                    self.detail.as_ref(),
+                    self.scale,
+                    &mut self.scroll,
+                    event.keysym,
+                );
+            }
             Keysym::Up | Keysym::KP_Up => model.move_by(-1),
             Keysym::Down | Keysym::KP_Down => model.move_by(1),
             Keysym::Page_Up | Keysym::KP_Page_Up => model.move_by(-rows),
@@ -421,6 +434,29 @@ impl App {
             model.set_query(&query, &found);
         }
         self.dirty = true;
+    }
+}
+
+/// Shift+arrow: scroll an image too big for the preview pane (`detail`,
+/// at `scale`), 40 logical pixels at a time, never past its edges.
+fn scroll_preview(
+    detail: Option<&(i64, Detail)>,
+    scale: i32,
+    scroll: &mut (u32, u32),
+    sym: Keysym,
+) {
+    let Some((_, Detail::Image { width, height, .. })) = detail else {
+        return;
+    };
+    let scale = scale.max(1) as u32;
+    let (room_x, room_y) = paint::scroll_room(*width, *height, scale);
+    let step = 40 * scale;
+    let (x, y) = scroll;
+    match sym {
+        Keysym::Left => *x = x.saturating_sub(step),
+        Keysym::Right => *x = (*x + step).min(room_x),
+        Keysym::Up => *y = y.saturating_sub(step),
+        _ => *y = (*y + step).min(room_y),
     }
 }
 
