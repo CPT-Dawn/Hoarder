@@ -50,6 +50,19 @@ impl Png {
         let i = ((y * self.width + x) * 3) as usize;
         [self.samples[i], self.samples[i + 1], self.samples[i + 2]]
     }
+
+    /// The `width`×`height` part starting at `(x0, y0)`.
+    pub fn crop(&self, x0: u32, y0: u32, width: u32, height: u32) -> Png {
+        let samples = (y0..y0 + height)
+            .flat_map(|y| (x0..x0 + width).flat_map(move |x| self.rgb(x, y)))
+            .collect();
+        Png {
+            width,
+            height,
+            depth: self.depth,
+            samples,
+        }
+    }
 }
 
 /// What a painted 10-bit colour looks like on an 8-bit output: the helper
