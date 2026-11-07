@@ -390,14 +390,18 @@ The budgets are checked in CI with a benchmark job on the headless Sway session.
 
 ## 13. Testing
 
-- **Unit:** the Classifier patterns, reader rules, retention, the config round-trip (comments preserved), mixed-scale maths, transforms, and the IPC codec.
-- **Integration (CI):** headless Sway (`WLR_BACKENDS=headless`, `WLR_RENDERER=pixman`) runs a helper client that paints a known pattern. The tests cover:
-  - a pixel-exact Capture compared byte for byte, including transforms and 10-bit;
-  - Takeover after the helper exits;
-  - Secret and Concealed paths;
-  - `copy`/`paste` flag parity with wl-clipboard;
-  - IPC conformance.
-- **Snapshot:** the Overlay and Picker rendered offscreen with tiny-skia and compared to golden PNGs.
+Tests go through as few seams as possible, and as high up as possible.
+
+- **Primary seam: the `hoarder` binary as a black box in a headless Sway session** (`WLR_BACKENDS=headless`, `WLR_RENDERER=pixman`). A helper Wayland client:
+  - paints known patterns on 8-bit, 10-bit, scaled and rotated outputs;
+  - sets and serves Selections (including Secret ones), then exits on cue;
+  - drives the Overlay and Picker through virtual pointer and virtual keyboard.
+
+  The tests cover byte-exact Captures, Takeover, Sensitivity tiers, History, `copy`/`paste` flag parity with wl-clipboard, and IPC conformance. Overlay and Picker visuals are checked by capturing the headless screen through this same seam.
+- **Secondary seams, three deep modules tested directly:**
+  - **Classifier:** Selection metadata in, Sensitivity out.
+  - **Retention policy:** Store state plus limits in, Clips to evict out.
+  - **Config editing:** file plus `set` in, file out with comments preserved.
 - **Manual release checklist:** Hyprland features (snapping, toplevel mapping, hidden workspaces), and the app matrix for Takeover and Restore (Firefox, Chromium, an Electron app such as Discord or VS Code, GTK4, Qt6, IntelliJ, LibreOffice, Inkscape, GIMP 3, foot/kitty), fractional scales 1.25/1.5/2, rotated output, 10-bit/HDR.
 
 ## 14. Milestones
