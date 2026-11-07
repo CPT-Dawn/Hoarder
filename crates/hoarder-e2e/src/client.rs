@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::io::Write as _;
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::net::UnixStream;
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -32,6 +32,14 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
 use wayland_protocols_wlr::screencopy::v1::client::{
     zwlr_screencopy_frame_v1::{self, ZwlrScreencopyFrameV1},
     zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1,
+};
+
+use wayland_client::protocol::wl_seat::WlSeat;
+use wayland_protocols::ext::data_control::v1::client::{
+    ext_data_control_device_v1::{self, ExtDataControlDeviceV1},
+    ext_data_control_manager_v1::ExtDataControlManagerV1,
+    ext_data_control_offer_v1::ExtDataControlOfferV1,
+    ext_data_control_source_v1::{self, ExtDataControlSourceV1},
 };
 
 use crate::frame::{FrameFormat, RawFrame};
@@ -132,6 +140,20 @@ impl Client {
         self.call(move |w| w.capture(&output))
     }
 
+    /// Become the owner of a Selection, offering `offer` as `(MIME type, bytes)`
+    /// pairs in that order, and serve it until the client exits or someone
+    /// else takes the Selection over.
+    ///
+    /// Uses `ext-data-control-v1`, so it needs no keyboard focus. Returns once
+    /// the compositor has processed the request.
+    pub fn set_selection(&self, selection: Selection, offer: &[(&str, &[u8])]) -> Result<()> {
+        let offer: Offer = offer
+            .iter()
+            .map(|(m, d)| (m.to_string(), Arc::new(d.to_vec())))
+            .collect();
+        self.call(move |w| w.set_selection(selection, offer))
+    }
+
     /// Disconnect from the compositor, as if the app had quit.
     ///
     /// Everything the client owned (surfaces, Selections) goes away with it.
@@ -152,6 +174,18 @@ impl Drop for Client {
     fn drop(&mut self) {
         self.shutdown();
     }
+}
+
+/// The representations a data source serves: `(MIME type, bytes)` in order.
+type Offer = Vec<(String, Arc<Vec<u8>>)>;
+
+/// One of the two Wayland Selections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Selection {
+    /// Ctrl+C / Ctrl+V.
+    Clipboard,
+    /// Highlight / middle-click.
+    Primary,
 }
 
 /// A surface the client keeps alive on an output.
@@ -178,6 +212,8 @@ pub(crate) struct State {
     layer_closed: Vec<ObjectId>,
     callbacks_done: Vec<ObjectId>,
     copies: HashMap<ObjectId, Copy>,
+    /// What each live data source offers, by MIME type.
+    sources: HashMap<ObjectId, Offer>,
 }
 
 /// Progress of one screencopy.
@@ -201,6 +237,7 @@ pub(crate) struct Worker {
     shm: WlShm,
     outputs: Vec<WlOutput>,
     painted: HashMap<String, Painted>,
+    data_device: Option<ExtDataControlDeviceV1>,
 }
 
 impl Worker {
@@ -228,6 +265,7 @@ impl Worker {
             shm,
             outputs,
             painted: HashMap::new(),
+            data_device: None,
         };
         worker.roundtrip()?;
         Ok(worker)
@@ -368,6 +406,25 @@ impl Worker {
             pool.create_buffer(0, w as i32, h as i32, (w * 4) as i32, format, &self.qh, ());
         pool.destroy();
         Ok(buffer)
+    }
+
+    fn set_selection(&mut self, selection: Selection, offer: Offer) -> Result<()> {
+        let manager: ExtDataControlManagerV1 = self.bind(1)?;
+        if self.data_device.is_none() {
+            let seat: WlSeat = self.bind(1)?;
+            self.data_device = Some(manager.get_data_device(&seat, &self.qh, ()));
+        }
+        let source = manager.create_data_source(&self.qh, ());
+        for (mime, _) in &offer {
+            source.offer(mime.clone());
+        }
+        self.state.sources.insert(source.id(), offer);
+        let device = self.data_device.as_ref().expect("created above");
+        match selection {
+            Selection::Clipboard => device.set_selection(Some(&source)),
+            Selection::Primary => device.set_primary_selection(Some(&source)),
+        }
+        self.roundtrip()
     }
 
     /// Read back `output`'s current buffer through `zwlr_screencopy_manager_v1`.
@@ -610,6 +667,62 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
     }
 }
 
+impl Dispatch<ExtDataControlSourceV1, ()> for State {
+    fn event(
+        state: &mut Self,
+        source: &ExtDataControlSourceV1,
+        event: ext_data_control_source_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_data_control_source_v1::Event::Send { mime_type, fd } => {
+                let data = state.sources.get(&source.id()).and_then(|offer| {
+                    offer
+                        .iter()
+                        .find(|(m, _)| *m == mime_type)
+                        .map(|(_, d)| d.clone())
+                });
+                if let Some(data) = data {
+                    // Write off-thread so a slow reader never stalls the event loop.
+                    std::thread::spawn(move || {
+                        let _ = std::fs::File::from(fd).write_all(&data);
+                    });
+                }
+            }
+            ext_data_control_source_v1::Event::Cancelled => {
+                state.sources.remove(&source.id());
+                source.destroy();
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ExtDataControlDeviceV1, ()> for State {
+    fn event(
+        _: &mut Self,
+        _: &ExtDataControlDeviceV1,
+        event: ext_data_control_device_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        // Other clients' offers are none of our business; drop them.
+        if let ext_data_control_device_v1::Event::DataOffer { id } = event {
+            id.destroy();
+        }
+    }
+
+    wayland_client::event_created_child!(State, ExtDataControlDeviceV1, [
+        ext_data_control_device_v1::EVT_DATA_OFFER_OPCODE => (ExtDataControlOfferV1, ()),
+    ]);
+}
+
+delegate_noop!(State: ignore ExtDataControlOfferV1);
+delegate_noop!(State: ignore ExtDataControlManagerV1);
+delegate_noop!(State: ignore WlSeat);
 delegate_noop!(State: ignore ZwlrScreencopyManagerV1);
 delegate_noop!(State: ignore WlCompositor);
 delegate_noop!(State: ignore WlSurface);
