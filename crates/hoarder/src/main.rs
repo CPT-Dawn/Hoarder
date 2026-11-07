@@ -1,7 +1,10 @@
+mod after;
 mod clipboard;
 mod config;
 mod encode;
+mod hook;
 mod image;
+mod notify;
 mod save;
 mod shot;
 
@@ -42,6 +45,9 @@ enum Command {
         /// Do not copy the Capture to the clipboard (`screenshot.copy = false`).
         #[arg(long)]
         no_copy: bool,
+        /// No notification for this Capture (`screenshot.notify = false`).
+        #[arg(long)]
+        no_notify: bool,
     },
     /// Copy stdin or text to the clipboard (accepts every wl-copy flag).
     Copy(clipboard::CopyArgs),
@@ -50,6 +56,9 @@ enum Command {
     /// Serve an Offer read from stdin; started by Hoarder itself.
     #[command(name = clipboard::SERVE_SUBCOMMAND, hide = true)]
     ServeOffer(clipboard::ServeArgs),
+    /// Announce a Capture and answer its actions; started by Hoarder itself.
+    #[command(name = notify::SUBCOMMAND, hide = true)]
+    NotifyCapture(notify::NotifyArgs),
     /// Read, change and check `config.toml`.
     #[command(subcommand)]
     Config(config::ConfigCommand),
@@ -95,6 +104,7 @@ fn main() -> ExitCode {
             format,
             no_save,
             no_copy,
+            no_notify,
         }) => {
             // Shot flags are one-run overrides, applied after any `--set`.
             let format = format.or_else(|| output.as_deref().and_then(format_of_path));
@@ -102,6 +112,7 @@ fn main() -> ExitCode {
                 format.map(|f| ("screenshot.format", f)),
                 no_save.then(|| ("screenshot.save", "false".into())),
                 no_copy.then(|| ("screenshot.copy", "false".into())),
+                no_notify.then(|| ("screenshot.notify", "false".into())),
             ];
             cli.overrides
                 .extend(flags.into_iter().flatten().map(|(k, v)| (k.into(), v)));
@@ -111,6 +122,7 @@ fn main() -> ExitCode {
         Some(Command::Copy(args)) => clipboard::copy(args),
         Some(Command::Paste(args)) => clipboard::paste(args),
         Some(Command::ServeOffer(args)) => clipboard::serve_child(args),
+        Some(Command::NotifyCapture(args)) => notify::serve_child(args),
         Some(Command::Config(command)) => config::run(command, &cli.overrides),
         None => Ok(()),
     };
