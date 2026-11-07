@@ -311,6 +311,19 @@ pub fn copy_capture(png: &[u8]) -> Result<(), (Exit, String)> {
     offer.serve_in_background(png)
 }
 
+/// Put `text` on the clipboard, under every text type, so it stays
+/// pasteable after the command that copied it exits.
+pub fn copy_text(text: &str) -> Result<(), (Exit, String)> {
+    let offer = Offer {
+        which: Selection::Clipboard,
+        mime_types: offered_types("text/plain;charset=utf-8"),
+        sensitive: false,
+        serve: Serve::UntilReplaced,
+        seat: None,
+    };
+    offer.serve_in_background(text.as_bytes())
+}
+
 /// Whether something answers on the Daemon's socket (PLAN.md §11).
 fn daemon_running() -> bool {
     std::env::var_os("XDG_RUNTIME_DIR").is_some_and(|dir| {

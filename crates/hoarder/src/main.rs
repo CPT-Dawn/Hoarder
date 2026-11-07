@@ -7,6 +7,7 @@ mod encode;
 mod hook;
 mod image;
 mod notify;
+mod pick;
 mod save;
 mod shot;
 
@@ -61,6 +62,12 @@ enum Command {
         /// the Overlay toggles it.
         #[arg(long)]
         cursor: bool,
+    },
+    /// Pick a colour off the screen and copy it.
+    Pick {
+        /// How to write the colour (`pick.format`).
+        #[arg(long, value_name = "F", value_parser = ["hex", "rgb", "hsl"])]
+        format: Option<String>,
     },
     /// Copy stdin or text to the clipboard (accepts every wl-copy flag).
     Copy(clipboard::CopyArgs),
@@ -148,6 +155,11 @@ fn main() -> ExitCode {
                     &config,
                 )
             })
+        }
+        Some(Command::Pick { format }) => {
+            cli.overrides
+                .extend(format.map(|f| ("pick.format".to_owned(), f)));
+            config::effective(&cli.overrides).and_then(|config| pick::run(&config))
         }
         Some(Command::Copy(args)) => clipboard::copy(args),
         Some(Command::Paste(args)) => clipboard::paste(args),

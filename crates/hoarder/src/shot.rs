@@ -75,6 +75,7 @@ pub fn run(
         windows: Vec::new(),
         hint_bar: state.hint_bar_due(),
         cursor: config.screenshot.cursor.into(),
+        pick: false,
     };
     if let Some(delay) = when.delay.filter(|d| !d.is_zero()) {
         countdown::run(delay, &options).map_err(overlay_error)?;
@@ -212,7 +213,7 @@ fn windows() -> Vec<Window> {
         })
 }
 
-fn freeze() -> Result<Frozen, (Exit, String)> {
+pub(crate) fn freeze() -> Result<Frozen, (Exit, String)> {
     hoarder_wayland::freeze().map_err(|e| {
         let code = match e {
             CaptureError::NoWayland(_) | CaptureError::Unsupported(_) => Exit::Unsupported,
@@ -222,7 +223,7 @@ fn freeze() -> Result<Frozen, (Exit, String)> {
     })
 }
 
-fn overlay_error(e: OverlayError) -> (Exit, String) {
+pub(crate) fn overlay_error(e: OverlayError) -> (Exit, String) {
     let code = match e {
         OverlayError::Unsupported(_) => Exit::Unsupported,
         OverlayError::Failed(_) => Exit::Io,
@@ -319,6 +320,7 @@ fn from_overlay(
         }
         Outcome::AllOutputs => (cut::cut(&frozen.frames, None, settings), "all"),
         Outcome::Cancelled => return Err((Exit::Cancelled, "cancelled".into())),
+        Outcome::Pixel { .. } => unreachable!("only `hoarder pick` picks pixels"),
     })
 }
 
