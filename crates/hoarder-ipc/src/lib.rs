@@ -354,7 +354,10 @@ impl Connection {
     }
 
     /// [`Op::List`], decoded.
-    pub fn list(&mut self, limit: Option<u32>) -> std::io::Result<Result<Vec<ClipSummary>, Failure>> {
+    pub fn list(
+        &mut self,
+        limit: Option<u32>,
+    ) -> std::io::Result<Result<Vec<ClipSummary>, Failure>> {
         self.typed(Op::List { limit })
     }
 

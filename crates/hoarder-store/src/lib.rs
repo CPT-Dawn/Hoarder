@@ -96,6 +96,9 @@ impl From<std::io::Error> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// One stored representation: a MIME type and its bytes.
+pub type Representation = (String, Vec<u8>);
+
 /// One Clip's metadata, as listed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Clip {
@@ -181,7 +184,14 @@ impl Store {
         tx.execute(
             "INSERT INTO clips(created_at, last_used_at, source_app, kind, preview, size, hash)
              VALUES (?1, ?1, ?2, ?3, ?4, ?5, ?6)",
-            params![now, source_app, kind.as_str(), preview, size as i64, &hash[..]],
+            params![
+                now,
+                source_app,
+                kind.as_str(),
+                preview,
+                size as i64,
+                &hash[..]
+            ],
         )?;
         let id = tx.last_insert_rowid();
         for (ord, (mime, data)) in reprs.iter().enumerate() {
@@ -203,9 +213,9 @@ impl Store {
 
     /// Up to `limit` Clips, most recently used first.
     pub fn list(&self, limit: usize) -> Result<Vec<Clip>> {
-        let mut stmt = self.db.prepare_cached(
-            "SELECT id FROM clips ORDER BY last_used_at DESC, id DESC LIMIT ?1",
-        )?;
+        let mut stmt = self
+            .db
+            .prepare_cached("SELECT id FROM clips ORDER BY last_used_at DESC, id DESC LIMIT ?1")?;
         let ids = stmt
             .query_map([limit.min(i64::MAX as usize) as i64], |r| r.get(0))?
             .collect::<rusqlite::Result<Vec<i64>>>()?;
@@ -248,7 +258,7 @@ impl Store {
     }
 
     /// A Clip's representations, `(mime, bytes)` in the source's order.
-    pub fn representations(&self, id: i64) -> Result<Option<Vec<(String, Vec<u8>)>>> {
+    pub fn representations(&self, id: i64) -> Result<Option<Vec<Representation>>> {
         let rows = self
             .db
             .prepare_cached(
@@ -335,21 +345,21 @@ fn blob_path(blobs: &Path, hash: &[u8]) -> PathBuf {
 
 /// Write a blob file unless it is already there (content-addressed).
 fn write_blob(blobs: &Path, hash: &[u8], data: &[u8]) -> Result<()> {
-        let path = blob_path(blobs, hash);
-        if path.exists() {
-            return Ok(());
-        }
-        let tmp = path.with_extension("part");
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)?;
-        file.write_all(data)?;
-        file.sync_data()?;
-        std::fs::rename(&tmp, &path)?;
-        Ok(())
+    let path = blob_path(blobs, hash);
+    if path.exists() {
+        return Ok(());
+    }
+    let tmp = path.with_extension("part");
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    file.write_all(data)?;
+    file.sync_data()?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
 }
 
 /// Create `dir` (and its parents) and make it 0700.
@@ -361,9 +371,8 @@ fn private_dir(dir: &Path) -> std::io::Result<()> {
 /// `now`, or just after the latest use if the clock has not moved past it,
 /// so the most recent Clip is always strictly on top.
 fn next_time(tx: &Transaction<'_>, now: i64) -> Result<i64> {
-    let latest: Option<i64> = tx.query_row("SELECT max(last_used_at) FROM clips", [], |r| {
-        r.get(0)
-    })?;
+    let latest: Option<i64> =
+        tx.query_row("SELECT max(last_used_at) FROM clips", [], |r| r.get(0))?;
     Ok(latest.map_or(now, |l| now.max(l + 1)))
 }
 

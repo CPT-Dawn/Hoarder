@@ -55,8 +55,8 @@ const PREVIEW_CHARS: usize = 200;
 /// representation (prefixed by the kind), which is its identity for dedup.
 pub(crate) fn describe(reprs: &[(&str, &[u8])]) -> (Kind, String, [u8; 32]) {
     let find = |pred: &dyn Fn(&str) -> bool| reprs.iter().find(|(m, _)| pred(m));
-    let (kind, canonical) = if let Some(r) = find(&|m| m == "text/uri-list")
-        .filter(|(_, d)| uris(d).next().is_some())
+    let (kind, canonical) = if let Some(r) =
+        find(&|m| m == "text/uri-list").filter(|(_, d)| uris(d).next().is_some())
     {
         (Kind::Files, r)
     } else if let Some(r) =
@@ -146,4 +146,35 @@ fn png_size(data: &[u8]) -> Option<(u32, u32)> {
     }
     let be = |at: usize| u32::from_be_bytes(data[at..at + 4].try_into().expect("4 bytes"));
     Some((be(16), be(20)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_text_preview_is_one_line_cut_at_200_chars() {
+        let text = format!("  first\n\tsecond   {}", "x".repeat(500));
+        let (kind, preview, _) = describe(&[("text/plain", text.as_bytes())]);
+        assert_eq!(kind, Kind::Text);
+        assert!(preview.starts_with("first second xxx"), "{preview}");
+        assert_eq!(preview.chars().count(), 200);
+        assert!(preview.ends_with('…'));
+    }
+
+    #[test]
+    fn the_same_text_under_different_types_is_one_clip() {
+        let (_, _, a) = describe(&[("UTF8_STRING", b"same".as_slice())]);
+        let (_, _, b) = describe(&[
+            ("text/html", b"<i>x</i>".as_slice()),
+            ("text/plain", b"same"),
+        ]);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn an_image_that_is_not_png_is_previewed_by_its_type() {
+        let (kind, preview, _) = describe(&[("image/jpeg", b"\xff\xd8".as_slice())]);
+        assert_eq!((kind, preview.as_str()), (Kind::Image, "image/jpeg"));
+    }
 }

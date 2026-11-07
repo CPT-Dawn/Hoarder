@@ -222,7 +222,7 @@ impl Daemon {
                 self.reply(client, id, Ok(to_value(&status)));
             }
             Op::Clear => self.clear(client, id),
-            Op::List { limit } => self.to_history(client, id, Job::List { client, id, limit }),
+            Op::List { limit } => self.ask_history(client, id, Job::List { client, id, limit }),
             Op::Get { clip, mime } => {
                 let pipe = self
                     .clients
@@ -230,7 +230,7 @@ impl Daemon {
                     .get_mut(&client)
                     .and_then(|c| c.fds.pop_front());
                 match pipe {
-                    Some(pipe) => self.to_history(
+                    Some(pipe) => self.ask_history(
                         client,
                         id,
                         Job::Get {
@@ -251,13 +251,13 @@ impl Daemon {
                     ),
                 }
             }
-            Op::Restore { clip } => self.to_history(client, id, Job::Restore { client, id, clip }),
-            Op::Delete { clip } => self.to_history(client, id, Job::Delete { client, id, clip }),
+            Op::Restore { clip } => self.ask_history(client, id, Job::Restore { client, id, clip }),
+            Op::Delete { clip } => self.ask_history(client, id, Job::Delete { client, id, clip }),
         }
     }
 
     /// Hand a request to the History thread, which answers it.
-    fn to_history(&mut self, client: u64, id: u64, job: Job) {
+    fn ask_history(&mut self, client: u64, id: u64, job: Job) {
         if let Err(failure) = self.history.send(job) {
             self.reply(client, id, Err(failure));
         }
