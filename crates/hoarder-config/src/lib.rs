@@ -26,7 +26,7 @@ pub use edit::{EditError, get, reset, set};
 pub use schema::*;
 pub use state::{State, StoredRegion, state_path};
 pub use template::{NameFields, NameTemplate};
-pub use watch::Watcher;
+pub use watch::{SETTLE, Watcher};
 pub use zenith::{ZenithTheme, zenith_dir};
 
 /// The file `config reset` writes: every setting at its default, documented.

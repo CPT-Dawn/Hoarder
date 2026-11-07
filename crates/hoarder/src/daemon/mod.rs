@@ -130,6 +130,7 @@ pub fn run(overrides: &[(String, String)]) -> Result<(), Fail> {
         config,
         overrides: overrides.to_vec(),
         config_watch,
+        config_settle: None,
         focus,
         slots: Default::default(),
         current: Default::default(),
@@ -351,6 +352,9 @@ pub(crate) struct Daemon {
     config: Config,
     overrides: Vec<(String, String)>,
     config_watch: Option<hoarder_config::Watcher>,
+    /// Armed by a change to `config.toml`, rearmed by each further one: the
+    /// file is re-read once it has been quiet for `hoarder_config::SETTLE`.
+    config_settle: Option<RegistrationToken>,
     /// The focused app over compositor IPC, if the compositor has one.
     focus: Option<hoarder_wayland::focus::FocusWatch>,
     slots: [Slot; 2],
@@ -969,7 +973,8 @@ impl Daemon {
         let _ = self.history.send(history::Job::Retain { limits });
     }
 
-    /// Re-read `config.toml`. A broken file keeps the config in force.
+    /// `config.toml` changed: re-read it once it has settled, so an editor
+    /// that truncates and then writes in place is not caught halfway.
     fn on_config_changed(&mut self) {
         let Some(watch) = &mut self.config_watch else {
             return;
@@ -977,28 +982,41 @@ impl Daemon {
         if !matches!(watch.changed(), Ok(true)) {
             return;
         }
-        if let Err(e) = self.reload() {
-            eprintln!("hoarder: {e}");
+        if let Some(token) = self.config_settle.take() {
+            self.handle.remove(token);
+        }
+        let settled = self.handle.insert_source(
+            Timer::from_duration(hoarder_config::SETTLE),
+            |_, _, daemon: &mut Daemon| {
+                daemon.config_settle = None;
+                if let Err(e) = daemon.reload() {
+                    eprintln!("hoarder: {e}");
+                }
+                TimeoutAction::Drop
+            },
+        );
+        match settled {
+            Ok(token) => self.config_settle = Some(token),
+            Err(e) => eprintln!("hoarder: cannot reload the config: {}", e.error),
         }
     }
 
-    /// Re-read `config.toml` (the `reload` op, or a change noticed). A
-    /// broken file keeps the config in force and says why.
+    /// Re-read `config.toml` (the `reload` op, or a change noticed). An
+    /// empty or broken file keeps the config in force and says why.
     fn reload(&mut self) -> Result<(), String> {
         let path = hoarder_config::path();
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == ErrorKind::NotFound => String::new(),
-            Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+        let config = match crate::config::reread(&path, &self.overrides) {
+            crate::config::Reread::Apply(config) => *config,
+            crate::config::Reread::Empty => {
+                return Err(format!(
+                    "{} is empty; keeping the previous config",
+                    path.display()
+                ));
+            }
+            crate::config::Reread::Broken(why) => {
+                return Err(format!("{why}; keeping the previous config"));
+            }
         };
-        if let Err(d) = hoarder_config::parse(&text) {
-            return Err(format!(
-                "{}:{d}; keeping the previous config",
-                path.display()
-            ));
-        }
-        let config = hoarder_config::with_overrides(&text, &self.overrides)
-            .map_err(|e| format!("--set {e}"))?;
         if config.history.encrypt != self.config.history.encrypt {
             let _ = self
                 .history
