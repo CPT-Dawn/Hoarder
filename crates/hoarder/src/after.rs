@@ -29,6 +29,26 @@ pub fn run(capture: &Delivered, settings: &Screenshot) {
     }
 }
 
+/// Start the flash, if enabled, alongside the rest of the shot. It runs after
+/// the freeze, so it never shows in the Capture; dropping the guard waits for
+/// it to fade, as its surfaces go with the process.
+pub fn flash(settings: &Screenshot) -> Option<Flash> {
+    settings
+        .flash
+        .then(|| Flash(Some(std::thread::spawn(hoarder_wayland::flash::flash))))
+}
+
+#[derive(Debug)]
+pub struct Flash(Option<std::thread::JoinHandle<Result<(), String>>>);
+
+impl Drop for Flash {
+    fn drop(&mut self) {
+        if let Some(Ok(Err(e))) = self.0.take().map(std::thread::JoinHandle::join) {
+            eprintln!("hoarder: no flash: {e}");
+        }
+    }
+}
+
 /// The freedesktop `screen-capture` sound, through libcanberra if it is
 /// installed, else straight from the sound theme with PipeWire or PulseAudio.
 fn play_shutter() {

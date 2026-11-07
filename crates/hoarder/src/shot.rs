@@ -27,6 +27,7 @@ pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(),
         };
         (code, e.to_string())
     })?;
+    let _flash = crate::after::flash(&config.screenshot);
     let image = match target {
         Target::All => Image::all_outputs(&frozen.frames),
     };
