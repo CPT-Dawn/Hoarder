@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use clap::ValueEnum;
-use hoarder_config::{Config, Screenshot};
-use hoarder_ui::{Options, Outcome, OverlayError, overlay};
+use hoarder_config::{Config, Screenshot, State, StoredRegion};
+use hoarder_ui::{Options, Outcome, OverlayError, Region, overlay};
 use hoarder_wayland::CaptureError;
 
 use crate::Exit;
@@ -44,25 +44,12 @@ pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(),
         };
         (code, e.to_string())
     })?;
-    let cut = match target {
-        Target::All => cut::cut(&frozen.frames, None, &config.screenshot),
-        Target::Region => {
-            let options = Options {
-                clamp_to_output: cut::clamps_regions(&frozen.frames, &config.screenshot),
-            };
-            match overlay::run(&frozen, started, &options).map_err(|e| {
-                let code = match e {
-                    OverlayError::Unsupported(_) => Exit::Unsupported,
-                    OverlayError::Failed(_) => Exit::Io,
-                };
-                (code, e.to_string())
-            })? {
-                Outcome::Region(region) => {
-                    cut::cut(&frozen.frames, Some(&region), &config.screenshot)
-                }
-                Outcome::Cancelled => return Err((Exit::Cancelled, "cancelled".into())),
-            }
-        }
+    let (cut, name) = match target {
+        Target::All => (
+            cut::cut(&frozen.frames, None, &config.screenshot),
+            target.name(),
+        ),
+        Target::Region => from_overlay(&frozen, started, config)?,
     };
     // Also on stderr, for runs that end up in a pipe rather than a notification.
     for badge in cut.badges.labels() {
@@ -79,12 +66,12 @@ pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(),
     let savings: Vec<_> = if output.is_none() && config.screenshot.save {
         parts
             .iter()
-            .map(|(name, image)| {
+            .map(|(part, image)| {
                 crate::save::spawn(
                     image.clone(),
-                    target.name(),
+                    name,
                     None,
-                    name.clone(),
+                    part.clone(),
                     config.screenshot.clone(),
                 )
             })
@@ -104,7 +91,7 @@ pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(),
         path,
         width: image.width,
         height: image.height,
-        target: target.name(),
+        target: name,
         badges: cut.badges,
     };
     let delivered: Vec<Delivered> = match output {
@@ -170,6 +157,67 @@ fn beside(path: &Path, suffix: &str) -> PathBuf {
         None => format!("{stem}_{suffix}"),
     };
     path.with_file_name(name)
+}
+
+/// Show the Overlay and cut out the Target picked there; returns the Cut
+/// and the Target's name for file names.
+fn from_overlay(
+    frozen: &hoarder_wayland::Frozen,
+    started: Instant,
+    config: &Config,
+) -> Result<(cut::Cut, &'static str), (Exit, String)> {
+    let mut state = State::load();
+    let options = Options {
+        confirm: config.screenshot.confirm,
+        last_region: state.last_region().map(|r| Region {
+            x: r.x,
+            y: r.y,
+            width: r.width,
+            height: r.height,
+        }),
+        clamp_to_output: cut::clamps_regions(&frozen.frames, &config.screenshot),
+    };
+    let outcome = overlay::run(frozen, started, &options).map_err(|e| {
+        let code = match e {
+            OverlayError::Unsupported(_) => Exit::Unsupported,
+            OverlayError::Failed(_) => Exit::Io,
+        };
+        (code, e.to_string())
+    })?;
+    let settings = &config.screenshot;
+    Ok(match outcome {
+        Outcome::Region(r) => {
+            state.set_last_region(StoredRegion {
+                x: r.x,
+                y: r.y,
+                width: r.width,
+                height: r.height,
+            });
+            if let Err(e) = state.save() {
+                eprintln!(
+                    "hoarder: cannot remember the Region in {}: {e}",
+                    hoarder_config::state_path().display()
+                );
+            }
+            (cut::cut(&frozen.frames, Some(&r), settings), "region")
+        }
+        Outcome::Output(name) => {
+            let frame = frozen
+                .frames
+                .iter()
+                .find(|f| f.output == name)
+                .ok_or_else(|| (Exit::Io, format!("output {name} went away")))?;
+            let whole = Region {
+                x: frame.logical.x as f64,
+                y: frame.logical.y as f64,
+                width: frame.logical.width as f64,
+                height: frame.logical.height as f64,
+            };
+            (cut::cut(&frozen.frames, Some(&whole), settings), "output")
+        }
+        Outcome::AllOutputs => (cut::cut(&frozen.frames, None, settings), "all"),
+        Outcome::Cancelled => return Err((Exit::Cancelled, "cancelled".into())),
+    })
 }
 
 fn deliver(image: &Image, output: &Path, settings: &Screenshot) -> std::io::Result<()> {
