@@ -15,6 +15,7 @@ mod schema;
 mod state;
 mod template;
 mod watch;
+mod zenith;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -26,6 +27,7 @@ pub use schema::*;
 pub use state::{State, StoredRegion, state_path};
 pub use template::{NameFields, NameTemplate};
 pub use watch::Watcher;
+pub use zenith::{ZenithTheme, zenith_dir};
 
 /// The file `config reset` writes: every setting at its default, documented.
 pub const DEFAULT_FILE: &str = include_str!("default.toml");
