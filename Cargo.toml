@@ -22,6 +22,8 @@ hoarder-wayland = { path = "crates/hoarder-wayland", version = "0.1.0" }
 
 clap = { version = "4.6", features = ["derive"] }
 cosmic-text = "0.19"
+futures-util = { version = "0.3", default-features = false }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "avif", "qoi", "rayon"] }
 inotify = { version = "0.11", default-features = false }
 jiff = "0.2"
 png = "0.18"
@@ -31,10 +33,14 @@ smithay-client-toolkit = { version = "0.21", default-features = false, features 
 tempfile = "3.27"
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
 toml_edit = { version = "0.25", features = ["serde"] }
+# Lossy WebP only: `image` encodes WebP losslessly and nothing else.
+webp = { version = "0.3.1", default-features = false }
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+# zbus 6 has no blocking API: drive it with `zbus::block_on`.
+zbus = { version = "6.2", default-features = false, features = ["default-rt", "proxy"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -42,3 +48,7 @@ missing_debug_implementations = "warn"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+
+# rav1e (AVIF) is unusably slow unoptimised; keep debug builds and tests snappy.
+[profile.dev.package.rav1e]
+opt-level = 3

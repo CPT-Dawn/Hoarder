@@ -2,10 +2,12 @@
 //!
 //! [`capture::freeze`] takes the Frozen Frames a Capture is cut from
 //! (PLAN.md §4.1, ADR-0003). [`clipboard::Clipboard`] reads, serves and
-//! clears Selections over data control (PLAN.md §5).
+//! clears Selections over data control (PLAN.md §5). [`flash::flash`] is the
+//! optional camera flash.
 
 pub mod capture;
 pub mod clipboard;
+pub mod flash;
 
 pub use capture::{
     Backend, CaptureError, Frozen, FrozenFrame, LogicalRect, ShmFormat, Transform, freeze,

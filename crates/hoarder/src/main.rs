@@ -1,6 +1,10 @@
+mod after;
 mod clipboard;
 mod config;
+mod encode;
+mod hook;
 mod image;
+mod notify;
 mod save;
 mod shot;
 
@@ -31,7 +35,14 @@ enum Command {
         /// to `screenshot.dir`.
         #[arg(short = 'o', long = "output", value_name = "PATH")]
         output: Option<PathBuf>,
-        /// Leave the clipboard alone (`screenshot.copy = false` for this run).
+        /// Image format for this run (`screenshot.format`). Defaults to the
+        /// extension of `-o PATH` when it names one.
+        #[arg(long, value_name = "F", value_parser = ["png", "webp", "jpeg", "avif", "qoi"])]
+        format: Option<String>,
+        /// Do not save the Capture to `screenshot.dir` (`screenshot.save = false`).
+        #[arg(long)]
+        no_save: bool,
+        /// Do not copy the Capture to the clipboard (`screenshot.copy = false`).
         #[arg(long)]
         no_copy: bool,
         /// Skip the freeze: select over the live desktop and capture it as it
@@ -41,6 +52,9 @@ enum Command {
         /// Count down SECONDS (decimals allowed) before freezing.
         #[arg(long, value_name = "SECONDS", value_parser = shot::parse_delay)]
         delay: Option<std::time::Duration>,
+        /// No notification for this Capture (`screenshot.notify = false`).
+        #[arg(long)]
+        no_notify: bool,
     },
     /// Copy stdin or text to the clipboard (accepts every wl-copy flag).
     Copy(clipboard::CopyArgs),
@@ -49,9 +63,23 @@ enum Command {
     /// Serve an Offer read from stdin; started by Hoarder itself.
     #[command(name = clipboard::SERVE_SUBCOMMAND, hide = true)]
     ServeOffer(clipboard::ServeArgs),
+    /// Announce a Capture and answer its actions; started by Hoarder itself.
+    #[command(name = notify::SUBCOMMAND, hide = true)]
+    NotifyCapture(notify::NotifyArgs),
     /// Read, change and check `config.toml`.
     #[command(subcommand)]
     Config(config::ConfigCommand),
+}
+
+/// The `screenshot.format` an `-o` file name asks for, if its extension is one.
+fn format_of_path(path: &std::path::Path) -> Option<String> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    let format = match ext.as_str() {
+        "jpg" | "jpeg" => "jpeg",
+        "png" | "webp" | "avif" | "qoi" => &ext,
+        _ => return None,
+    };
+    Some(format.to_owned())
 }
 
 /// Process exit codes (PLAN.md §10). clap exits 2 on its own usage errors.
@@ -75,22 +103,41 @@ impl From<Exit> for ExitCode {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
     let result = match cli.command {
         Some(Command::Shot {
             target,
             output,
+            format,
+            no_save,
             no_copy,
             live,
             delay,
-        }) => config::effective(&cli.overrides).and_then(|mut config| {
-            config.screenshot.copy &= !no_copy;
-            let when = shot::When { live, delay };
-            shot::run(target, when, output.as_deref(), &config)
-        }),
+            no_notify,
+        }) => {
+            // Shot flags are one-run overrides, applied after any `--set`.
+            let format = format.or_else(|| output.as_deref().and_then(format_of_path));
+            let flags = [
+                format.map(|f| ("screenshot.format", f)),
+                no_save.then(|| ("screenshot.save", "false".into())),
+                no_copy.then(|| ("screenshot.copy", "false".into())),
+                no_notify.then(|| ("screenshot.notify", "false".into())),
+            ];
+            cli.overrides
+                .extend(flags.into_iter().flatten().map(|(k, v)| (k.into(), v)));
+            config::effective(&cli.overrides).and_then(|config| {
+                shot::run(
+                    target,
+                    shot::When { live, delay },
+                    output.as_deref(),
+                    &config,
+                )
+            })
+        }
         Some(Command::Copy(args)) => clipboard::copy(args),
         Some(Command::Paste(args)) => clipboard::paste(args),
         Some(Command::ServeOffer(args)) => clipboard::serve_child(args),
+        Some(Command::NotifyCapture(args)) => notify::serve_child(args),
         Some(Command::Config(command)) => config::run(command, &cli.overrides),
         None => Ok(()),
     };
