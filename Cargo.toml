@@ -20,6 +20,9 @@ hoarder-store = { path = "crates/hoarder-store", version = "0.1.0" }
 hoarder-ui = { path = "crates/hoarder-ui", version = "0.1.0" }
 hoarder-wayland = { path = "crates/hoarder-wayland", version = "0.1.0" }
 
+# Encryption at rest (PLAN.md §5.3): the age format, X25519 identities only.
+# 0.11: 0.12 adds P-256/ML-KEM plugin recipients (and crypto-bigint 0.5) we never use.
+age = { version = "0.11.5", default-features = false }
 blake3 = "1.8.7"
 calloop = "0.14"
 clap = { version = "4.6", features = ["derive"] }
@@ -33,6 +36,8 @@ inotify = { version = "0.11", default-features = false }
 jiff = "0.2"
 # The Picker's fuzzy match (helix's matcher, without its thread pool).
 nucleo-matcher = "0.3.1"
+# Secret Service client for the History key; pure-Rust crypto, our zbus 6 runtime.
+oo7 = { version = "0.7.0", default-features = false, features = ["async-std", "native_crypto"] }
 png = "0.18"
 # Secret patterns (ADR-0006); byte regexes, so Clip text is never copied to match.
 regex = "1.13"

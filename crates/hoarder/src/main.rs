@@ -1,4 +1,5 @@
 mod after;
+mod autopaste;
 mod clipboard;
 mod config;
 mod cut;

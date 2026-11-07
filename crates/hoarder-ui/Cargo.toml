@@ -19,6 +19,7 @@ tiny-skia.workspace = true
 toml_edit.workspace = true
 wayland-client.workspace = true
 wayland-protocols.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true

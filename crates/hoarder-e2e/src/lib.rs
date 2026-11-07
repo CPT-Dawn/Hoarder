@@ -16,7 +16,7 @@ pub mod keys;
 mod pattern;
 mod session;
 
-pub use client::{Client, Input, InputEvent, Reply, Selection};
+pub use client::{Client, Input, InputEvent, Reply, Selection, TextField};
 pub use frame::{FrameFormat, RawFrame};
 pub use image::Image;
 pub use pattern::{Pattern, PixelFormat, Rgb8, Rgb10};

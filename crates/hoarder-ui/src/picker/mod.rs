@@ -1,10 +1,12 @@
 //! The Picker (PLAN.md §6): a centred layer-shell panel listing History.
-//! Typing searches it, Up and Down select, Enter picks the selected Clip
-//! and Esc closes.
+//! Typing searches it (with the filter prefixes `img:`, `txt:`, `file:`,
+//! `pin:` and `app:<id>`), Up and Down select, Enter picks the selected
+//! Clip, Shift+Enter picks it as plain text, Ctrl+1–9 pick a row at once,
+//! Ctrl+P pins or unpins, Del deletes and Esc closes.
 //!
 //! The panel knows nothing of the Daemon: [`run`] reads Clips and full-text
-//! hits through a [`History`] and returns the Clip the user picked, after
-//! the panel is gone. Restoring it is the caller's business.
+//! hits through a [`History`], pins and deletes through it, and returns the
+//! [`Pick`], after the panel is gone. Restoring it is the caller's business.
 
 mod model;
 mod paint;
@@ -55,7 +57,16 @@ pub struct Entry {
     pub id: i64,
     /// `text`, `image`, `files` or `other`.
     pub kind: String,
+    /// A line of text, an image's size or the file names; for a
+    /// Concealed Clip, only dots.
     pub preview: String,
+    /// The app focused when it was copied, if known.
+    pub app: Option<String>,
+    /// When it was last copied or restored, in ms since the Unix epoch.
+    pub at_ms: Option<i64>,
+    pub pinned: bool,
+    /// Held by the Daemon in memory only; shown masked until Alt is held.
+    pub concealed: bool,
 }
 
 /// Where the Picker reads History from.
@@ -68,6 +79,48 @@ pub trait History {
     /// used first (full-text search, for long text whose match lies past
     /// its preview). Called as the query changes; a failure finds nothing.
     fn search(&mut self, query: &str) -> Vec<i64>;
+
+    /// Pin Clip `id` or unpin it; whether that worked.
+    fn pin(&mut self, id: i64, pinned: bool) -> bool;
+
+    /// Delete Clip `id`; whether that worked.
+    fn delete(&mut self, id: i64) -> bool;
+
+    /// The text of Concealed Clip `id`. Called only while the user holds
+    /// Alt, for the Concealed Clips on screen.
+    fn reveal(&mut self, id: i64) -> Option<String>;
+
+    /// What the preview pane shows for `entry`, a Clip that is not
+    /// Concealed. Called once the first frame is up, as the selection
+    /// moves.
+    fn detail(&mut self, entry: &Entry) -> Detail;
+}
+
+/// A Clip in full, for the preview pane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Detail {
+    /// Its text (or as much of it as fits).
+    Text(String),
+    /// An image in straight RGBA, `width × height` pixels, shown at its
+    /// real pixel size.
+    Image {
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    },
+    /// The paths of a file list, shown as chips.
+    Files(Vec<String>),
+    /// Nothing beyond its preview line.
+    Nothing,
+}
+
+/// What the user picked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pick {
+    /// The Clip to Restore.
+    pub id: i64,
+    /// Restore only its plain text (Shift+Enter).
+    pub plain: bool,
 }
 
 /// How the Picker looks and reports.
@@ -80,10 +133,9 @@ pub struct Options {
     pub started: Instant,
 }
 
-/// Show the Picker and wait for the user. Returns the id of the Clip they
-/// picked, or `None` if they closed it; either way the panel is off the
-/// screen by then.
-pub fn run(history: &mut dyn History, options: &Options) -> Result<Option<i64>, OverlayError> {
+/// Show the Picker and wait for the user. Returns what they picked, or
+/// `None` if they closed it; either way the panel is off the screen by then.
+pub fn run(history: &mut dyn History, options: &Options) -> Result<Option<Pick>, OverlayError> {
     // The fonts take the longest; they load while everything else gets ready.
     let fonts = Fonts::load();
     let failed = |e: &dyn std::fmt::Display| OverlayError::Failed(e.to_string());
@@ -127,8 +179,9 @@ pub fn run(history: &mut dyn History, options: &Options) -> Result<Option<i64>, 
         theme: options.theme.clone(),
         started: options.started,
         model: None,
+        detail: None,
         keys: Vec::new(),
-        ctrl: false,
+        mods: Modifiers::default(),
         scale: 1,
         configured: false,
         frame_pending: false,
@@ -155,6 +208,8 @@ pub fn run(history: &mut dyn History, options: &Options) -> Result<Option<i64>, 
                 }
             }
         }
+        app.reveal(history);
+        app.fetch_detail(history);
         app.draw(&qh);
     }
 
@@ -180,10 +235,12 @@ struct App {
     started: Instant,
     /// `None` until History has arrived.
     model: Option<Model>,
-    /// Keys pressed and not yet acted on, with whether Ctrl was held. The
+    /// The selected Clip's detail, by its id.
+    detail: Option<(i64, Detail)>,
+    /// Keys pressed and not yet acted on, with the modifiers held. The
     /// main loop acts on them, since it can ask History for full-text hits.
-    keys: Vec<(KeyEvent, bool)>,
-    ctrl: bool,
+    keys: Vec<(KeyEvent, Modifiers)>,
+    mods: Modifiers,
     /// Buffer scale of the output the panel is on.
     scale: i32,
     configured: bool,
@@ -193,7 +250,7 @@ struct App {
     /// The first frame has been presented.
     shown: bool,
     /// `Some(pick)` once the user is done.
-    outcome: Option<Option<i64>>,
+    outcome: Option<Option<Pick>>,
 }
 
 /// The frame callback of a committed frame.
@@ -242,7 +299,17 @@ impl App {
                 return;
             }
         };
-        paint::paint(canvas, scale, model, &self.theme, &mut self.fonts);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        let selected = model.selected().map(|e| e.id);
+        let extra = paint::Extra {
+            detail: (self.detail.as_ref())
+                .filter(|(id, _)| Some(*id) == selected)
+                .map(|(_, d)| d),
+            now_ms,
+        };
+        paint::paint(canvas, scale, model, &extra, &self.theme, &mut self.fonts);
         if !self.shown {
             timing(self.started, "picker_painted");
         }
@@ -259,18 +326,81 @@ impl App {
         self.dirty = false;
     }
 
-    /// Act on one key, pressed with Ctrl held or not.
-    fn key(&mut self, &(ref event, ctrl): &(KeyEvent, bool), history: &mut dyn History) {
+    /// Once the first frame is up, fetch the selected Clip's detail if it
+    /// is not there yet.
+    fn fetch_detail(&mut self, history: &mut dyn History) {
+        let Some(model) = &self.model else { return };
+        if !self.shown || self.outcome.is_some() {
+            return;
+        }
+        let Some(entry) = model.selected().filter(|e| !e.concealed) else {
+            return;
+        };
+        if self.detail.as_ref().is_some_and(|(id, _)| *id == entry.id) {
+            return;
+        }
+        self.detail = Some((entry.id, history.detail(entry)));
+        self.dirty = true;
+    }
+
+    /// While Alt is held, fetch the text of the Concealed Clips on screen;
+    /// once it is let go, wipe it.
+    fn reveal(&mut self, history: &mut dyn History) {
         let Some(model) = &mut self.model else {
             return;
         };
+        if !self.mods.alt {
+            self.dirty |= model.hide();
+            return;
+        }
+        for id in model.unrevealed(paint::rows()) {
+            // A Clip that expired meanwhile just stays masked.
+            if let Some(text) = history.reveal(id) {
+                model.reveal(id, text);
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// Act on one key, pressed with `mods` held.
+    fn key(&mut self, (event, mods): &(KeyEvent, Modifiers), history: &mut dyn History) {
+        let Some(model) = &mut self.model else {
+            return;
+        };
+        let ctrl = mods.ctrl;
         let rows = paint::rows() as isize;
         let mut query = model.query().to_owned();
         match event.keysym {
             Keysym::Escape => self.outcome = Some(None),
             Keysym::Return | Keysym::KP_Enter => {
                 if let Some(entry) = model.selected() {
-                    self.outcome = Some(Some(entry.id));
+                    self.outcome = Some(Some(Pick {
+                        id: entry.id,
+                        plain: mods.shift,
+                    }));
+                }
+            }
+            Keysym::Delete | Keysym::KP_Delete => {
+                if let Some(id) = model.selected().map(|e| e.id)
+                    && history.delete(id)
+                {
+                    model.remove(id);
+                }
+            }
+            Keysym::p | Keysym::P if ctrl => {
+                if let Some((id, pinned)) = model.selected().map(|e| (e.id, e.pinned))
+                    && history.pin(id, !pinned)
+                {
+                    model.set_pinned(id, !pinned);
+                }
+            }
+            sym if ctrl && quick_row(sym).is_some() => {
+                let n = quick_row(sym).unwrap_or_default();
+                if let Some(entry) = model.row(n, rows as usize) {
+                    self.outcome = Some(Some(Pick {
+                        id: entry.id,
+                        plain: mods.shift,
+                    }));
                 }
             }
             Keysym::Up | Keysym::KP_Up => model.move_by(-1),
@@ -285,7 +415,7 @@ impl App {
                 query.pop();
             }
             Keysym::u | Keysym::U if ctrl => query.clear(),
-            _ if ctrl => {}
+            _ if ctrl || mods.alt => {}
             _ => {
                 let typed = event.utf8.as_deref();
                 if let Some(text) = typed.filter(|t| !t.chars().any(char::is_control)) {
@@ -294,11 +424,17 @@ impl App {
             }
         }
         if query != model.query() {
-            let found = history.search(&query);
+            let found = history.search(&model::Filter::parse(&query).text);
             model.set_query(&query, &found);
         }
         self.dirty = true;
     }
+}
+
+/// The row (from 0) Ctrl+`sym` quick-restores, for the digits 1–9.
+fn quick_row(sym: Keysym) -> Option<usize> {
+    let digit = sym.key_char()?.to_digit(10)?;
+    (1..=9).contains(&digit).then(|| digit as usize - 1)
 }
 
 impl CompositorHandler for App {
@@ -420,6 +556,9 @@ impl KeyboardHandler for App {
         _: &WlSurface,
         _: u32,
     ) {
+        // No more modifier news: hide anything Alt revealed.
+        self.mods = Modifiers::default();
+        self.dirty = true;
     }
 
     fn press_key(
@@ -431,7 +570,7 @@ impl KeyboardHandler for App {
         event: KeyEvent,
     ) {
         if self.outcome.is_none() {
-            self.keys.push((event, self.ctrl));
+            self.keys.push((event, self.mods));
         }
     }
 
@@ -465,7 +604,10 @@ impl KeyboardHandler for App {
         _: RawModifiers,
         _: u32,
     ) {
-        self.ctrl = modifiers.ctrl;
+        if modifiers.alt != self.mods.alt {
+            self.dirty = true;
+        }
+        self.mods = modifiers;
     }
 }
 
