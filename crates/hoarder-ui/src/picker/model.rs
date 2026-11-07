@@ -10,6 +10,7 @@ use std::collections::HashMap;
 
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
+use zeroize::Zeroizing;
 
 use super::Entry;
 
@@ -74,7 +75,13 @@ pub(crate) struct Model {
     selected: usize,
     /// The first of `shown` on screen.
     top: usize,
+    /// The text of Concealed Clips the user is looking at (Alt held),
+    /// wiped when they let go.
+    revealed: HashMap<i64, Zeroizing<String>>,
 }
+
+/// What a Concealed Clip shows instead of its text.
+pub(crate) const MASK: &str = "••••••••";
 
 impl Model {
     pub(crate) fn new(entries: Vec<Entry>) -> Model {
@@ -87,7 +94,47 @@ impl Model {
             query: String::new(),
             selected: 0,
             top: 0,
+            revealed: HashMap::new(),
         }
+    }
+
+    /// The line a Clip's row shows: its preview, or for a Concealed Clip
+    /// the mask, unless it is revealed.
+    pub(crate) fn line<'a>(&'a self, entry: &'a Entry) -> &'a str {
+        if !entry.concealed {
+            return &entry.preview;
+        }
+        self.revealed.get(&entry.id).map_or(MASK, |t| t.as_str())
+    }
+
+    /// A Concealed Clip's text, if it is revealed.
+    pub(crate) fn revealed(&self, id: i64) -> Option<&str> {
+        self.revealed.get(&id).map(|t| t.as_str())
+    }
+
+    /// The Concealed Clips on screen in a list `rows` tall that are not
+    /// revealed yet.
+    pub(crate) fn to_reveal(&mut self, rows: usize) -> Vec<i64> {
+        let ids: Vec<i64> = (self.visible(rows).into_iter())
+            .filter(|(e, _)| e.concealed)
+            .map(|(e, _)| e.id)
+            .collect();
+        ids.into_iter()
+            .filter(|id| !self.revealed.contains_key(id))
+            .collect()
+    }
+
+    /// Show Concealed Clip `id` as `text` until [`Model::hide`].
+    pub(crate) fn reveal(&mut self, id: i64, text: String) {
+        self.revealed.insert(id, Zeroizing::new(text));
+    }
+
+    /// Mask every Concealed Clip again, wiping their text. Whether any was
+    /// revealed.
+    pub(crate) fn hide(&mut self) -> bool {
+        let any = !self.revealed.is_empty();
+        self.revealed.clear();
+        any
     }
 
     pub(crate) fn query(&self) -> &str {
@@ -154,7 +201,7 @@ impl Model {
     }
 
     /// Scroll a list `rows` tall so the selection shows.
-    fn scroll(&mut self, rows: usize) {
+    pub(crate) fn scroll(&mut self, rows: usize) {
         let rows = rows.max(1);
         if self.selected < self.top {
             self.top = self.selected;
@@ -204,8 +251,14 @@ impl Model {
     /// The Clips on screen in a list `rows` tall, scrolled so the selection
     /// shows, with whether each is the selected one.
     pub(crate) fn visible(&mut self, rows: usize) -> Vec<(&Entry, bool)> {
-        let rows = rows.max(1);
         self.scroll(rows);
+        self.on_screen(rows)
+    }
+
+    /// The Clips on screen in a list `rows` tall as last scrolled
+    /// ([`Model::scroll`]), with whether each is the selected one.
+    pub(crate) fn on_screen(&self, rows: usize) -> Vec<(&Entry, bool)> {
+        let rows = rows.max(1);
         self.shown
             .iter()
             .enumerate()
@@ -320,6 +373,25 @@ mod tests {
         assert_eq!(m.selected().unwrap().preview, "a");
         m.set_query("a", &[]);
         assert_eq!(shown(&mut m), ["a"]);
+    }
+
+    #[test]
+    fn a_concealed_clip_shows_the_mask_until_revealed() {
+        let mut m = model(&["plain", "secret"]);
+        m.entries[1].concealed = true;
+        m.entries[1].preview = MASK.into();
+
+        assert_eq!(m.to_reveal(10), [101]);
+        let line = |m: &Model| m.line(&m.entries[1]).to_owned();
+        assert_eq!(line(&m), MASK);
+        m.reveal(101, "hunter2".into());
+        assert_eq!(line(&m), "hunter2");
+        assert!(m.to_reveal(10).is_empty());
+        assert!(m.hide());
+        assert_eq!(line(&m), MASK);
+        // Never searched, revealed or not.
+        m.set_query("sec", &[101]);
+        assert!(shown(&mut m).is_empty());
     }
 
     #[test]

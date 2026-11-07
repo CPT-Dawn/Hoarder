@@ -125,7 +125,9 @@ pub(crate) fn paint(
 
     // The Clips.
     let empty = model.is_empty();
-    let rows = model.visible(rows());
+    model.scroll(rows());
+    let model: &Model = model;
+    let rows = model.on_screen(rows());
     if rows.is_empty() {
         let why = if empty {
             "History is empty"
@@ -143,6 +145,7 @@ pub(crate) fn paint(
         );
     }
     for (n, (entry, selected)) in rows.into_iter().enumerate() {
+        let model_line = model.line(entry);
         let y = SEARCH_H + PAD / 2.0 + n as f32 * ROW_H;
         if selected {
             paint.set_color(with_alpha(theme.accent, 48));
@@ -179,7 +182,7 @@ pub(crate) fn paint(
         );
         let x = PAD + 50.0;
         pen.text(
-            &entry.preview,
+            model_line,
             family,
             x,
             text_y,

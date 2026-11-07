@@ -841,6 +841,7 @@ dependencies = [
  "toml_edit",
  "wayland-client",
  "wayland-protocols",
+ "zeroize",
 ]
 
 [[package]]

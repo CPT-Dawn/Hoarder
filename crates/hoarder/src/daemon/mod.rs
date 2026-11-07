@@ -519,7 +519,7 @@ impl Daemon {
         slot.sensitivity = sensitivity;
         slot.take_over_after_read = false;
         if sensitivity == Sensitivity::Concealed {
-            self.conceal(which);
+            self.conceal(which, None);
         }
         let served = self.held_types(which);
         self.watcher.serve(which, &served);
@@ -665,8 +665,8 @@ impl Daemon {
         if slot.sensitivity == Sensitivity::Concealed {
             // Memory only: never recorded, and moved into the vault.
             slot.record = false;
-            if read.is_some() {
-                self.conceal(which);
+            if let Some(read) = &read {
+                self.conceal(which, read.offer.focused_app.clone());
             }
         }
         let slot = &mut self.slots[which as usize];
@@ -689,14 +689,18 @@ impl Daemon {
     }
 
     /// Move what `which` keeps into the vault, to expire after the TTL.
-    fn conceal(&mut self, which: Selection) {
+    /// `app` is the app it was copied in, if known.
+    fn conceal(&mut self, which: Selection, app: Option<String>) {
         let slot = &mut self.slots[which as usize];
         if slot.kept.is_empty() {
             return;
         }
-        let id = self.vault.keep(&mut slot.kept);
-        slot.concealed = Some(id);
         let ttl = Duration::from_secs(self.config.privacy.concealed_ttl_secs.get().into());
+        let now = jiff::Timestamp::now().as_millisecond();
+        let id = self
+            .vault
+            .keep(&mut slot.kept, app, now, ttl.as_millis() as i64);
+        slot.concealed = Some(id);
         let timer = self.handle.insert_source(
             Timer::from_duration(ttl),
             move |_, _, daemon: &mut Daemon| {

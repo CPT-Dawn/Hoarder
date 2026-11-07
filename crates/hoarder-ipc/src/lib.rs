@@ -96,6 +96,12 @@ pub enum Op {
         /// At most this many Clips (all of them if absent).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<u32>,
+        /// List the live Concealed Clips too, in their place by time. They
+        /// have negative ids, `sensitivity: concealed`, an `expires` time
+        /// and a masked preview; their text comes only through `get`, so
+        /// a Front end must keep it masked until the user asks.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        concealed: bool,
     },
     /// Clips whose text contains `query` (case-insensitive; text Clips
     /// through their first 64 KB, others through their preview), most
@@ -621,7 +627,16 @@ impl Connection {
         &mut self,
         limit: Option<u32>,
     ) -> std::io::Result<Result<Vec<ClipSummary>, Failure>> {
-        self.typed(Op::List { limit })
+        self.list_with(limit, false)
+    }
+
+    /// [`Op::List`], with the Concealed Clips if `concealed`, decoded.
+    pub fn list_with(
+        &mut self,
+        limit: Option<u32>,
+        concealed: bool,
+    ) -> std::io::Result<Result<Vec<ClipSummary>, Failure>> {
+        self.typed(Op::List { limit, concealed })
     }
 
     /// [`Op::Search`], decoded.

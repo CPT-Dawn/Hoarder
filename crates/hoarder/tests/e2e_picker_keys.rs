@@ -527,12 +527,138 @@ fn ctrl_digits_count_the_rows_a_query_left() {
     assert_eq!(paste(&session, None), "apple one");
 }
 
-// Silence unused-helper warnings until the tests below use them.
-#[allow(dead_code)]
-fn _unused(session: &Session) -> (Image, Rgb8, Selection) {
-    (
-        session.screenshot("HEADLESS-1").unwrap(),
-        Rgb8(0, 0, 0),
-        Selection::Clipboard,
-    )
+/// Two AWS documentation example key ids: Concealed, of equal length, and
+/// split so no scanner takes them for real ones.
+const SECRET_A: &str = concat!("AKIA", "IOSFODNN7EXAMPLE");
+const SECRET_B: &str = concat!("AKIA", "I44QH8DHBEXAMPLE");
+
+/// The Daemon's `status` over its socket.
+fn status(session: &Session) -> Value {
+    use std::io::{BufRead as _, BufReader, Write as _};
+    let socket = session.runtime_dir().join("hoarder/hoarder.sock");
+    let mut stream = UnixStream::connect(socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    writeln!(stream, r#"{{"v":1,"id":1,"op":"status"}}"#).unwrap();
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).unwrap();
+    serde_json::from_str::<Value>(&line).unwrap()["ok"].clone()
+}
+
+/// Copy `text` from a fresh app and wait for the Daemon to judge it.
+fn copy_and_settle(session: &Session, text: &str, sensitivity: &str) -> hoarder_e2e::Client {
+    let app = session.client().unwrap();
+    app.set_selection(Selection::Clipboard, &[("text/plain", text.as_bytes())])
+        .unwrap();
+    wait_until("the Daemon to judge a copy", || {
+        let clipboard = status(session)["clipboard"].clone();
+        clipboard["reading"] == false
+            && clipboard["owner"] == "app"
+            && clipboard["types"] == serde_json::json!(["text/plain"])
+            && clipboard["sensitivity"] == sensitivity
+    });
+    app
+}
+
+/// What grim sees once the screen has stopped changing.
+fn settled_shot(session: &Session) -> Image {
+    let mut last = session.screenshot("HEADLESS-1").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        std::thread::sleep(Duration::from_millis(150));
+        let now = session.screenshot("HEADLESS-1").unwrap();
+        if now == last {
+            return now;
+        }
+        assert!(Instant::now() < deadline, "the screen never settled");
+        last = now;
+    }
+}
+
+/// The Picker's panel in a shot of the 1280×720 output: (280, 120) to
+/// (1000, 600).
+fn panel(shot: &Image) -> Vec<Rgb8> {
+    (120..600)
+        .flat_map(|y| (280..1000).map(move |x| (x, y)))
+        .map(|(x, y)| shot.pixel(x, y))
+        .collect()
+}
+
+#[test]
+fn concealed_clips_stay_masked_until_alt_is_held() {
+    let (session, _paint) = painted();
+    let _daemon = Daemon::start(&session);
+
+    // The same Picker over two different secrets of one length: masked,
+    // they must look exactly alike.
+    let app = copy_and_settle(&session, SECRET_A, "concealed");
+    let picker = open_picker(&session);
+    let masked_a = panel(&settled_shot(&session));
+    session.input().tap(keys::KEY_ESC).unwrap();
+    picker.finish();
+    let cleared = session
+        .command(HOARDER)
+        .arg("clear")
+        .stdin(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(cleared.success());
+    drop(app);
+
+    let _app = copy_and_settle(&session, SECRET_B, "concealed");
+    let picker = open_picker(&session);
+    let masked_b = panel(&settled_shot(&session));
+    assert!(
+        masked_a == masked_b,
+        "a Concealed Clip's text showed without Alt"
+    );
+
+    // Alt reveals it, and letting go hides it again.
+    session.input().key_down(keys::KEY_LEFTALT).unwrap();
+    let revealed = panel(&settled_shot(&session));
+    session.input().key_up(keys::KEY_LEFTALT).unwrap();
+    let hidden = panel(&settled_shot(&session));
+    session.input().tap(keys::KEY_ESC).unwrap();
+    let done = picker.finish();
+
+    assert_eq!(done.status.code(), Some(1), "{}", done.stderr);
+    assert!(revealed != masked_b, "Alt revealed nothing");
+    assert!(hidden == masked_b, "letting go of Alt left it revealed");
+    // Concealed Clips never reach History.
+    assert!(history(&session).is_empty());
+}
+
+#[test]
+fn a_concealed_clip_restores_and_deletes_like_any_other() {
+    let (session, _paint) = painted();
+    let _daemon = Daemon::start(&session);
+    let _secret = copy_and_settle(&session, SECRET_A, "concealed");
+    let _later = copy_and_settle(&session, "later", "normal");
+    wait_until("the Daemon to record a copy", || {
+        history(&session).len() == 1
+    });
+
+    // Rows: "later", then the Concealed Clip.
+    let picker = open_picker(&session);
+    session.input().tap(keys::KEY_DOWN).unwrap();
+    session.input().tap(keys::KEY_ENTER).unwrap();
+    let done = picker.finish();
+    assert!(done.status.success(), "{}", done.stderr);
+    assert_eq!(paste(&session, None), SECRET_A);
+    assert_eq!(status(&session)["clipboard"]["sensitivity"], "concealed");
+
+    // Deleted, it is gone from the Picker and from the clipboard.
+    let picker = open_picker(&session);
+    session.input().tap(keys::KEY_DOWN).unwrap();
+    session.input().tap(keys::KEY_DELETE).unwrap();
+    session.input().tap(keys::KEY_ESC).unwrap();
+    picker.finish();
+    assert_eq!(paste(&session, None), "");
+    let picker = open_picker(&session);
+    session.input().tap(keys::KEY_DOWN).unwrap();
+    session.input().tap(keys::KEY_ENTER).unwrap();
+    let done = picker.finish();
+    assert!(done.status.success(), "{}", done.stderr);
+    assert_eq!(paste(&session, None), "later");
 }

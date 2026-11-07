@@ -34,6 +34,9 @@ pub(super) enum Job {
         client: u64,
         id: u64,
         limit: Option<u32>,
+        /// Concealed Clips to list among History's, with when each was
+        /// copied (ms since the Unix epoch), newest first.
+        extra: Vec<(i64, ClipSummary)>,
     },
     Search {
         client: u64,
@@ -208,11 +211,16 @@ fn worker(mut store: Store, jobs: mpsc::Receiver<Job>, done: calloop::channel::S
                 retain(&mut store, &limits);
                 continue;
             }
-            Job::List { client, id, limit } => {
+            Job::List {
+                client,
+                id,
+                limit,
+                extra,
+            } => {
                 let limit = limit.map_or(usize::MAX, |l| l as usize);
                 let result = store
                     .list(limit)
-                    .map(|clips| to_value(&clips.iter().map(summary).collect::<Vec<_>>()))
+                    .map(|clips| to_value(&merge(&clips, extra, limit)))
                     .map_err(failed);
                 reply(client, id, result)
             }
@@ -287,6 +295,22 @@ fn worker(mut store: Store, jobs: mpsc::Receiver<Job>, done: calloop::channel::S
             return;
         }
     }
+}
+
+/// History's `clips` and the Concealed `extra`, both newest first, merged
+/// most recently used first and cut to `limit`.
+fn merge(clips: &[Clip], extra: Vec<(i64, ClipSummary)>, limit: usize) -> Vec<ClipSummary> {
+    let mut out = Vec::with_capacity(clips.len() + extra.len());
+    let mut extra = extra.into_iter().peekable();
+    for clip in clips {
+        while let Some((_, concealed)) = extra.next_if(|(at, _)| *at > clip.last_used_at) {
+            out.push(concealed);
+        }
+        out.push(summary(clip));
+    }
+    out.extend(extra.map(|(_, c)| c));
+    out.truncate(limit);
+    out
 }
 
 fn retain(store: &mut Store, limits: &Limits) {

@@ -1,6 +1,7 @@
 //! `hoarder picker`: History in a panel; the Clip picked there becomes the
 //! clipboard again (PLAN.md §6).
 
+use std::io::Read as _;
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -11,6 +12,9 @@ use hoarder_ui::picker::{self, Entry, Options};
 use crate::Exit;
 
 type Fail = (Exit, String);
+
+/// The most text the Picker reads of one Clip: more than it can show.
+const MAX_TEXT: u64 = 64 * 1024;
 type Listed = (
     Connection,
     std::io::Result<Result<Vec<ClipSummary>, Failure>>,
@@ -28,7 +32,8 @@ pub fn run(overrides: &[(String, String)]) -> Result<(), Fail> {
     })?;
     // History arrives while the panel and its fonts get ready.
     let listing = std::thread::spawn(move || {
-        let clips = daemon.list(None);
+        // Concealed Clips too: masked, their text only on Alt.
+        let clips = daemon.list_with(None, true);
         (daemon, clips)
     });
     let config = crate::config::effective(overrides)?;
@@ -115,6 +120,16 @@ impl picker::History for Daemon {
             return false;
         };
         matches!(connection.delete(id), Ok(Ok(())))
+    }
+
+    fn reveal(&mut self, id: i64) -> Option<String> {
+        let Daemon::Ready(connection) = self else {
+            return None;
+        };
+        let (_, pipe) = connection.get(id, None).ok()?.ok()?;
+        let mut bytes = zeroize::Zeroizing::new(Vec::new());
+        pipe.take(MAX_TEXT).read_to_end(&mut bytes).ok()?;
+        Some(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     fn search(&mut self, query: &str) -> Vec<i64> {

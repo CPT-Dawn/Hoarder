@@ -85,6 +85,10 @@ pub trait History {
 
     /// Delete Clip `id`; whether that worked.
     fn delete(&mut self, id: i64) -> bool;
+
+    /// The text of Concealed Clip `id`. Called only while the user holds
+    /// Alt, for the Concealed Clips on screen.
+    fn reveal(&mut self, id: i64) -> Option<String>;
 }
 
 /// What the user picked.
@@ -180,6 +184,7 @@ pub fn run(history: &mut dyn History, options: &Options) -> Result<Option<Pick>,
                 }
             }
         }
+        app.reveal(history);
         app.draw(&qh);
     }
 
@@ -282,6 +287,25 @@ impl App {
         layer.commit();
         self.frame_pending = true;
         self.dirty = false;
+    }
+
+    /// While Alt is held, fetch the text of the Concealed Clips on screen;
+    /// once it is let go, wipe it.
+    fn reveal(&mut self, history: &mut dyn History) {
+        let Some(model) = &mut self.model else {
+            return;
+        };
+        if !self.mods.alt {
+            self.dirty |= model.hide();
+            return;
+        }
+        for id in model.to_reveal(paint::rows()) {
+            // A Clip that expired meanwhile just stays masked.
+            if let Some(text) = history.reveal(id) {
+                model.reveal(id, text);
+                self.dirty = true;
+            }
+        }
     }
 
     /// Act on one key, pressed with `mods` held.
@@ -478,6 +502,9 @@ impl KeyboardHandler for App {
         _: &WlSurface,
         _: u32,
     ) {
+        // No more modifier news: hide anything Alt revealed.
+        self.mods = Modifiers::default();
+        self.dirty = true;
     }
 
     fn press_key(
@@ -523,6 +550,9 @@ impl KeyboardHandler for App {
         _: RawModifiers,
         _: u32,
     ) {
+        if modifiers.alt != self.mods.alt {
+            self.dirty = true;
+        }
         self.mods = modifiers;
     }
 }
