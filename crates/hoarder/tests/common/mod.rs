@@ -73,6 +73,23 @@ pub fn as_8bit(Rgb10(r, g, b): Rgb10) -> Rgb8 {
     Rgb8(n(r), n(g), n(b))
 }
 
+/// A grim screenshot of `output`, tried again if grim fails once: on a
+/// busy runner the compositor can drop a capture while a previous Overlay
+/// is still going away.
+fn grim(session: &Session, output: &str) -> Image {
+    let mut tries = 0;
+    loop {
+        match session.screenshot(output) {
+            Ok(image) => return image,
+            Err(e) if tries >= 3 => panic!("grim kept failing on {output}: {e}"),
+            Err(_) => {
+                tries += 1;
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+}
+
 /// A running `hoarder shot …` whose Overlay is up.
 #[derive(Debug)]
 pub struct Overlay {
@@ -93,17 +110,14 @@ impl Overlay {
         outputs: &[&str],
         tweak: impl FnOnce(&mut Command),
     ) -> Overlay {
-        let before: Vec<Image> = outputs
-            .iter()
-            .map(|o| session.screenshot(o).unwrap())
-            .collect();
+        let before: Vec<Image> = outputs.iter().map(|o| grim(session, o)).collect();
         let mut cmd = session.command(env!("CARGO_BIN_EXE_hoarder"));
         cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
         tweak(&mut cmd);
         let mut child = cmd.spawn().expect("hoarder should start");
         let deadline = Instant::now() + Duration::from_secs(10);
         for (name, before) in outputs.iter().zip(before) {
-            while session.screenshot(name).unwrap() == before {
+            while grim(session, name) == before {
                 if let Some(status) = child.try_wait().unwrap() {
                     let out = child.wait_with_output().unwrap();
                     panic!(
@@ -123,10 +137,10 @@ impl Overlay {
         std::thread::sleep(Duration::from_millis(120));
         let settle = Instant::now() + Duration::from_secs(1);
         for name in outputs {
-            let mut last = session.screenshot(name).unwrap();
+            let mut last = grim(session, name);
             while Instant::now() < settle {
                 std::thread::sleep(Duration::from_millis(40));
-                let now = session.screenshot(name).unwrap();
+                let now = grim(session, name);
                 if now == last {
                     break;
                 }
