@@ -159,7 +159,7 @@ impl ShmFormat {
 }
 
 /// An output transform, with `wl_output` semantics: the buffer must be rotated
-/// clockwise by the angle (after the horizontal flip, for `Flipped*`) to be
+/// clockwise by the angle (then mirrored horizontally, for `Flipped*`) to be
 /// upright. Sway's config names are the inverse for 90 and 270.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Transform {

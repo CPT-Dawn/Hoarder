@@ -147,17 +147,22 @@ impl Image {
 }
 
 /// Where buffer pixel `(bx, by)` of a `w`×`h` buffer lands once upright:
-/// mirror horizontally for `Flipped*`, then rotate clockwise by the angle.
+/// rotate clockwise by the angle, then mirror horizontally for `Flipped*`
+/// (the compositor flipped, then rotated counter-clockwise).
 fn upright_position(transform: Transform, bx: u32, by: u32, w: u32, h: u32) -> (u32, u32) {
+    let (x, y, upright_width) = match transform {
+        Transform::Normal | Transform::Flipped => (bx, by, w),
+        Transform::Rotate90 | Transform::Flipped90 => (h - 1 - by, bx, h),
+        Transform::Rotate180 | Transform::Flipped180 => (w - 1 - bx, h - 1 - by, w),
+        Transform::Rotate270 | Transform::Flipped270 => (by, w - 1 - bx, h),
+    };
     let flipped = matches!(
         transform,
         Transform::Flipped | Transform::Flipped90 | Transform::Flipped180 | Transform::Flipped270
     );
-    let x = if flipped { w - 1 - bx } else { bx };
-    match transform {
-        Transform::Normal | Transform::Flipped => (x, by),
-        Transform::Rotate90 | Transform::Flipped90 => (h - 1 - by, x),
-        Transform::Rotate180 | Transform::Flipped180 => (w - 1 - x, h - 1 - by),
-        Transform::Rotate270 | Transform::Flipped270 => (by, w - 1 - x),
+    if flipped {
+        (upright_width - 1 - x, y)
+    } else {
+        (x, y)
     }
 }

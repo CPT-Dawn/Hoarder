@@ -1,7 +1,7 @@
 //! `hoarder shot all -o …`: All Outputs frozen and written as a PNG, compared
 //! pixel for pixel against the pattern the helper client painted.
 
-use hoarder_e2e::{OutputSpec, Pattern, Session};
+use hoarder_e2e::{OutputSpec, Pattern, Session, Transform};
 
 /// A decoded PNG: size, bit depth and RGB samples (8- or 16-bit values).
 #[derive(Debug)]
@@ -66,7 +66,7 @@ fn shot_all(session: &Session) -> Png {
 
 /// Asserts `png` is exactly `pattern` as painted on a `w`×`h` physical surface,
 /// starting at `(x0, 0)` in the image, in 8 bits per channel.
-fn assert_pattern_8bit(png: &Png, pattern: &Pattern, x0: u32, (w, h): (u32, u32)) {
+fn assert_pattern_8bit(png: &Png, pattern: &Pattern, x0: u32, (w, h): (u32, u32), what: &str) {
     assert_eq!(png.depth, 8, "an 8-bit output gives an 8-bit PNG");
     let mut wrong = Vec::new();
     for y in 0..h {
@@ -80,7 +80,7 @@ fn assert_pattern_8bit(png: &Png, pattern: &Pattern, x0: u32, (w, h): (u32, u32)
             }
         }
     }
-    assert!(wrong.is_empty(), "pixels differ: {wrong:#?}");
+    assert!(wrong.is_empty(), "{what}: pixels differ: {wrong:#?}");
 }
 
 #[test]
@@ -95,5 +95,91 @@ fn shot_all_writes_the_painted_pixels_of_one_output_to_stdout() {
     let png = shot_all(&session);
 
     assert_eq!((png.width, png.height), (640, 480));
-    assert_pattern_8bit(&png, &pattern, 0, (640, 480));
+    assert_pattern_8bit(&png, &pattern, 0, (640, 480), "HEADLESS-1");
+}
+
+/// Paints a one-pixel checkerboard on a single `spec` output and expects it back
+/// byte for byte at native resolution: any resampling would smear it grey.
+fn assert_byte_exact(spec: OutputSpec) {
+    let session = Session::start(&[spec]).unwrap();
+    let client = session.client().unwrap();
+    let pattern = Pattern::Checker { cell: 1 };
+    client
+        .paint(session.output("HEADLESS-1"), &pattern)
+        .unwrap();
+
+    let png = shot_all(&session);
+
+    let size = spec.physical_size();
+    assert_eq!((png.width, png.height), size, "native buffer size");
+    assert_pattern_8bit(&png, &pattern, 0, size, &format!("scale {}", spec.scale));
+}
+
+#[test]
+fn shot_all_is_byte_exact_at_fractional_scale_1_25() {
+    assert_byte_exact(OutputSpec::new(600, 480).scale(1.25));
+}
+
+#[test]
+fn shot_all_is_byte_exact_at_fractional_scale_1_5() {
+    assert_byte_exact(OutputSpec::new(600, 480).scale(1.5));
+}
+
+#[test]
+fn shot_all_is_byte_exact_at_scale_2() {
+    assert_byte_exact(OutputSpec::new(600, 480).scale(2.0));
+}
+
+/// Paints quadrants (every corner a different colour) on a rotated or flipped
+/// output and expects them back upright, exactly as the user sees them.
+fn assert_upright(transform: Transform) {
+    let spec = OutputSpec::new(640, 480).transform(transform);
+    let session = Session::start(&[spec]).unwrap();
+    let client = session.client().unwrap();
+    client
+        .paint(session.output("HEADLESS-1"), &Pattern::Quadrants)
+        .unwrap();
+
+    let png = shot_all(&session);
+
+    let size = spec.physical_size();
+    assert_eq!(
+        (png.width, png.height),
+        size,
+        "upright size for {transform:?}"
+    );
+    assert_pattern_8bit(
+        &png,
+        &Pattern::Quadrants,
+        0,
+        size,
+        &format!("{transform:?}"),
+    );
+}
+
+#[test]
+fn shot_all_turns_a_90_degree_output_upright() {
+    assert_upright(Transform::Rotate90);
+}
+
+#[test]
+fn shot_all_turns_a_270_degree_output_upright() {
+    assert_upright(Transform::Rotate270);
+}
+
+#[test]
+fn shot_all_turns_a_180_degree_output_upright() {
+    assert_upright(Transform::Rotate180);
+}
+
+#[test]
+fn shot_all_unflips_flipped_outputs() {
+    for transform in [
+        Transform::Flipped,
+        Transform::Flipped90,
+        Transform::Flipped180,
+        Transform::Flipped270,
+    ] {
+        assert_upright(transform);
+    }
 }
