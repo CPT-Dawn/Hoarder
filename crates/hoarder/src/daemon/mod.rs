@@ -85,6 +85,27 @@ pub fn run(overrides: &[(String, String)]) -> Result<(), Fail> {
         }
     };
 
+    // The focused app over compositor IPC, beside foreign-toplevel's.
+    let focus = match hoarder_wayland::focus::FocusWatch::connect() {
+        Some(Ok(watch)) => {
+            let fd = std::os::fd::AsFd::as_fd(&watch)
+                .try_clone_to_owned()
+                .map_err(|e| (Exit::Io, e.to_string()))?;
+            handle
+                .insert_source(
+                    Generic::new(fd, Interest::READ, Mode::Level),
+                    |_, _, daemon: &mut Daemon| Ok(daemon.on_focus()),
+                )
+                .map_err(|e| loop_error(e.error))?;
+            Some(watch)
+        }
+        Some(Err(e)) => {
+            eprintln!("hoarder: cannot follow focus over compositor IPC: {e}");
+            None
+        }
+        None => None,
+    };
+
     let history = history::History::start(&handle, config.history.encrypt);
     // Retention runs on every insert, at startup and once an hour.
     let _ = history.send(history::Job::Retain {
@@ -109,6 +130,7 @@ pub fn run(overrides: &[(String, String)]) -> Result<(), Fail> {
         config,
         overrides: overrides.to_vec(),
         config_watch,
+        focus,
         slots: Default::default(),
         current: Default::default(),
         front_ends: Default::default(),
@@ -329,6 +351,8 @@ pub(crate) struct Daemon {
     config: Config,
     overrides: Vec<(String, String)>,
     config_watch: Option<hoarder_config::Watcher>,
+    /// The focused app over compositor IPC, if the compositor has one.
+    focus: Option<hoarder_wayland::focus::FocusWatch>,
     slots: [Slot; 2],
     /// The Offer on each Selection right now, watched or not, for `paste`.
     current: [Option<Offer>; 2],
@@ -418,13 +442,32 @@ impl Daemon {
             }
     }
 
+    /// Focus changed, as compositor IPC tells.
+    fn on_focus(&mut self) -> PostAction {
+        let Some(watch) = &mut self.focus else {
+            return PostAction::Remove;
+        };
+        match watch.read() {
+            Ok(true) => PostAction::Continue,
+            Ok(false) | Err(_) => {
+                // Foreign-toplevel, where there is one, still tells.
+                self.focus = None;
+                PostAction::Remove
+            }
+        }
+    }
+
     fn selection_changed(&mut self, which: Selection, offer: Option<Offer>) {
         if !self.watched(which) {
             return;
         }
-        let Some(offer) = offer else {
+        let Some(mut offer) = offer else {
             return self.selection_emptied(which);
         };
+        // Compositor IPC first (PLAN.md §5.1), then foreign-toplevel.
+        if let Some(app) = self.focus.as_ref().and_then(|f| f.focused_app()) {
+            offer.focused_app = Some(app.to_owned());
+        }
         if offer.own {
             let slot = &mut self.slots[which as usize];
             slot.owner = Some(Owner::Hoarder);

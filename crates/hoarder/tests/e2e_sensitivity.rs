@@ -25,16 +25,24 @@ struct Daemon {
 
 impl Daemon {
     fn start(session: &Session, args: &[&str]) -> Daemon {
+        Daemon::start_with(session, args, |_| {})
+    }
+
+    fn start_with(
+        session: &Session,
+        args: &[&str],
+        tweak: impl FnOnce(&mut std::process::Command),
+    ) -> Daemon {
         let log = std::fs::File::create(session.runtime_dir().join("daemon.log")).unwrap();
-        let child = session
-            .command(HOARDER)
+        let mut command = session.command(HOARDER);
+        command
             .args(args)
             .arg("daemon")
             .stdin(Stdio::null())
             .stdout(log.try_clone().unwrap())
-            .stderr(log)
-            .spawn()
-            .expect("start hoarder daemon");
+            .stderr(log);
+        tweak(&mut command);
+        let child = command.spawn().expect("start hoarder daemon");
         let mut daemon = Daemon {
             child,
             socket: session.runtime_dir().join("hoarder/hoarder.sock"),
@@ -352,4 +360,23 @@ fn restoring_a_clip_over_a_concealed_selection_forgets_it() {
     );
     assert_eq!(daemon.concealed(), Vec::<Value>::new());
     assert_eq!(daemon.status()["clipboard"]["sensitivity"], "normal");
+}
+
+#[test]
+fn the_focused_app_comes_from_sway_ipc_without_foreign_toplevel() {
+    let session = Session::start_default().unwrap();
+    let daemon = Daemon::start_with(&session, &[], |cmd| {
+        cmd.env("HOARDER_HIDE_GLOBALS", "zwlr_foreign_toplevel_manager_v1");
+    });
+
+    let keepass = session.client().unwrap();
+    keepass.open_window("org.keepassxc.KeePassXC").unwrap();
+    keepass
+        .set_selection(
+            Selection::Clipboard,
+            &[("text/plain", b"correct horse".as_slice())],
+        )
+        .unwrap();
+
+    assert_eq!(daemon.settled()["sensitivity"], "concealed");
 }

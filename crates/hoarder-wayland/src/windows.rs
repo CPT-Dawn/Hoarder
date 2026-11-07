@@ -226,6 +226,16 @@ impl SwayIpc {
             .collect())
     }
 
+    /// Sway's IPC socket.
+    pub(crate) fn socket(&self) -> &std::path::Path {
+        &self.socket
+    }
+
+    /// A `get_tree` reply.
+    pub(crate) fn tree(&self) -> Result<Vec<u8>, GeometryError> {
+        self.request(SWAY_GET_TREE)
+    }
+
     fn request(&self, kind: u32) -> Result<Vec<u8>, GeometryError> {
         let mut stream = connect(&self.socket)?;
         let mut msg = Vec::with_capacity(14);
@@ -455,9 +465,14 @@ impl HyprlandIpc {
             .and_then(|m| m.name))
     }
 
+    /// Hyprland's request socket.
+    pub(crate) fn socket(&self) -> &std::path::Path {
+        &self.socket
+    }
+
     /// One request, answered in full. Hyprland serves this socket
     /// synchronously, so the connection is closed straight away.
-    fn request(&self, command: &str) -> Result<Vec<u8>, GeometryError> {
+    pub(crate) fn request(&self, command: &str) -> Result<Vec<u8>, GeometryError> {
         let mut stream = connect(&self.socket)?;
         stream.write_all(command.as_bytes())?;
         let mut reply = Vec::new();
