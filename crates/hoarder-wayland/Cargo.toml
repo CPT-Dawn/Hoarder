@@ -15,6 +15,7 @@ serde_json.workspace = true
 wayland-client.workspace = true
 wayland-protocols.workspace = true
 wayland-protocols-wlr.workspace = true
+wayland-scanner.workspace = true
 
 [lints]
 workspace = true

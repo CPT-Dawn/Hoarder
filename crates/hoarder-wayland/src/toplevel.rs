@@ -35,11 +35,16 @@ use wayland_protocols::ext::image_copy_capture::v1::client::{
 };
 
 use crate::capture::HIDE_GLOBALS_ENV;
+use crate::hyprland::toplevel_mapping::{
+    hyprland_toplevel_mapping_manager_v1::HyprlandToplevelMappingManagerV1,
+    hyprland_toplevel_window_mapping_handle_v1::{self, HyprlandToplevelWindowMappingHandleV1},
+};
 use crate::{CaptureError, ShmFormat, Transform};
 
 const LIST: &str = "ext_foreign_toplevel_list_v1";
 const SOURCE: &str = "ext_foreign_toplevel_image_capture_source_manager_v1";
 const COPY: &str = "ext_image_copy_capture_manager_v1";
+const MAPPING: &str = "hyprland_toplevel_mapping_manager_v1";
 
 /// A window as `ext-foreign-toplevel-list-v1` lists it: every one the
 /// compositor manages, on any workspace.
@@ -118,7 +123,30 @@ impl Lister {
         lister.roundtrip()?;
         list.stop();
         lister.state.toplevels.retain(|t| t.done && !t.closed);
+        lister.map_to_hyprland()?;
         Ok(lister)
+    }
+
+    /// On Hyprland, ask each toplevel's window address.
+    fn map_to_hyprland(&mut self) -> Result<(), CaptureError> {
+        if !self.has(MAPPING) {
+            return Ok(());
+        }
+        let manager: HyprlandToplevelMappingManagerV1 = self.bind(MAPPING)?;
+        let qh = self.queue.handle();
+        let handles: Vec<_> = self
+            .state
+            .toplevels
+            .iter()
+            .enumerate()
+            .map(|(i, t)| manager.get_window_for_toplevel(&t.handle, &qh, i))
+            .collect();
+        self.roundtrip()?;
+        for handle in handles {
+            handle.destroy();
+        }
+        manager.destroy();
+        Ok(())
     }
 
     fn has(&self, interface: &str) -> bool {
@@ -383,6 +411,27 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, ()> for State {
     }
 }
 
+impl Dispatch<HyprlandToplevelWindowMappingHandleV1, usize> for State {
+    fn event(
+        state: &mut Self,
+        _: &HyprlandToplevelWindowMappingHandleV1,
+        event: hyprland_toplevel_window_mapping_handle_v1::Event,
+        &i: &usize,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let hyprland_toplevel_window_mapping_handle_v1::Event::WindowAddress {
+            address_hi,
+            address,
+        } = event
+        {
+            state.toplevels[i].info.hyprland_address =
+                Some((address_hi as u64) << 32 | address as u64);
+        }
+    }
+}
+
+delegate_noop!(State: HyprlandToplevelMappingManagerV1);
 delegate_noop!(State: ignore WlShm);
 delegate_noop!(State: WlShmPool);
 delegate_noop!(State: ignore WlBuffer);
