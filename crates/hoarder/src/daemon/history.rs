@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::sync::mpsc;
 
 use calloop::LoopHandle;
-use calloop::channel::{Event, channel};
-use hoarder_ipc::{Cleared, ClipSummary, ErrorCode, Failure, Got, Value};
+use calloop::channel::{self as loop_channel, channel};
+use hoarder_ipc::{Cleared, ClipSummary, ErrorCode, Event, Failure, Got, Value};
 use hoarder_store::retention::Limits;
 use hoarder_store::{Clip, Store};
 
@@ -105,6 +105,8 @@ pub(super) enum Done {
         clip: ClipSummary,
         reprs: Vec<Representation>,
     },
+    /// History changed: tell the subscribers.
+    Changed(Vec<Event>),
 }
 
 /// The loop's handle on the History thread.
@@ -140,7 +142,7 @@ impl History {
         };
         let (done_tx, done_rx) = channel::<Done>();
         let inserted = handle.insert_source(done_rx, |event, _, daemon: &mut Daemon| {
-            if let Event::Msg(done) = event {
+            if let loop_channel::Event::Msg(done) = event {
                 daemon.history_done(done);
             }
         });
@@ -180,7 +182,9 @@ fn now() -> i64 {
 
 fn worker(mut store: Store, jobs: mpsc::Receiver<Job>, done: calloop::channel::Sender<Done>) {
     for job in jobs {
-        let reply = |client, id, result| Done::Reply { client, id, result };
+        let reply = |client, id, result| Some(Done::Reply { client, id, result });
+        // What subscribers hear of this job, sent before its answer.
+        let mut events = Vec::new();
         let out = match job {
             Job::Record { reprs, app, limits } => {
                 let reprs: Vec<(&str, &[u8])> =
@@ -190,11 +194,16 @@ fn worker(mut store: Store, jobs: mpsc::Receiver<Job>, done: calloop::channel::S
                         if recorded.new {
                             add_thumb(&mut store, recorded.id, &reprs);
                         }
-                        retain(&mut store, &limits);
+                        if let Ok(Some(clip)) = store.clip(recorded.id) {
+                            events.push(Event::ClipAdded {
+                                clip: summary(&clip),
+                            });
+                        }
+                        events.extend(retain(&mut store, &limits));
                     }
                     Err(e) => eprintln!("hoarder: cannot record a Clip: {e}"),
                 }
-                continue;
+                None
             }
             Job::Thumb {
                 client,
@@ -203,8 +212,8 @@ fn worker(mut store: Store, jobs: mpsc::Receiver<Job>, done: calloop::channel::S
                 pipe,
             } => reply(client, id, thumb(&store, clip, pipe)),
             Job::Retain { limits } => {
-                retain(&mut store, &limits);
-                continue;
+                events.extend(retain(&mut store, &limits));
+                None
             }
             Job::List { client, id, limit } => {
                 let limit = limit.map_or(usize::MAX, |l| l as usize);
@@ -235,17 +244,20 @@ fn worker(mut store: Store, jobs: mpsc::Receiver<Job>, done: calloop::channel::S
                 pipe,
             } => reply(client, id, get(&store, clip, mime, pipe)),
             Job::Restore { client, id, clip } => match restore(&mut store, clip) {
-                Ok((clip, reprs)) => Done::Restore {
+                Ok((clip, reprs)) => Some(Done::Restore {
                     client,
                     id,
                     clip,
                     reprs,
-                },
+                }),
                 Err(f) => reply(client, id, Err(f)),
             },
             Job::Delete { client, id, clip } => {
                 let result = match store.delete(clip) {
-                    Ok(true) => Ok(Value::Null),
+                    Ok(true) => {
+                        events.push(Event::ClipRemoved { clip });
+                        Ok(Value::Null)
+                    }
                     Ok(false) => Err(not_found(clip)),
                     Err(e) => Err(failed(e)),
                 };
@@ -269,22 +281,48 @@ fn worker(mut store: Store, jobs: mpsc::Receiver<Job>, done: calloop::channel::S
                 reply(client, id, result)
             }
             Job::Clear { client, id, pinned } => {
-                let result = store
-                    .clear(pinned)
-                    .map(|n| to_value(&Cleared { deleted: n as u64 }))
-                    .map_err(failed);
+                let result = clear(&mut store, pinned).map(|gone| {
+                    let deleted = gone.len() as u64;
+                    events.extend(gone.into_iter().map(|clip| Event::ClipRemoved { clip }));
+                    to_value(&Cleared { deleted })
+                });
                 reply(client, id, result)
             }
         };
-        if done.send(out).is_err() {
-            return;
+        let changed = (!events.is_empty()).then_some(Done::Changed(events));
+        for done_ in changed.into_iter().chain(out) {
+            if done.send(done_).is_err() {
+                return;
+            }
         }
     }
 }
 
-fn retain(store: &mut Store, limits: &Limits) {
-    if let Err(e) = store.retain(limits, now()) {
-        eprintln!("hoarder: cannot apply History limits: {e}");
+/// Empty History (pinned Clips too if `pinned`); the ids that went.
+fn clear(store: &mut Store, pinned: bool) -> Result<Vec<i64>, Failure> {
+    // The one thread with the Store, so nothing comes or goes in between.
+    let ids: Vec<i64> = store
+        .list(usize::MAX)
+        .map_err(failed)?
+        .iter()
+        .filter(|c| pinned || !c.pinned)
+        .map(|c| c.id)
+        .collect();
+    store.clear(pinned).map_err(failed)?;
+    Ok(ids)
+}
+
+/// Apply `limits`; a `clip_removed` for each Clip evicted.
+fn retain(store: &mut Store, limits: &Limits) -> Vec<Event> {
+    match store.retain(limits, now()) {
+        Ok(gone) => gone
+            .into_iter()
+            .map(|clip| Event::ClipRemoved { clip })
+            .collect(),
+        Err(e) => {
+            eprintln!("hoarder: cannot apply History limits: {e}");
+            Vec::new()
+        }
     }
 }
 

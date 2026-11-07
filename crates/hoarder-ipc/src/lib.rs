@@ -1,16 +1,58 @@
-//! Request, response and event types for the Hoarder JSON-lines IPC API, plus a framing codec.
+//! Request, response and event types for the [Hoarder] JSON-lines socket
+//! API, plus a framing codec and a blocking client.
 //!
-//! The Daemon listens on `$XDG_RUNTIME_DIR/hoarder/hoarder.sock` ([`socket_path`]).
-//! Every message is one JSON object on one line (ADR-0004, PLAN.md §11):
+//! The Hoarder Daemon listens on `$XDG_RUNTIME_DIR/hoarder/hoarder.sock`
+//! ([`socket_path`]). Every message is one JSON object on one line:
 //!
 //! ```text
 //! → {"v":1,"id":7,"op":"status"}
 //! ← {"v":1,"id":7,"ok":{…}}
 //! ← {"v":1,"id":8,"err":{"code":"unknown_op","message":"…"}}
+//! ← {"v":1,"event":"clip_added","clip":{…}}
 //! ```
 //!
-//! Unknown fields are ignored, so additive changes keep `v: 1`; breaking
-//! changes bump [`PROTOCOL`] and this crate's major version.
+//! The protocol itself, with every op, event and error and `socat`/`jq`
+//! examples, is documented in [docs/ipc.md]. This crate is that contract in
+//! Rust: [`Request`]/[`Op`] and [`Response`] for request and answer,
+//! [`EventLine`]/[`Event`] for the `subscribe` stream, a typed struct for
+//! each `ok`, and [`Connection`], a blocking client.
+//!
+//! ```no_run
+//! # fn main() -> std::io::Result<()> {
+//! let mut daemon = hoarder_ipc::Connection::connect()?;
+//! for clip in daemon.list(Some(5))?.map_err(std::io::Error::other)? {
+//!     println!("{}\t{}", clip.id, clip.preview);
+//! }
+//! daemon.subscribe()?.map_err(std::io::Error::other)?;
+//! loop {
+//!     match daemon.next_event()? {
+//!         hoarder_ipc::Event::ClipAdded { clip } => println!("new: {}", clip.preview),
+//!         hoarder_ipc::Event::ClipRemoved { clip } => println!("gone: {clip}"),
+//!         _ => {}
+//!     }
+//! }
+//! # }
+//! ```
+//!
+//! # Compatibility
+//!
+//! Unknown fields are ignored on both sides, and events, error codes and
+//! enum values newer than this crate decode as `Unknown`, so additive
+//! protocol changes keep `v: 1` and arrive in minor releases of this crate
+//! (the enums that grow are `#[non_exhaustive]`). Breaking protocol changes
+//! bump [`PROTOCOL`] and this crate's major version (ADR-0004). Building the
+//! response structs yourself (to write a Daemon) is not covered: they may
+//! gain fields in a minor release. See the crate's README for the policy.
+//!
+//! [Hoarder]: https://github.com/CPT-Dawn/Hoarder
+//! [docs/ipc.md]: https://github.com/CPT-Dawn/Hoarder/blob/main/docs/ipc.md
+
+#![warn(missing_docs)]
+
+/// The README's example must compile too.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
 
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::fd::{AsFd as _, BorrowedFd};
@@ -41,22 +83,31 @@ pub struct Request {
     pub v: u32,
     /// Echoed in the response, so a Front end can match them up.
     pub id: u64,
+    /// The op and its fields, flattened into the request object.
     #[serde(flatten)]
     pub op: Op,
 }
 
 /// What a request asks for.
+///
+/// New ops arrive in minor releases, so match with a wildcard arm.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Op {
     /// Version negotiation; answered with [`Hello`].
     Hello,
     /// The Daemon's state; answered with [`Status`].
     Status,
+    /// Re-read `config.toml` now, rather than when its change is noticed.
+    /// A file that does not parse fails with its diagnostic (`failed`) and
+    /// keeps the config in force.
+    Reload,
     /// Empty a Selection (the clipboard unless `selection` says) and keep
     /// it empty: no Takeover restores it. Answered once the compositor has
     /// applied it.
     Clear {
+        /// Which Selection; absent means the clipboard.
         #[serde(default, skip_serializing_if = "Selection::is_clipboard")]
         selection: Selection,
     },
@@ -66,8 +117,10 @@ pub enum Op {
     /// request (`SCM_RIGHTS`). Recorded in History unless `sensitive`.
     /// Answered once the compositor has applied it.
     Offer {
+        /// Which Selection; absent means the clipboard.
         #[serde(default, skip_serializing_if = "Selection::is_clipboard")]
         selection: Selection,
+        /// The MIME types to offer the payload as; at least one.
         types: Vec<String>,
         /// A password: offered with `x-kde-passwordManagerHint: secret`,
         /// never recorded nor restored.
@@ -81,16 +134,22 @@ pub enum Op {
     /// into the pipe passed with the request (`SCM_RIGHTS`). Answered once
     /// the source has been asked; the pipe closes at the data's end.
     Paste {
+        /// Which Selection; absent means the clipboard.
         #[serde(default, skip_serializing_if = "Selection::is_clipboard")]
         selection: Selection,
+        /// The MIME type to ask the source for.
         mime: String,
     },
     /// Receive [`Event`]s on this connection from now on, starting with a
-    /// `selection` event for each Selection as it is now.
+    /// `selection` event for each Selection as it is now, then a `state`
+    /// event. The response comes before them.
     Subscribe,
     /// Stream a Clip's thumbnail (a PNG at most 256 px on a side) into the
     /// pipe passed with the request; answered with [`Got`].
-    Thumb { clip: i64 },
+    Thumb {
+        /// The Clip's id.
+        clip: i64,
+    },
     /// History, most recently used first; answered with [`ClipSummary`]s.
     List {
         /// At most this many Clips (all of them if absent).
@@ -102,6 +161,7 @@ pub enum Op {
     /// recently used first; answered with [`ClipSummary`]s. Queries under
     /// three characters match nothing.
     Search {
+        /// The text to look for.
         query: String,
         /// At most this many Clips (all of them if absent).
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -111,6 +171,7 @@ pub enum Op {
     /// request (`SCM_RIGHTS`); answered with [`Got`] before the data
     /// arrives, and the pipe closes at its end.
     Get {
+        /// The Clip's id.
         clip: i64,
         /// The MIME type to send; the Clip's first type if absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -118,23 +179,37 @@ pub enum Op {
     },
     /// Make a Clip the clipboard Selection again, and move it to the top.
     /// Answered with its [`ClipSummary`] once the compositor has applied it.
-    Restore { clip: i64 },
-    /// Remove a Clip from History.
-    Delete { clip: i64 },
+    Restore {
+        /// The Clip's id.
+        clip: i64,
+    },
+    /// Remove a Clip from History; answered with `null`.
+    Delete {
+        /// The Clip's id.
+        clip: i64,
+    },
     /// Exempt a Clip from expiry and eviction; answered with its
     /// [`ClipSummary`].
-    Pin { clip: i64 },
+    Pin {
+        /// The Clip's id.
+        clip: i64,
+    },
     /// Make a pinned Clip ordinary again; answered with its [`ClipSummary`].
-    Unpin { clip: i64 },
+    Unpin {
+        /// The Clip's id.
+        clip: i64,
+    },
     /// Empty History, keeping pinned Clips unless `pinned`; answered with
     /// [`Cleared`]. (`clear` empties the clipboard.)
     ClearHistory {
+        /// Delete pinned Clips too.
         #[serde(default)]
         pinned: bool,
     },
     /// Stop recording into History, for `secs` seconds or until `resume`.
     /// Persistence and Takeover go on. Answered with [`Recording`].
     Pause {
+        /// How long; until `resume` if absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         secs: Option<u64>,
     },
@@ -153,6 +228,7 @@ pub struct Cleared {
 /// [`Op::Resume`], and part of [`Status`].
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Recording {
+    /// Active or Paused.
     #[serde(default)]
     pub state: State,
     /// When a timed Pause ends (RFC 3339); absent otherwise.
@@ -163,12 +239,14 @@ pub struct Recording {
 /// The Daemon's recording state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum State {
     /// Recording every Normal copy.
     #[default]
     Active,
     /// Paused: nothing is recorded.
     Paused,
+    /// A state newer than this crate.
     #[serde(other)]
     Unknown,
 }
@@ -192,15 +270,34 @@ impl Selection {
 
 /// Something that happened, pushed to subscribed connections
 /// ([`Op::Subscribe`]) as `{"v":1,"event":…}` lines between responses.
+///
+/// New events arrive in minor releases; an older crate decodes them as
+/// [`Event::Unknown`]. Match with a wildcard arm.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Event {
     /// A Selection changed hands: `types` is what it offers now, in the
     /// source's order, or `None` once it is empty.
     Selection {
+        /// Which Selection changed.
         selection: Selection,
+        /// What it offers now.
         types: Option<Vec<String>>,
     },
+    /// A Clip went to the top of History: newly recorded, copied again or
+    /// restored. A Front end already showing `clip.id` moves it up.
+    ClipAdded {
+        /// The Clip as it is now.
+        clip: ClipSummary,
+    },
+    /// A Clip left History: deleted, cleared or expired.
+    ClipRemoved {
+        /// The id it had.
+        clip: i64,
+    },
+    /// Recording was paused or resumed: `{"event":"state","state":…}`.
+    State(Recording),
     /// An event newer than this crate.
     #[serde(other)]
     Unknown,
@@ -209,7 +306,9 @@ pub enum Event {
 /// One event line.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventLine {
+    /// The protocol version.
     pub v: u32,
+    /// The event and its fields, flattened into the line.
     #[serde(flatten)]
     pub event: Event,
 }
@@ -217,6 +316,7 @@ pub struct EventLine {
 /// One Clip, as `list` shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClipSummary {
+    /// Its id, stable for the Clip's life.
     pub id: i64,
     /// `text`, `image`, `files` or `other`.
     pub kind: String,
@@ -229,6 +329,7 @@ pub struct ClipSummary {
     pub at: String,
     /// When it was first copied (RFC 3339).
     pub created: String,
+    /// Exempt from expiry and eviction.
     pub pinned: bool,
     /// Total bytes of all its representations.
     pub size: u64,
@@ -239,6 +340,7 @@ pub struct ClipSummary {
 /// The `ok` of [`Op::Get`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Got {
+    /// The Clip the data comes from.
     pub clip: ClipSummary,
     /// The type being streamed.
     pub mime: String,
@@ -249,10 +351,12 @@ pub struct Got {
 /// The Daemon's answer to one [`Request`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Response {
+    /// The protocol version.
     pub v: u32,
     /// The request's id; absent if the request was too broken to have one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<u64>,
+    /// `ok` or `err`, flattened into the response.
     #[serde(flatten)]
     pub outcome: Outcome,
 }
@@ -261,14 +365,18 @@ pub struct Response {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
+    /// The op's answer; `null` for ops with nothing to say.
     Ok(Value),
+    /// Why it failed.
     Err(Failure),
 }
 
 /// Why a request failed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Failure {
+    /// What kind of failure, for programs.
     pub code: ErrorCode,
+    /// What went wrong, for people.
     pub message: String,
 }
 
@@ -278,9 +386,12 @@ impl std::fmt::Display for Failure {
     }
 }
 
+impl std::error::Error for Failure {}
+
 /// Machine-readable failure kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ErrorCode {
     /// Not JSON, or missing `v`, `id` or `op`.
     BadRequest,
@@ -306,13 +417,16 @@ pub struct Hello {
     pub versions: Vec<u32>,
     /// The Daemon's own version (`hoarder --version`).
     pub daemon: String,
+    /// The Daemon's process id.
     pub pid: u32,
 }
 
 /// The `ok` of [`Op::Status`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
+    /// The Daemon's own version (`hoarder --version`).
     pub daemon: String,
+    /// The Daemon's process id.
     pub pid: u32,
     /// The data-control protocol in use: `ext` or `wlr`.
     pub data_control: String,
@@ -321,6 +435,7 @@ pub struct Status {
     /// Whether copies are recorded (Pause).
     #[serde(flatten)]
     pub recording: Recording,
+    /// The clipboard.
     pub clipboard: SelectionStatus,
     /// `None` while the primary selection is ignored (`clipboard.primary`).
     pub primary: Option<SelectionStatus>,
@@ -329,6 +444,7 @@ pub struct Status {
 /// What the Daemon knows about one Selection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SelectionStatus {
+    /// Who serves it.
     pub owner: Owner,
     /// The MIME types offered right now, in the source's order.
     pub types: Vec<String>,
@@ -358,6 +474,7 @@ pub enum Sensitivity {
 /// Who serves a Selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Owner {
     /// Nothing is copied.
     None,
@@ -365,6 +482,7 @@ pub enum Owner {
     App,
     /// The Daemon, after a Takeover.
     Hoarder,
+    /// An owner newer than this crate.
     #[serde(other)]
     Unknown,
 }
@@ -443,6 +561,7 @@ impl Connection {
         Self::connect_to(&path)
     }
 
+    /// Connect to a Daemon listening at `path`.
     pub fn connect_to(path: &Path) -> std::io::Result<Self> {
         let writer = UnixStream::connect(path)?;
         let reader = BufReader::new(writer.try_clone()?);
@@ -647,6 +766,21 @@ impl Connection {
     /// [`Op::Resume`], decoded.
     pub fn resume(&mut self) -> std::io::Result<Result<Recording, Failure>> {
         self.typed(Op::Resume)
+    }
+
+    /// [`Op::Delete`].
+    pub fn delete(&mut self, clip: i64) -> std::io::Result<Result<(), Failure>> {
+        Ok(self.call(Op::Delete { clip })?.map(drop))
+    }
+
+    /// [`Op::Clear`]: empty a Selection and keep it empty.
+    pub fn clear(&mut self, selection: Selection) -> std::io::Result<Result<(), Failure>> {
+        Ok(self.call(Op::Clear { selection })?.map(drop))
+    }
+
+    /// [`Op::Reload`].
+    pub fn reload(&mut self) -> std::io::Result<Result<(), Failure>> {
+        Ok(self.call(Op::Reload)?.map(drop))
     }
 
     /// Wait for the response to request `id`, keeping events that arrive

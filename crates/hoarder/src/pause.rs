@@ -85,7 +85,7 @@ fn describe(recording: &Recording) -> String {
         (State::Active, _) => "active".into(),
         (State::Paused, Some(until)) => format!("paused until {until}"),
         (State::Paused, None) => "paused, until `hoarder resume`".into(),
-        (State::Unknown, _) => "unknown".into(),
+        _ => "unknown".into(),
     }
 }
 
