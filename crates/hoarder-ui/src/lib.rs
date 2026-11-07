@@ -7,5 +7,6 @@
 mod chrome;
 mod geom;
 pub mod overlay;
+mod wait;
 
 pub use overlay::{Outcome, OverlayError, Region};

@@ -34,6 +34,10 @@ enum Command {
         /// Leave the clipboard alone (`screenshot.copy = false` for this run).
         #[arg(long)]
         no_copy: bool,
+        /// Skip the freeze: select over the live desktop and capture it as it
+        /// is when the selection ends.
+        #[arg(long)]
+        live: bool,
     },
     /// Copy stdin or text to the clipboard (accepts every wl-copy flag).
     Copy(clipboard::CopyArgs),
@@ -74,9 +78,11 @@ fn main() -> ExitCode {
             target,
             output,
             no_copy,
+            live,
         }) => config::effective(&cli.overrides).and_then(|mut config| {
             config.screenshot.copy &= !no_copy;
-            shot::run(target, output.as_deref(), &config)
+            let when = shot::When { live };
+            shot::run(target, when, output.as_deref(), &config)
         }),
         Some(Command::Copy(args)) => clipboard::copy(args),
         Some(Command::Paste(args)) => clipboard::paste(args),
