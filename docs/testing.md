@@ -8,13 +8,14 @@ Hoarder is tested through as few seams as possible, as high up as possible ([PLA
 cargo test --workspace
 ```
 
-The end-to-end tests need these on `PATH` (Arch: `sway grim wl-clipboard`):
+The end-to-end tests need these on `PATH` (Arch: `sway grim wl-clipboard libavif`):
 
 | Tool | Why |
 |---|---|
 | `sway` (1.11+) | The compositor, run with `WLR_BACKENDS=headless` and `WLR_RENDERER=pixman`. No GPU, display or seat needed. |
 | `grim` | Independent oracle for "what the user sees" (`Session::screenshot`). |
 | `wl-copy`, `wl-paste` | Independent oracle for Selections, and the reference the `hoarder copy`/`paste` parity suite (`crates/hoarder/tests/e2e_clipboard.rs`) runs every case against, in every copier/paster pairing. |
+| `avifdec` | Independent AVIF decoder for the saved-format tests (`libavif`). |
 
 Latency budgets (4K shot-to-clipboard under 150 ms) are `#[ignore]`d in debug builds, since timing unoptimised code proves nothing. Run them with `cargo test --release -p hoarder --test e2e_shot_clipboard`.
 
@@ -84,6 +85,29 @@ It is also handy for bug reports: a user can check whether a capture problem fol
 ## The Daemon (`crates/hoarder/tests/e2e_daemon.rs`)
 
 The Daemon tests start `hoarder daemon` in the session and judge it only by what a user or Front end can see: `wl-paste` after the source app exits (Takeover and the Reader rules), the source still owning its Selection, socket responses, `/proc` context switches for idle wakeups, and exit codes. The `status` op's `reading` flag tells a test when the Daemon has finished reading an Offer, so a source is never quit mid-read by accident. `hoarder service` runs against a stand-in `systemctl` placed first on `PATH`, so no test touches your real user manager.
+
+## Driving the Overlay
+
+`crates/hoarder/tests/common` has `Overlay::start`, which spawns `hoarder shot …` and returns once grim sees every listed output change (the Overlay is up), so input sent next reaches it. `finish()` waits for the exit and hands back the status, stdout and stderr. Overlay visuals are checked with `Session::screenshot`.
+
+## Timings and budgets
+
+With `HOARDER_TIMINGS` set, `hoarder shot` prints stage timings on stderr, measured from the start of `shot`: `frozen_ms`, `surfaces_created_ms` and `overlay_visible_ms` (the first frame callback of every Overlay surface).
+
+`budget_overlay_visible_on_4k` (in `e2e_overlay.rs`) checks the "key press → Overlay visible on 4K < 60 ms" budget (PLAN.md §12). The test only enforces it in optimised builds:
+
+```sh
+cargo test --release -p hoarder --test e2e_overlay budget -- --nocapture
+```
+
+Recorded results (headless Sway 1.12, pixman, one 3840×2160 output, release build, median of 5):
+
+| Date | Change | Median | Breakdown |
+|---|---|---|---|
+| 2026-11-07 | #61, first cut: full Argb8888 chrome painted before the first frame | 59.5 ms | |
+| 2026-11-07 | #61: idle chrome is one `wp_single_pixel_buffer_v1` pixel stretched by the viewporter | 39.9 ms | freeze 14, Overlay surfaces and frame upload 11, compositor's first frame 13 |
+
+This is within budget, so ADR-0007 stands. The next easy win is giving the freeze's memfd to the Overlay instead of copying the 33 MB frame (about 8 ms).
 
 ## CI (`.github/workflows/ci.yml`)
 

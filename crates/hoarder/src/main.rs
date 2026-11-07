@@ -1,6 +1,7 @@
 mod clipboard;
 mod config;
 mod daemon;
+mod encode;
 mod image;
 mod save;
 mod shot;
@@ -26,12 +27,20 @@ enum Command {
     /// Take a Capture.
     Shot {
         /// What to capture.
+        #[arg(default_value = "region")]
         target: shot::Target,
         /// Write the image to PATH, or to stdout with `-`, instead of saving it
         /// to `screenshot.dir`.
         #[arg(short = 'o', long = "output", value_name = "PATH")]
         output: Option<PathBuf>,
-        /// Leave the clipboard alone (`screenshot.copy = false` for this run).
+        /// Image format for this run (`screenshot.format`). Defaults to the
+        /// extension of `-o PATH` when it names one.
+        #[arg(long, value_name = "F", value_parser = ["png", "webp", "jpeg", "avif", "qoi"])]
+        format: Option<String>,
+        /// Do not save the Capture to `screenshot.dir` (`screenshot.save = false`).
+        #[arg(long)]
+        no_save: bool,
+        /// Do not copy the Capture to the clipboard (`screenshot.copy = false`).
         #[arg(long)]
         no_copy: bool,
     },
@@ -54,11 +63,23 @@ enum Command {
     Service(daemon::service::ServiceCommand),
 }
 
+/// The `screenshot.format` an `-o` file name asks for, if its extension is one.
+fn format_of_path(path: &std::path::Path) -> Option<String> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    let format = match ext.as_str() {
+        "jpg" | "jpeg" => "jpeg",
+        "png" | "webp" | "avif" | "qoi" => &ext,
+        _ => return None,
+    };
+    Some(format.to_owned())
+}
+
 /// Process exit codes (PLAN.md §10). clap exits 2 on its own usage errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Exit {
     Success = 0,
-    /// Cancelled by the user, or (for `paste`) nothing to paste.
+    /// Cancelled by the user (Esc or right-click in the Overlay), or (for
+    /// `paste`) nothing to paste.
     Cancelled = 1,
     /// Bad arguments or an invalid config.
     Usage = 2,
@@ -74,16 +95,27 @@ impl From<Exit> for ExitCode {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
     let result = match cli.command {
         Some(Command::Shot {
             target,
             output,
+            format,
+            no_save,
             no_copy,
-        }) => config::effective(&cli.overrides).and_then(|mut config| {
-            config.screenshot.copy &= !no_copy;
-            shot::run(target, output.as_deref(), &config)
-        }),
+        }) => {
+            // Shot flags are one-run overrides, applied after any `--set`.
+            let format = format.or_else(|| output.as_deref().and_then(format_of_path));
+            let flags = [
+                format.map(|f| ("screenshot.format", f)),
+                no_save.then(|| ("screenshot.save", "false".into())),
+                no_copy.then(|| ("screenshot.copy", "false".into())),
+            ];
+            cli.overrides
+                .extend(flags.into_iter().flatten().map(|(k, v)| (k.into(), v)));
+            config::effective(&cli.overrides)
+                .and_then(|config| shot::run(target, output.as_deref(), &config))
+        }
         Some(Command::Copy(args)) => clipboard::copy(args),
         Some(Command::Paste(args)) => clipboard::paste(args),
         Some(Command::ServeOffer(args)) => clipboard::serve_child(args),

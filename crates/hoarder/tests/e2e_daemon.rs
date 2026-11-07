@@ -74,13 +74,23 @@ impl Daemon {
     }
 
     /// Wait until the Daemon has finished reading the Selection it sees.
+    /// Wait until the Daemon has seen an app's Offer on the clipboard and
+    /// finished reading it.
     fn settled(&self) -> Value {
         let mut status = Value::Null;
         wait_until("the Daemon to finish reading", || {
             status = self.status();
-            status["clipboard"]["reading"] == false
+            status["clipboard"]["owner"] == "app" && status["clipboard"]["reading"] == false
         });
         status
+    }
+
+    /// Wait until the Daemon has seen the app owning `which` go away, so a
+    /// paste can no longer reach the app as it disconnects.
+    fn gone(&self, which: &str) {
+        wait_until("the source app to be gone", || {
+            self.status()[which]["owner"] != "app"
+        });
     }
 }
 
@@ -171,6 +181,7 @@ fn text_outlives_the_app_that_copied_it() {
     daemon.settled();
 
     app.exit();
+    daemon.gone("clipboard");
 
     wait_until("Takeover", || offered(&session).is_some());
     assert_eq!(offered(&session).unwrap(), types);
@@ -205,6 +216,7 @@ fn an_image_and_its_text_outlive_the_app_in_the_original_order() {
     daemon.settled();
 
     app.exit();
+    daemon.gone("clipboard");
 
     wait_until("Takeover", || offered(&session).is_some());
     assert_eq!(
@@ -247,6 +259,7 @@ fn nothing_is_kept_with_persist_off() {
     daemon.settled();
 
     app.exit();
+    daemon.gone("clipboard");
 
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(offered(&session), None);
@@ -273,6 +286,7 @@ fn hoarder_clear_empties_a_taken_over_clipboard_for_good() {
     .unwrap();
     daemon.settled();
     app.exit();
+    daemon.gone("clipboard");
     wait_until("Takeover", || offered(&session).is_some());
 
     hoarder_clear(&session);
@@ -298,6 +312,7 @@ fn hoarder_clear_while_the_app_lives_is_not_undone_when_it_exits() {
     hoarder_clear(&session);
     assert_eq!(offered(&session), None);
     app.exit();
+    daemon.gone("clipboard");
 
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(offered(&session), None);
@@ -329,6 +344,7 @@ fn a_clipboard_cleared_by_another_tool_is_restored() {
     .unwrap();
     daemon.settled();
     app.exit();
+    daemon.gone("clipboard");
     wait_until("Takeover", || offered(&session).is_some());
 
     let status = session.command("wl-copy").arg("--clear").status().unwrap();
@@ -352,6 +368,7 @@ fn taken_over(
         .unwrap();
     daemon.settled();
     app.exit();
+    daemon.gone("clipboard");
     let deadline = Instant::now() + Duration::from_millis(500);
     while Instant::now() < deadline {
         if let Some(types) = offered(session) {
@@ -570,6 +587,7 @@ fn the_primary_selection_persists_when_asked() {
     });
 
     app.exit();
+    daemon.gone("primary");
 
     wait_until("Takeover of the primary selection", || {
         wl_paste(&session, &["--primary", "--list-types"]).0 == Some(0)
@@ -596,6 +614,7 @@ fn no_takeover_apps_are_left_alone() {
         .unwrap();
     daemon.settled();
     fussy.exit();
+    daemon.gone("clipboard");
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(offered(&session), None);
 
@@ -605,6 +624,7 @@ fn no_takeover_apps_are_left_alone() {
         .unwrap();
     daemon.settled();
     easy.exit();
+    daemon.gone("clipboard");
     wait_until("Takeover", || offered(&session).is_some());
     assert_eq!(paste_type(&session, "text/plain"), b"easy");
 }

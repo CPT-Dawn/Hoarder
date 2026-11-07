@@ -111,7 +111,8 @@ impl ShmFormat {
         ShmFormat::Abgr8888,
     ];
 
-    fn wl(self) -> wl_shm::Format {
+    /// The `wl_shm` format code, e.g. to show the Frozen Frame on a surface.
+    pub fn wl(self) -> wl_shm::Format {
         use wl_shm::Format as F;
         match self {
             ShmFormat::Xrgb8888 => F::Xrgb8888,
@@ -185,6 +186,21 @@ impl Transform {
             WEnum::Value(T::Flipped180) => Transform::Flipped180,
             WEnum::Value(T::Flipped270) => Transform::Flipped270,
             _ => Transform::Normal,
+        }
+    }
+
+    /// The `wl_output` transform, e.g. for `wl_surface.set_buffer_transform`.
+    pub fn to_wl(self) -> wl_output::Transform {
+        use wl_output::Transform as T;
+        match self {
+            Transform::Normal => T::Normal,
+            Transform::Rotate90 => T::_90,
+            Transform::Rotate180 => T::_180,
+            Transform::Rotate270 => T::_270,
+            Transform::Flipped => T::Flipped,
+            Transform::Flipped90 => T::Flipped90,
+            Transform::Flipped180 => T::Flipped180,
+            Transform::Flipped270 => T::Flipped270,
         }
     }
 
