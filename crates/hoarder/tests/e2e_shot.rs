@@ -1,7 +1,7 @@
 //! `hoarder shot all -o …`: All Outputs frozen and written as a PNG, compared
 //! pixel for pixel against the pattern the helper client painted.
 
-use hoarder_e2e::{OutputSpec, Pattern, Session, Transform};
+use hoarder_e2e::{BitDepth, OutputSpec, Pattern, PixelFormat, Rgb10, Session, Transform};
 
 /// A decoded PNG: size, bit depth and RGB samples (8- or 16-bit values).
 #[derive(Debug)]
@@ -182,4 +182,38 @@ fn shot_all_unflips_flipped_outputs() {
     ] {
         assert_upright(transform);
     }
+}
+
+#[test]
+fn shot_all_keeps_every_bit_of_a_10bit_output_in_a_16bit_png() {
+    let spec = OutputSpec::new(640, 480).depth(BitDepth::Ten);
+    let session = Session::start(&[spec]).unwrap();
+    let client = session.client().unwrap();
+    client
+        .paint_as(
+            session.output("HEADLESS-1"),
+            &Pattern::Ramp,
+            PixelFormat::Xrgb2101010,
+        )
+        .unwrap();
+
+    let png = shot_all(&session);
+
+    assert_eq!((png.width, png.height), (640, 480));
+    assert_eq!(png.depth, 16, "a 10-bit output gives a 16-bit PNG");
+    let mut wrong = Vec::new();
+    for y in 0..480 {
+        for x in 0..640 {
+            let Rgb10(r, g, b) = Pattern::Ramp.colour_at(x, y, 640, 480);
+            let got = png.rgb(x, y);
+            // The top 10 bits are the painted value; full scale stays full scale.
+            if got.map(|v| v >> 6) != [r, g, b] && wrong.len() < 5 {
+                wrong.push(format!("({x}, {y}): got {got:?}, want {:?}", [r, g, b]));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "10-bit values lost: {wrong:#?}");
+    // Pixel 0 is (0, 3, 1023) and pixel 1023 is (1023, 1020, 0).
+    assert_eq!(png.rgb(0, 0), [0, 3 << 6, 0xffff]);
+    assert_eq!(png.rgb(1023 % 640, 1023 / 640), [0xffff, 0xff3f, 0]);
 }

@@ -27,6 +27,10 @@ pub enum Pattern {
     /// A black-and-white checkerboard of `cell`×`cell` physical pixels,
     /// white in the top-left cell. With `cell: 1` any resampling shows.
     Checker { cell: u32 },
+    /// Every 10-bit value of every channel, row by row: pixel `i` (counting
+    /// left to right, top to bottom) is `(i, 7i + 3, 1023 - i)`, each mod 1024.
+    /// Needs at least 1024 pixels to cover them all.
+    Ramp,
 }
 
 impl Pattern {
@@ -55,6 +59,11 @@ impl Pattern {
                 } else {
                     Rgb8(0, 0, 0).into()
                 }
+            }
+            Pattern::Ramp => {
+                let i = y as u64 * w as u64 + x as u64;
+                let v = |n: u64| (n % 1024) as u16;
+                Rgb10(v(i), v(7 * i + 3), 1023 - v(i))
             }
         }
     }
