@@ -1,6 +1,7 @@
 mod after;
 mod clipboard;
 mod config;
+mod daemon;
 mod encode;
 mod hook;
 mod image;
@@ -62,6 +63,13 @@ enum Command {
     /// Read, change and check `config.toml`.
     #[command(subcommand)]
     Config(config::ConfigCommand),
+    /// Empty the clipboard, and keep the Daemon from restoring it.
+    Clear,
+    /// Run the Daemon in the foreground (what the service runs).
+    Daemon,
+    /// Install, remove or inspect the Daemon's systemd user service.
+    #[command(subcommand)]
+    Service(daemon::service::ServiceCommand),
 }
 
 /// The `screenshot.format` an `-o` file name asks for, if its extension is one.
@@ -124,6 +132,9 @@ fn main() -> ExitCode {
         Some(Command::ServeOffer(args)) => clipboard::serve_child(args),
         Some(Command::NotifyCapture(args)) => notify::serve_child(args),
         Some(Command::Config(command)) => config::run(command, &cli.overrides),
+        Some(Command::Clear) => daemon::clear(),
+        Some(Command::Daemon) => daemon::run(&cli.overrides),
+        Some(Command::Service(command)) => daemon::service::run(command),
         None => Ok(()),
     };
     match result {
