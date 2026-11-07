@@ -23,6 +23,7 @@ hoarder-wayland = { path = "crates/hoarder-wayland", version = "0.1.0" }
 calloop = "0.14"
 clap = { version = "4.6", features = ["derive"] }
 cosmic-text = "0.19"
+futures-util = { version = "0.3", default-features = false }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "avif", "qoi", "rayon"] }
 inotify = { version = "0.11", default-features = false }
 jiff = "0.2"
@@ -40,6 +41,8 @@ wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
 wayland-protocols-misc = { version = "0.3", features = ["client"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+# zbus 6 has no blocking API: drive it with `zbus::block_on`.
+zbus = { version = "6.2", default-features = false, features = ["default-rt", "proxy"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
