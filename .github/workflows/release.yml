@@ -1,0 +1,238 @@
+# Hoarder releases. Runs only when a version tag is pushed:
+#
+#   v1.0.0             a release: crates.io, a GitHub release with binaries,
+#                      checksums and the rendered AUR packages
+#   v1.0.0-dryrun.1    a dry run of the same version: everything is built and
+#                      checked, `cargo publish --dry-run`, nothing published;
+#                      the outputs are left as workflow artifacts
+#
+# The tag's version must match `version` in Cargo.toml. The AUR is never
+# pushed from here: docs/releasing.md has the steps.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      dry_run: ${{ steps.plan.outputs.dry_run }}
+      prerelease: ${{ steps.plan.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: plan
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)-dryrun(\.[0-9]+)?$ ]]; then
+            version=${BASH_REMATCH[1]} dry_run=true prerelease=false
+          elif [[ "$TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?)$ ]]; then
+            version=${BASH_REMATCH[1]} dry_run=false
+            prerelease=$([[ "$version" == *-* ]] && echo true || echo false)
+          else
+            echo "::error::$TAG is not vX.Y.Z, vX.Y.Z-(alpha|beta|rc).N or vX.Y.Z-dryrun[.N]"
+            exit 1
+          fi
+          cargo_version=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[] | select(.name == "hoarder") | .version')
+          if [ "$cargo_version" != "$version" ]; then
+            echo "::error::$TAG is version $version, but Cargo.toml says $cargo_version"
+            exit 1
+          fi
+          {
+            echo "version=$version"
+            echo "dry_run=$dry_run"
+            echo "prerelease=$prerelease"
+          } >> "$GITHUB_OUTPUT"
+          echo "Releasing $version (dry run: $dry_run, prerelease: $prerelease)" >> "$GITHUB_STEP_SUMMARY"
+
+  notes:
+    name: release notes (git-cliff)
+    needs: plan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          # A release tag is the current one; a dry-run tag is not a release
+          # tag (cliff.toml's tag_pattern), so its commits are "unreleased".
+          args: >-
+            --strip header
+            ${{ needs.plan.outputs.dry_run == 'true'
+                && format('--unreleased --tag v{0}', needs.plan.outputs.version)
+                || '--current' }}
+        env:
+          OUTPUT: RELEASE_NOTES.md
+      - run: cat RELEASE_NOTES.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: notes
+          path: RELEASE_NOTES.md
+
+  source:
+    name: source tarball
+    needs: plan
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      # What the `hoarder` AUR package builds from: a stable checksum, unlike
+      # GitHub's on-the-fly archives.
+      - run: |
+          mkdir -p out
+          git archive --format=tar --prefix="hoarder-$VERSION/" HEAD | gzip -9n > "out/hoarder-$VERSION.tar.gz"
+          (cd out && sha256sum "hoarder-$VERSION.tar.gz" > "hoarder-$VERSION.tar.gz.sha256")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source
+          path: out/
+
+  build:
+    name: binary (${{ matrix.target }})
+    needs: plan
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install xkbcommon (smithay-client-toolkit links it)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libxkbcommon-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-dist
+      - run: cargo build --profile dist --locked -p hoarder
+      - name: Package
+        run: packaging/dist.sh target/dist/hoarder "$VERSION" "${{ matrix.target }}" out
+      - name: Size (PLAN.md section 12 budgets the stripped binary at 8 MB)
+        run: |
+          size=$(stat -c %s target/dist/hoarder)
+          echo "${{ matrix.target }}: $((size / 1024)) KiB" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$size" -gt 8388608 ]; then
+            echo "::warning::the ${{ matrix.target }} binary is $((size / 1024)) KiB, over the 8 MB budget"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: out/
+
+  # Render the AUR packages for this version and build them in a clean Arch
+  # container from the artifacts above, as an unprivileged user, then namcap.
+  aur:
+    name: AUR packages (build and namcap)
+    needs: [plan, source, build]
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - name: Install makepkg, namcap and the packages' dependencies
+        run: pacman -Syu --noconfirm --needed base-devel namcap git rust libxkbcommon
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Render
+        run: |
+          useradd --create-home builder
+          chown -R builder: "$GITHUB_WORKSPACE"
+          runuser -u builder -- packaging/aur/render.sh "$VERSION" artifacts aur
+      - name: Build and lint
+        run: >-
+          runuser -u builder -- packaging/aur/check.sh aur artifacts packages
+          hoarder hoarder-bin hoarder-wl-compat
+      - name: Bundle the AUR repositories
+        run: tar -C aur -czf "hoarder-$VERSION-aur.tar.gz" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aur
+          path: hoarder-${{ needs.plan.outputs.version }}-aur.tar.gz
+
+  # Every crate but hoarder-e2e (publish = false), in dependency order.
+  crates-dry-run:
+    name: crates.io (dry run)
+    needs: plan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install xkbcommon (smithay-client-toolkit links it)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libxkbcommon-dev
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo publish --workspace --locked --dry-run
+
+  crates:
+    name: crates.io
+    needs: [plan, notes, aur, crates-dry-run]
+    if: needs.plan.outputs.dry_run == 'false'
+    runs-on: ubuntu-latest
+    # Holds the CARGO_REGISTRY_TOKEN secret; give it required reviewers for a
+    # last look before anything irreversible happens.
+    environment: release
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install xkbcommon (smithay-client-toolkit links it)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libxkbcommon-dev
+      - uses: Swatinem/rust-cache@v2
+      - env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --workspace --locked
+
+  github:
+    name: GitHub release
+    needs: [plan, crates]
+    if: needs.plan.outputs.dry_run == 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      TAG: ${{ github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Checksums
+        run: |
+          cd artifacts
+          sha256sum hoarder-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS >> "$GITHUB_STEP_SUMMARY"
+      - name: Create the release
+        run: >-
+          gh release create "$TAG"
+          --repo "$GITHUB_REPOSITORY"
+          --title "Hoarder $VERSION"
+          --notes-file artifacts/RELEASE_NOTES.md
+          --verify-tag
+          ${{ needs.plan.outputs.prerelease == 'true' && '--prerelease' || '' }}
+          artifacts/hoarder-*.tar.gz artifacts/hoarder-*.sha256 artifacts/SHA256SUMS

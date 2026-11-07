@@ -68,3 +68,11 @@ all = { level = "warn", priority = -1 }
 # rav1e (AVIF) is unusably slow unoptimised; keep debug builds and tests snappy.
 [profile.dev.package.rav1e]
 opt-level = 3
+
+# What releases and packages ship: the release build, linked whole and stripped
+# (PLAN.md section 12 budgets the stripped binary at under 8 MB).
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+strip = true

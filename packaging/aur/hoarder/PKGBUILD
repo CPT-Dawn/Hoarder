@@ -1,0 +1,49 @@
+# Maintainer: Swastik Patel <CPT-Dawn at users dot noreply dot github dot com>
+#
+# Source of truth: packaging/aur/ in https://github.com/CPT-Dawn/Hoarder.
+# The release workflow fills in pkgver and the checksums (packaging/aur/render.sh).
+
+pkgname=hoarder
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Pixel-exact screenshots and a clipboard that outlives the app that set it, for Wayland'
+arch=('x86_64' 'aarch64')
+url='https://github.com/CPT-Dawn/Hoarder'
+license=('MIT')
+depends=('gcc-libs' 'glibc' 'libxkbcommon')
+makedepends=('cargo')
+optdepends=('xdg-utils: open a Capture from its notification'
+            'hoarder-wl-compat: wl-copy and wl-paste served by Hoarder')
+# The dist profile already strips the binary.
+options=('!debug')
+source=("$url/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --profile dist -p hoarder
+  ./target/dist/hoarder dist dist --bindir /usr/bin
+}
+
+# No check(): the test suite drives a headless Sway session, which a clean
+# chroot does not have. CI runs it on every change.
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 target/dist/hoarder -t "$pkgdir/usr/bin"
+  install -Dm644 dist/systemd/hoarder.service -t "$pkgdir/usr/lib/systemd/user"
+  install -Dm644 dist/man/man1/*.1 -t "$pkgdir/usr/share/man/man1"
+  install -Dm644 dist/completions/hoarder.bash "$pkgdir/usr/share/bash-completion/completions/hoarder"
+  install -Dm644 dist/completions/_hoarder -t "$pkgdir/usr/share/zsh/site-functions"
+  install -Dm644 dist/completions/hoarder.fish -t "$pkgdir/usr/share/fish/vendor_completions.d"
+  install -Dm644 dist/config.toml README.md -t "$pkgdir/usr/share/doc/$pkgname"
+  install -Dm644 LICENSE -t "$pkgdir/usr/share/licenses/$pkgname"
+}
