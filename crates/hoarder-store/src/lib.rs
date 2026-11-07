@@ -23,7 +23,8 @@ pub use clip::Kind;
 pub const INLINE_MAX: usize = 256 * 1024;
 
 /// The schema migrations, in order; `user_version` counts those applied.
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE clips(
     id INTEGER PRIMARY KEY,
     created_at INTEGER NOT NULL,
@@ -62,7 +63,17 @@ CREATE TRIGGER clips_fts_update AFTER UPDATE OF preview ON clips BEGIN
     INSERT INTO clips_fts(clips_fts, rowid, preview) VALUES ('delete', old.id, old.preview);
     INSERT INTO clips_fts(rowid, preview) VALUES (new.id, new.preview);
 END;
-"#];
+"#,
+    r#"
+CREATE VIRTUAL TABLE clips_text USING fts5(
+    body, content='', contentless_delete=1, tokenize='trigram'
+);
+INSERT INTO clips_text(rowid, body) SELECT id, preview FROM clips;
+CREATE TRIGGER clips_text_delete AFTER DELETE ON clips BEGIN
+    DELETE FROM clips_text WHERE rowid = old.id;
+END;
+"#,
+];
 
 /// Why the Store failed.
 #[derive(Debug)]
@@ -164,7 +175,7 @@ impl Store {
         source_app: Option<&str>,
         now: i64,
     ) -> Result<Recorded> {
-        let (kind, preview, hash) = clip::describe(reprs);
+        let (kind, preview, hash, text) = clip::describe_with_text(reprs);
         let tx = self.db.transaction()?;
         let now = next_time(&tx, now)?;
         let existing: Option<i64> = tx
@@ -194,6 +205,10 @@ impl Store {
             ],
         )?;
         let id = tx.last_insert_rowid();
+        tx.execute(
+            "INSERT INTO clips_text(rowid, body) VALUES (?1, ?2)",
+            params![id, text],
+        )?;
         for (ord, (mime, data)) in reprs.iter().enumerate() {
             let (inline, blob) = if data.len() <= INLINE_MAX {
                 (Some(*data), None)
@@ -218,6 +233,31 @@ impl Store {
             .prepare_cached("SELECT id FROM clips ORDER BY last_used_at DESC, id DESC LIMIT ?1")?;
         let ids = stmt
             .query_map([limit.min(i64::MAX as usize) as i64], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<i64>>>()?;
+        ids.into_iter()
+            .filter_map(|id| self.clip(id).transpose())
+            .collect()
+    }
+
+    /// Up to `limit` Clips whose text contains `query` (case-insensitive),
+    /// most recently used first. Text Clips are searched through their
+    /// first 64 KB, not just their preview; other Clips through their
+    /// preview. Queries under three characters match nothing (the trigram
+    /// index cannot answer them; the Picker's fuzzy match covers those).
+    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<Clip>> {
+        if query.chars().count() < 3 {
+            return Ok(Vec::new());
+        }
+        let phrase = format!("\"{}\"", query.replace('"', "\"\""));
+        let mut stmt = self.db.prepare_cached(
+            "SELECT c.id FROM clips_text JOIN clips c ON c.id = clips_text.rowid
+             WHERE clips_text MATCH ?1
+             ORDER BY c.last_used_at DESC, c.id DESC LIMIT ?2",
+        )?;
+        let ids = stmt
+            .query_map(params![phrase, limit.min(i64::MAX as usize) as i64], |r| {
+                r.get(0)
+            })?
             .collect::<rusqlite::Result<Vec<i64>>>()?;
         ids.into_iter()
             .filter_map(|id| self.clip(id).transpose())

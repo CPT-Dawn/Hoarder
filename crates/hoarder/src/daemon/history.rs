@@ -28,6 +28,12 @@ pub(super) enum Job {
         id: u64,
         limit: Option<u32>,
     },
+    Search {
+        client: u64,
+        id: u64,
+        query: String,
+        limit: Option<u32>,
+    },
     Get {
         client: u64,
         id: u64,
@@ -151,6 +157,19 @@ fn worker(mut store: Store, jobs: mpsc::Receiver<Job>, done: calloop::channel::S
                 let limit = limit.map_or(usize::MAX, |l| l as usize);
                 let result = store
                     .list(limit)
+                    .map(|clips| to_value(&clips.iter().map(summary).collect::<Vec<_>>()))
+                    .map_err(failed);
+                reply(client, id, result)
+            }
+            Job::Search {
+                client,
+                id,
+                query,
+                limit,
+            } => {
+                let limit = limit.map_or(usize::MAX, |l| l as usize);
+                let result = store
+                    .search(&query, limit)
                     .map(|clips| to_value(&clips.iter().map(summary).collect::<Vec<_>>()))
                     .map_err(failed);
                 reply(client, id, result)

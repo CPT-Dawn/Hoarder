@@ -62,6 +62,16 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<u32>,
     },
+    /// Clips whose text contains `query` (case-insensitive; text Clips
+    /// through their first 64 KB, others through their preview), most
+    /// recently used first; answered with [`ClipSummary`]s. Queries under
+    /// three characters match nothing.
+    Search {
+        query: String,
+        /// At most this many Clips (all of them if absent).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<u32>,
+    },
     /// Stream one representation of a Clip into the pipe passed with the
     /// request (`SCM_RIGHTS`); answered with [`Got`] before the data
     /// arrives, and the pipe closes at its end.
@@ -359,6 +369,18 @@ impl Connection {
         limit: Option<u32>,
     ) -> std::io::Result<Result<Vec<ClipSummary>, Failure>> {
         self.typed(Op::List { limit })
+    }
+
+    /// [`Op::Search`], decoded.
+    pub fn search(
+        &mut self,
+        query: &str,
+        limit: Option<u32>,
+    ) -> std::io::Result<Result<Vec<ClipSummary>, Failure>> {
+        self.typed(Op::Search {
+            query: query.to_owned(),
+            limit,
+        })
     }
 
     /// [`Op::Restore`], decoded.
