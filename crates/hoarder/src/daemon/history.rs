@@ -21,9 +21,9 @@ use hoarder_store::retention::Limits;
 use hoarder_store::{Clip, Store};
 
 use super::keyring;
-use super::{Daemon, Representation};
+use super::{Daemon, ReplyTo, Representation};
 
-/// Work for the History thread. `client` and `id` say whom to answer.
+/// Work for the History thread. `to` says whom to answer.
 #[derive(Debug)]
 pub(super) enum Job {
     /// Record a Clip, then apply retention.
@@ -37,55 +37,47 @@ pub(super) enum Job {
         limits: Limits,
     },
     List {
-        client: u64,
-        id: u64,
+        to: ReplyTo,
         limit: Option<u32>,
         /// Concealed Clips to list among History's, with when each was
         /// copied (ms since the Unix epoch), newest first.
         extra: Vec<(i64, ClipSummary)>,
     },
     Search {
-        client: u64,
-        id: u64,
+        to: ReplyTo,
         query: String,
         limit: Option<u32>,
     },
     Get {
-        client: u64,
-        id: u64,
+        to: ReplyTo,
         clip: i64,
         mime: Option<String>,
         pipe: OwnedFd,
     },
     Thumb {
-        client: u64,
-        id: u64,
+        to: ReplyTo,
         clip: i64,
         pipe: OwnedFd,
     },
     Restore {
-        client: u64,
-        id: u64,
+        to: ReplyTo,
         clip: i64,
         /// Plain text only.
         plain: bool,
     },
     Delete {
-        client: u64,
-        id: u64,
+        to: ReplyTo,
         clip: i64,
     },
     /// `history.encrypt` changed: migrate the History to match.
     Encrypt(bool),
     Pin {
-        client: u64,
-        id: u64,
+        to: ReplyTo,
         clip: i64,
         pinned: bool,
     },
     Clear {
-        client: u64,
-        id: u64,
+        to: ReplyTo,
         pinned: bool,
     },
 }
@@ -107,14 +99,12 @@ pub(super) fn limits(history: &hoarder_config::History) -> Limits {
 #[derive(Debug)]
 pub(super) enum Done {
     Reply {
-        client: u64,
-        id: u64,
+        to: ReplyTo,
         result: Result<Value, Failure>,
     },
     /// A Clip to make the Selection.
     Restore {
-        client: u64,
-        id: u64,
+        to: ReplyTo,
         clip: ClipSummary,
         reprs: Vec<Representation>,
     },
@@ -278,7 +268,7 @@ fn worker(mut vault: Vault, jobs: mpsc::Receiver<Job>, done: calloop::channel::S
     // Open up front, so any keyring trouble is logged at start.
     let _ = vault.store();
     for job in jobs {
-        let reply = |client, id, result| Some(Done::Reply { client, id, result });
+        let reply = |to, result| Some(Done::Reply { to, result });
         // What subscribers hear of this job, sent before its answer.
         let mut events = Vec::new();
         let out = match job {
@@ -309,28 +299,16 @@ fn worker(mut vault: Vault, jobs: mpsc::Receiver<Job>, done: calloop::channel::S
                 }
                 None
             }
-            Job::Thumb {
-                client,
-                id,
-                clip,
-                pipe,
-            } => reply(
-                client,
-                id,
-                vault.store().and_then(|store| thumb(store, clip, pipe)),
-            ),
+            Job::Thumb { to, clip, pipe } => {
+                reply(to, vault.store().and_then(|store| thumb(store, clip, pipe)))
+            }
             Job::Retain { limits } => {
                 if let Ok(store) = vault.store() {
                     events.extend(retain(store, &limits));
                 }
                 None
             }
-            Job::List {
-                client,
-                id,
-                limit,
-                extra,
-            } => {
+            Job::List { to, limit, extra } => {
                 let limit = limit.map_or(usize::MAX, |l| l as usize);
                 let result = vault.store().and_then(|store| {
                     store
@@ -338,14 +316,9 @@ fn worker(mut vault: Vault, jobs: mpsc::Receiver<Job>, done: calloop::channel::S
                         .map(|clips| to_value(&merge(&clips, extra, limit)))
                         .map_err(failed)
                 });
-                reply(client, id, result)
+                reply(to, result)
             }
-            Job::Search {
-                client,
-                id,
-                query,
-                limit,
-            } => {
+            Job::Search { to, query, limit } => {
                 let limit = limit.map_or(usize::MAX, |l| l as usize);
                 let result = vault.store().and_then(|store| {
                     store
@@ -353,34 +326,24 @@ fn worker(mut vault: Vault, jobs: mpsc::Receiver<Job>, done: calloop::channel::S
                         .map(|clips| to_value(&clips.iter().map(summary).collect::<Vec<_>>()))
                         .map_err(failed)
                 });
-                reply(client, id, result)
+                reply(to, result)
             }
             Job::Get {
-                client,
-                id,
+                to,
                 clip,
                 mime,
                 pipe,
             } => reply(
-                client,
-                id,
+                to,
                 vault.store().and_then(|store| get(store, clip, mime, pipe)),
             ),
-            Job::Restore {
-                client,
-                id,
-                clip,
-                plain,
-            } => match vault.store().and_then(|store| restore(store, clip, plain)) {
-                Ok((clip, reprs)) => Some(Done::Restore {
-                    client,
-                    id,
-                    clip,
-                    reprs,
-                }),
-                Err(f) => reply(client, id, Err(f)),
-            },
-            Job::Delete { client, id, clip } => {
+            Job::Restore { to, clip, plain } => {
+                match vault.store().and_then(|store| restore(store, clip, plain)) {
+                    Ok((clip, reprs)) => Some(Done::Restore { to, clip, reprs }),
+                    Err(f) => reply(to, Err(f)),
+                }
+            }
+            Job::Delete { to, clip } => {
                 let result = vault.store().and_then(|store| match store.delete(clip) {
                     Ok(true) => {
                         events.push(Event::ClipRemoved { clip });
@@ -389,14 +352,9 @@ fn worker(mut vault: Vault, jobs: mpsc::Receiver<Job>, done: calloop::channel::S
                     Ok(false) => Err(not_found(clip)),
                     Err(e) => Err(failed(e)),
                 });
-                reply(client, id, result)
+                reply(to, result)
             }
-            Job::Pin {
-                client,
-                id,
-                clip,
-                pinned,
-            } => {
+            Job::Pin { to, clip, pinned } => {
                 let result = vault
                     .store()
                     .and_then(|store| match store.pin(clip, pinned) {
@@ -408,16 +366,16 @@ fn worker(mut vault: Vault, jobs: mpsc::Receiver<Job>, done: calloop::channel::S
                         Ok(false) => Err(not_found(clip)),
                         Err(e) => Err(failed(e)),
                     });
-                reply(client, id, result)
+                reply(to, result)
             }
-            Job::Clear { client, id, pinned } => {
+            Job::Clear { to, pinned } => {
                 let result = vault.store().and_then(|store| clear(store, pinned));
                 let result = result.map(|gone| {
                     let deleted = gone.len() as u64;
                     events.extend(gone.into_iter().map(|clip| Event::ClipRemoved { clip }));
                     to_value(&Cleared { deleted })
                 });
-                reply(client, id, result)
+                reply(to, result)
             }
         };
         let changed = (!events.is_empty()).then_some(Done::Changed(events));

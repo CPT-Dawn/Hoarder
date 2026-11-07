@@ -268,19 +268,19 @@ impl super::Daemon {
 
     /// `restore` of a Concealed Clip: serve it as the clipboard (only its
     /// plain text if `plain`). It stays Concealed, so it still expires.
-    pub(super) fn restore_concealed(&mut self, client: u64, id: u64, clip: i64, plain: bool) {
+    pub(super) fn restore_concealed(&mut self, to: super::ReplyTo, clip: i64, plain: bool) {
         let now = jiff::Timestamp::now().as_millisecond();
         let listed =
             vault_id(clip).and_then(|v| self.vault.list(now).into_iter().find(|c| c.id == v));
         let Some(listed) = listed else {
-            return self.reply(client, id, Err(not_found_ipc(clip)));
+            return self.reply(to, Err(not_found_ipc(clip)));
         };
         let mut types = listed.types.clone();
         if plain {
             types.retain(|m| super::is_plain_text(m));
             if types.is_empty() {
                 let failure = super::history::no_plain_text(clip);
-                return self.reply(client, id, Err(failure));
+                return self.reply(to, Err(failure));
             }
         }
         let which = Selection::Clipboard;
@@ -294,7 +294,7 @@ impl super::Daemon {
         let slot = &mut self.slots[which as usize];
         slot.hold(&mut self.vault, super::Previous::Forget, held);
         self.watcher.serve(which, &types);
-        self.reply_when_synced(client, id, to_value(&summary(listed)));
+        self.reply_when_synced(to, to_value(&summary(listed)));
     }
 
     /// `delete` of a Concealed Clip: forget it now, as if it had expired.

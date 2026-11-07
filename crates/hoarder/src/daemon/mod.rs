@@ -111,7 +111,7 @@ pub fn run(overrides: &[(String, String)]) -> Result<(), Fail> {
         config_watch,
         slots: Default::default(),
         current: Default::default(),
-        clients: Default::default(),
+        front_ends: Default::default(),
         syncs: Vec::new(),
         next_token: 0,
         pause: None,
@@ -175,6 +175,15 @@ fn wayland_error(e: ClipboardError) -> Fail {
         ClipboardError::Failed(_) | ClipboardError::Io(_) => Exit::Io,
     };
     (code, e.to_string())
+}
+
+/// Whom to answer: a Front end's connection and its request's id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReplyTo {
+    /// The connection, numbered as the Daemon accepted it.
+    front_end: u64,
+    /// The request's `id`.
+    id: u64,
 }
 
 /// One representation the Daemon holds: a MIME type and its bytes.
@@ -327,10 +336,10 @@ pub(crate) struct Daemon {
     classifier: classify::Classifier,
     /// Concealed Clips, never written anywhere.
     vault: concealed::Vault,
-    clients: socket::Clients,
-    /// `(sync token, client, request id, answer)` of requests answered once
-    /// the compositor has caught up.
-    syncs: Vec<(u64, u64, u64, hoarder_ipc::Value)>,
+    front_ends: socket::FrontEnds,
+    /// `(sync token, whom to answer, answer)` of requests answered once the
+    /// compositor has caught up.
+    syncs: Vec<(u64, ReplyTo, hoarder_ipc::Value)>,
     next_token: u64,
     /// Set while Paused: nothing is recorded.
     pause: Option<pause::Pause>,
@@ -525,7 +534,7 @@ impl Daemon {
     /// asks. `sensitive` makes it Secret: served, never recorded nor
     /// restored. Otherwise the Classifier judges it like any copy: Concealed
     /// text lives in the vault and expires, Normal content is recorded.
-    fn offer(&mut self, client: u64, id: u64, offer: OfferRequest) {
+    fn offer(&mut self, to: ReplyTo, offer: OfferRequest) {
         let OfferRequest {
             which,
             types,
@@ -581,7 +590,7 @@ impl Daemon {
         }
         let served = self.held_types(which);
         self.watcher.serve(which, &served);
-        self.reply_when_synced(client, id, hoarder_ipc::Value::Null);
+        self.reply_when_synced(to, hoarder_ipc::Value::Null);
     }
 
     /// `paste`: have the source of `which` write `mime` into `pipe`.
@@ -805,39 +814,34 @@ impl Daemon {
 
     /// `hoarder clear`: forget the clipboard and empty it, so nothing is
     /// restored. The reply waits until the compositor has applied it.
-    fn clear(&mut self, client: u64, id: u64, which: Selection) {
+    fn clear(&mut self, to: ReplyTo, which: Selection) {
         self.stop_reading(which);
         self.slots[which as usize].release(&mut self.vault);
         self.watcher.clear(which);
-        self.reply_when_synced(client, id, hoarder_ipc::Value::Null);
+        self.reply_when_synced(to, hoarder_ipc::Value::Null);
     }
 
-    /// Answer `id` with `answer` once the compositor has applied what was
+    /// Answer `to` with `answer` once the compositor has applied what was
     /// just asked of it.
-    fn reply_when_synced(&mut self, client: u64, id: u64, answer: hoarder_ipc::Value) {
+    fn reply_when_synced(&mut self, to: ReplyTo, answer: hoarder_ipc::Value) {
         let token = self.next_token;
         self.next_token += 1;
         self.watcher.sync(token);
-        self.syncs.push((token, client, id, answer));
+        self.syncs.push((token, to, answer));
     }
 
     fn synced(&mut self, token: u64) {
         if let Some(i) = self.syncs.iter().position(|(t, ..)| *t == token) {
-            let (_, client, id, answer) = self.syncs.remove(i);
-            self.reply(client, id, Ok(answer));
+            let (_, to, answer) = self.syncs.remove(i);
+            self.reply(to, Ok(answer));
         }
     }
 
     /// The History thread has finished a job.
     fn history_done(&mut self, done: history::Done) {
         match done {
-            history::Done::Reply { client, id, result } => self.reply(client, id, result),
-            history::Done::Restore {
-                client,
-                id,
-                clip,
-                reprs,
-            } => self.restore(client, id, clip, reprs),
+            history::Done::Reply { to, result } => self.reply(to, result),
+            history::Done::Restore { to, clip, reprs } => self.restore(to, clip, reprs),
             history::Done::Changed(events) => {
                 for event in &events {
                     self.broadcast(event);
@@ -847,13 +851,7 @@ impl Daemon {
     }
 
     /// Restore: own the clipboard with a Clip's representations.
-    fn restore(
-        &mut self,
-        client: u64,
-        id: u64,
-        clip: hoarder_ipc::ClipSummary,
-        reprs: Vec<Representation>,
-    ) {
+    fn restore(&mut self, to: ReplyTo, clip: hoarder_ipc::ClipSummary, reprs: Vec<Representation>) {
         let which = Selection::Clipboard;
         self.stop_reading(which);
         let types: Vec<String> = reprs.iter().map(|(m, _)| m.clone()).collect();
@@ -866,7 +864,7 @@ impl Daemon {
         self.watcher.serve(which, &types);
         let answer = history::to_value(&clip);
         self.broadcast(&hoarder_ipc::Event::ClipAdded { clip });
-        self.reply_when_synced(client, id, answer);
+        self.reply_when_synced(to, answer);
     }
 
     fn status(&self) -> Status {
