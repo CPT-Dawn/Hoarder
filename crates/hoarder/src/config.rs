@@ -168,7 +168,9 @@ fn show(config: &Config, key: Option<&str>) -> Result<String, (Exit, String)> {
 }
 
 /// `get --watch`: print the value again each time an edit changes it. A file
-/// that becomes invalid is reported and the last good value stands.
+/// that becomes invalid is reported and the last good value stands; so does
+/// an empty one, which is what an editor that truncates and then writes in
+/// place leaves for a moment. Deleting the file reverts to the defaults.
 fn watch_value(
     path: &Path,
     key: Option<&str>,
@@ -183,7 +185,16 @@ fn watch_value(
     std::io::stdout().flush().map_err(io)?;
     loop {
         watcher.wait().map_err(io)?;
-        let text = read(path).map_err(|e| (Exit::Io, e))?;
+        // A file that changed while it was read may be half written: let it
+        // settle and read it again.
+        let text = loop {
+            let text = read_settled(path).map_err(|e| (Exit::Io, e))?;
+            if !watcher.changed().map_err(io)? {
+                break text;
+            }
+            watcher.settle().map_err(io)?;
+        };
+        let Some(text) = text else { continue };
         let config = match hoarder_config::parse(&text) {
             Ok(_) => match hoarder_config::with_overrides(&text, overrides) {
                 Ok(config) => config,
@@ -204,4 +215,15 @@ fn watch_value(
             last = now;
         }
     }
+}
+
+/// The text live reload should apply: `""` (the defaults) if the file is
+/// gone, `None` if it is empty, which is far more likely an in-place save
+/// caught halfway than a wish for the defaults.
+fn read_settled(path: &Path) -> Result<Option<String>, String> {
+    if !path.exists() {
+        return Ok(Some(String::new()));
+    }
+    let text = read(path)?;
+    Ok((!text.trim().is_empty()).then_some(text))
 }

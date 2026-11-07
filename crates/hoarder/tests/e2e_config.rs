@@ -235,6 +235,10 @@ impl Drop for Watching {
     }
 }
 
+/// Long enough for a watching process to have woken, settled and re-read the
+/// file, so the half-written state is what it sees.
+const WATCH_SETTLED: Duration = Duration::from_millis(500);
+
 #[test]
 fn a_running_process_picks_up_config_changes_without_restart() {
     let session = Session::start_default().unwrap();
@@ -258,6 +262,13 @@ fn a_running_process_picks_up_config_changes_without_restart() {
     std::fs::write(&tmp, "[screenshot]\nformat = \"avif\"\n").unwrap();
     std::fs::rename(&tmp, &path).unwrap();
     assert_eq!(watching.next(), "avif");
+
+    // An editor that truncates the file and then writes it, caught between
+    // the two: the empty file must not revert the value to its default.
+    drop(std::fs::File::create(&path).unwrap());
+    std::thread::sleep(WATCH_SETTLED);
+    std::fs::write(&path, "[screenshot]\nformat = \"qoi\"\n").unwrap();
+    assert_eq!(watching.next(), "qoi");
 
     // A broken save is ignored (the last good value stands); the fix is seen.
     std::fs::write(&path, "[screenshot]\nformat = \"gif\"\n").unwrap();
