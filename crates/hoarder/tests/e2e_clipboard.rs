@@ -377,3 +377,26 @@ fn copy_foreground_agrees_with_wl_copy() {
     foreground_serves_until_replaced(&session, Tool::WlClipboard);
     foreground_serves_until_replaced(&session, Tool::Hoarder);
 }
+
+#[test]
+fn copy_and_paste_exit_3_without_data_control() {
+    let session = Session::start_default().unwrap();
+    for (tool, args) in [
+        ("copy", &["x"][..]),
+        ("paste", &[][..]),
+        ("copy", &["-f", "x"]),
+    ] {
+        let mut cmd = session.command(HOARDER);
+        cmd.arg(tool)
+            .args(args)
+            .env("HOARDER_HIDE_GLOBALS", "ext_data_control_manager_v1");
+        let out = run(&session, cmd, None);
+        assert_eq!(
+            out.status.code(),
+            Some(3),
+            "{tool} {args:?}: {}",
+            out.stderr
+        );
+        assert!(out.stderr.contains("ext-data-control"), "{}", out.stderr);
+    }
+}
