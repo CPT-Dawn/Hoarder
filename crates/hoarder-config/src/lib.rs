@@ -8,6 +8,7 @@
 //! - [`set`] and [`reset`] edit the file's text without losing comments.
 //! - [`Watcher`] tells when the file changed, for live reload.
 
+mod atomic;
 mod colour;
 mod edit;
 mod schema;
@@ -18,6 +19,7 @@ mod watch;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+pub use atomic::write_atomic;
 pub use colour::{BadColour, Colour};
 pub use edit::{EditError, get, reset, set};
 pub use schema::*;

@@ -50,13 +50,7 @@ impl State {
 
     /// Write [`state_path`] (atomically, so a concurrent run never reads half a file).
     pub fn save(&self) -> std::io::Result<()> {
-        let path = state_path();
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let tmp = path.with_extension(format!("toml.{}.tmp", std::process::id()));
-        std::fs::write(&tmp, self.doc.to_string())?;
-        std::fs::rename(&tmp, &path)
+        crate::write_atomic(&state_path(), self.doc.to_string())
     }
 
     /// The Region of the last Region Capture.
