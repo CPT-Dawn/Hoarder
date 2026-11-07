@@ -170,9 +170,17 @@ impl picker::History for Daemon {
                         rgba: rgba.into_raw(),
                     }
                 }),
-            Kind::Files => find(&|m| m == "text/uri-list")
-                .and_then(|m| read(m, MAX_TEXT))
-                .map(|bytes| Detail::Files(file_paths(&String::from_utf8_lossy(&bytes)))),
+            Kind::Files => find(&|m| m == "text/uri-list" || m == GNOME_FILES)
+                .and_then(|m| {
+                    // GNOME's list starts with its action, `copy` or `cut`.
+                    let skip = usize::from(m == GNOME_FILES);
+                    read(m, MAX_TEXT).map(|bytes| (skip, bytes))
+                })
+                .map(|(skip, bytes)| {
+                    let list = String::from_utf8_lossy(&bytes);
+                    let list: Vec<&str> = list.lines().skip(skip).collect();
+                    Detail::Files(file_paths(&list.join("\n")))
+                }),
             Kind::Text => find(&|m| m.starts_with("text/plain") || m == "UTF8_STRING")
                 .or_else(|| find(&|m| m.starts_with("text/")))
                 .and_then(|m| read(m, MAX_TEXT))
@@ -196,6 +204,9 @@ impl picker::History for Daemon {
         }
     }
 }
+
+/// What GNOME's file managers copy files as, besides `text/uri-list`.
+const GNOME_FILES: &str = "x-special/gnome-copied-files";
 
 /// The paths (or URIs, if not local files) of a `text/uri-list`.
 fn file_paths(list: &str) -> Vec<String> {
