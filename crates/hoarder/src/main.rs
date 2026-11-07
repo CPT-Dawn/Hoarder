@@ -142,6 +142,10 @@ impl From<Exit> for ExitCode {
 }
 
 fn main() -> ExitCode {
+    // The Compat shims: `wl-copy` and `wl-paste` symlinks to this binary.
+    if let Some((name, result)) = clipboard::run_as_shim() {
+        return report(name, result);
+    }
     let mut cli = Cli::parse();
     let result = match cli.command {
         Some(Command::Shot {
@@ -190,10 +194,15 @@ fn main() -> ExitCode {
         Some(Command::Setup { wm, apply, yes }) => setup::run(wm, apply, yes),
         None => doctor::first_run(),
     };
+    report("hoarder", result)
+}
+
+/// The exit code for `result`, with any complaint on stderr as `name: …`.
+fn report(name: &str, result: Result<(), (Exit, String)>) -> ExitCode {
     match result {
         Ok(()) => Exit::Success.into(),
         Err((code, message)) => {
-            eprintln!("hoarder: {message}");
+            eprintln!("{name}: {message}");
             code.into()
         }
     }

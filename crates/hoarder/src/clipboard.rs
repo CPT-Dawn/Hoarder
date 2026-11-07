@@ -6,7 +6,7 @@ use std::io::{BufRead as _, Read as _, Write as _};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 
-use clap::Args;
+use clap::{Args, Parser};
 use hoarder_wayland::clipboard::{Clipboard, ClipboardError, Representation, Selection, Serve};
 
 use crate::Exit;
@@ -79,6 +79,42 @@ pub struct PasteArgs {
     /// Use the seat with this name.
     #[arg(short, long, value_name = "NAME")]
     seat: Option<String>,
+}
+
+/// `wl-copy`, as the Compat shim: `hoarder copy` under wl-clipboard's name.
+#[derive(Debug, Parser)]
+#[command(
+    name = "wl-copy",
+    version,
+    about = "Copy stdin or text to the Wayland clipboard"
+)]
+struct WlCopy {
+    #[command(flatten)]
+    args: CopyArgs,
+}
+
+/// `wl-paste`, as the Compat shim: `hoarder paste` under wl-clipboard's name.
+#[derive(Debug, Parser)]
+#[command(
+    name = "wl-paste",
+    version,
+    about = "Paste the Wayland clipboard to stdout"
+)]
+struct WlPaste {
+    #[command(flatten)]
+    args: PasteArgs,
+}
+
+/// If this binary was started as `wl-copy` or `wl-paste` (argv[0], as the
+/// `hoarder-wl-compat` symlinks do), run as that tool: its name and outcome.
+pub fn run_as_shim() -> Option<(&'static str, Result<(), (Exit, String)>)> {
+    let argv0 = std::env::args_os().next()?;
+    let name = std::path::Path::new(&argv0).file_name()?.to_str()?;
+    match name {
+        "wl-copy" => Some(("wl-copy", copy(WlCopy::parse().args))),
+        "wl-paste" => Some(("wl-paste", paste(WlPaste::parse().args))),
+        _ => None,
+    }
 }
 
 /// The hidden serving child: stdin holds the bytes, offered as each `--type`.
