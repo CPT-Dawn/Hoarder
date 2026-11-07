@@ -251,7 +251,7 @@ impl Client {
     /// the default grey (`#808080`), so windows can be told apart on screen.
     pub fn open_window_coloured(&self, app_id: &str, colour: Rgb8) -> Result<()> {
         let app_id = app_id.to_owned();
-        self.call(move |w| w.open_window(&app_id, colour))
+        self.call(move |w| w.open_window(&app_id, colour).map(drop))
     }
 
     /// All input events this client's windows received since the last call.
@@ -300,7 +300,8 @@ impl Worker {
         self.roundtrip()
     }
 
-    fn open_window(&mut self, app_id: &str, colour: Rgb8) -> Result<()> {
+    /// Open a probe window and return its surface's id.
+    pub(super) fn open_window(&mut self, app_id: &str, colour: Rgb8) -> Result<ObjectId> {
         let compositor: wayland_client::protocol::wl_compositor::WlCompositor = self.bind(4)?;
         let wm_base: XdgWmBase = self.bind(1)?;
         let viewporter: WpViewporter = self.bind(1)?;
@@ -344,7 +345,8 @@ impl Worker {
             _xdg_surface: xdg_surface,
             _toplevel: toplevel,
         });
-        self.roundtrip()
+        self.roundtrip()?;
+        Ok(surface.id())
     }
 }
 
@@ -417,19 +419,32 @@ impl Dispatch<WlKeyboard, ()> for State {
         _: &WlKeyboard,
         event: wl_keyboard::Event,
         _: &(),
-        _: &Connection,
+        conn: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        let fields = &mut state.fields;
         let e = match event {
-            wl_keyboard::Event::Enter { .. } => InputEvent::KeyboardEnter,
-            wl_keyboard::Event::Leave { .. } => InputEvent::KeyboardLeave,
-            wl_keyboard::Event::Key { key, state: s, .. } => InputEvent::Key {
-                key,
-                pressed: s == WEnum::Value(wl_keyboard::KeyState::Pressed),
-            },
-            wl_keyboard::Event::Modifiers { mods_depressed, .. } => InputEvent::Modifiers {
-                depressed: mods_depressed,
-            },
+            wl_keyboard::Event::Enter { surface, .. } => {
+                fields.keyboard_enter(surface.id());
+                InputEvent::KeyboardEnter
+            }
+            wl_keyboard::Event::Leave { .. } => {
+                fields.keyboard_leave();
+                InputEvent::KeyboardLeave
+            }
+            wl_keyboard::Event::Key { key, state: s, .. } => {
+                let pressed = s == WEnum::Value(wl_keyboard::KeyState::Pressed);
+                if pressed {
+                    fields.key_pressed(key, conn);
+                }
+                InputEvent::Key { key, pressed }
+            }
+            wl_keyboard::Event::Modifiers { mods_depressed, .. } => {
+                fields.modifiers(mods_depressed);
+                InputEvent::Modifiers {
+                    depressed: mods_depressed,
+                }
+            }
             _ => return,
         };
         state.input.events.push(e);

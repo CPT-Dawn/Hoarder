@@ -42,8 +42,10 @@ use wayland_protocols::ext::data_control::v1::client::{
     ext_data_control_source_v1::{self, ExtDataControlSourceV1},
 };
 
+mod field;
 mod input;
 
+pub use field::TextField;
 pub use input::{Input, InputEvent};
 
 use crate::frame::{FrameFormat, RawFrame};
@@ -270,6 +272,7 @@ pub(crate) struct State {
     /// Every MIME type anyone has pasted from this client, in order.
     pasted: Vec<String>,
     input: input::InputState,
+    fields: field::FieldState,
 }
 
 /// Progress of one screencopy.
@@ -297,6 +300,8 @@ pub(crate) struct Worker {
     seat: WlSeat,
     windows: Vec<input::Window>,
     devices: Option<input::Devices>,
+    /// The `wl_data_device` text fields paste through.
+    text_device: Option<wayland_client::protocol::wl_data_device::WlDataDevice>,
 }
 
 impl Worker {
@@ -329,6 +334,7 @@ impl Worker {
             seat,
             windows: Vec::new(),
             devices: None,
+            text_device: None,
         };
         // First roundtrip: output names, shm formats, seat capabilities.
         // Second: the compositor has seen our wl_pointer / wl_keyboard.
