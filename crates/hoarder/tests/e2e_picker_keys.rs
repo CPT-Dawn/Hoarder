@@ -662,3 +662,172 @@ fn a_concealed_clip_restores_and_deletes_like_any_other() {
     assert!(done.status.success(), "{}", done.stderr);
     assert_eq!(paste(&session, None), "later");
 }
+
+/// Where `colour` shows in `shot` within `area` (x0, y0, x1, y1): how many
+/// pixels, and their bounding box's size.
+fn find(shot: &Image, area: (u32, u32, u32, u32), colour: Rgb8) -> (usize, (u32, u32)) {
+    let (mut n, mut min, mut max) = (0, (u32::MAX, u32::MAX), (0, 0));
+    for y in area.1..area.3 {
+        for x in area.0..area.2 {
+            if shot.pixel(x, y) == colour {
+                n += 1;
+                min = (min.0.min(x), min.1.min(y));
+                max = (max.0.max(x), max.1.max(y));
+            }
+        }
+    }
+    let size = if n == 0 {
+        (0, 0)
+    } else {
+        (max.0 + 1 - min.0, max.1 + 1 - min.1)
+    };
+    (n, size)
+}
+
+#[test]
+fn the_preview_pane_shows_an_image_at_its_real_pixel_size() {
+    // Scale 2: a 1:1 image takes half the logical room a scaled one would.
+    let (session, _paint) = painted_on(OutputSpec::new(2560, 1440).scale(2.0));
+    let image = png(40, 30, [1, 254, 3]);
+    seed(
+        &session,
+        &[
+            Seed {
+                reprs: &[("image/png", &image)],
+                app: Some("org.gimp.GIMP"),
+                pinned: false,
+            },
+            Seed {
+                reprs: &text("newer text"),
+                app: None,
+                pinned: false,
+            },
+        ],
+    );
+    let _daemon = Daemon::start(&session);
+    let panel = (560, 240, 2000, 1200);
+
+    let picker = open_picker(&session);
+    let on_text = settled_shot(&session);
+    session.input().tap(keys::KEY_DOWN).unwrap();
+    let on_image = settled_shot(&session);
+    session.input().tap(keys::KEY_ESC).unwrap();
+    picker.finish();
+
+    assert_eq!(find(&on_text, panel, Rgb8(1, 254, 3)).0, 0);
+    assert_eq!(find(&on_image, panel, Rgb8(1, 254, 3)), (40 * 30, (40, 30)));
+}
+
+#[test]
+fn the_preview_pane_shows_the_whole_text_over_many_lines() {
+    let (session, _paint) = painted();
+    let config = session
+        .runtime_dir()
+        .join("home/.config/hoarder/config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, "[theme]\nsurface = \"#123456\"\n").unwrap();
+    let many: String = (1..=12).map(|n| format!("line number {n}\n")).collect();
+    seed(
+        &session,
+        &[
+            Seed {
+                reprs: &text(&many),
+                app: None,
+                pinned: false,
+            },
+            Seed {
+                reprs: &text("one line"),
+                app: None,
+                pinned: false,
+            },
+        ],
+    );
+    let _daemon = Daemon::start(&session);
+    // The right half of the panel, below the search field and above the
+    // footer, lower half only: no single-line preview reaches it.
+    let lower_right = (660, 380, 990, 500);
+    let ink = |shot: &Image| {
+        let (x0, y0, x1, y1) = lower_right;
+        (y0..y1)
+            .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+            .filter(|&(x, y)| shot.pixel(x, y) != Rgb8(0x12, 0x34, 0x56))
+            .count()
+    };
+
+    let picker = open_picker(&session);
+    let one = settled_shot(&session);
+    session.input().tap(keys::KEY_DOWN).unwrap();
+    let twelve = settled_shot(&session);
+    session.input().tap(keys::KEY_ESC).unwrap();
+    picker.finish();
+
+    assert_eq!(ink(&one), 0);
+    assert!(ink(&twelve) > 200, "only {} inked pixels", ink(&twelve));
+}
+
+#[test]
+fn the_preview_pane_shows_files_as_chips() {
+    let (session, _paint) = painted();
+    let config = session
+        .runtime_dir()
+        .join("home/.config/hoarder/config.toml");
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    std::fs::write(&config, "[theme]\nsurface = \"#123456\"\n").unwrap();
+    seed(
+        &session,
+        &[
+            Seed {
+                reprs: &[(
+                    "text/uri-list",
+                    b"file:///tmp/report.pdf\r\nfile:///home/me/notes%20today.md\r\n",
+                )],
+                app: None,
+                pinned: false,
+            },
+            Seed {
+                reprs: &text("x"),
+                app: None,
+                pinned: false,
+            },
+        ],
+    );
+    let _daemon = Daemon::start(&session);
+    // The preview pane's first two chip rows.
+    let chips = (660, 180, 990, 260);
+
+    let picker = open_picker(&session);
+    let on_text = settled_shot(&session);
+    session.input().tap(keys::KEY_DOWN).unwrap();
+    let on_files = settled_shot(&session);
+    session.input().tap(keys::KEY_ESC).unwrap();
+    picker.finish();
+
+    let differs = |a: &Image, b: &Image| {
+        let (x0, y0, x1, y1) = chips;
+        (y0..y1)
+            .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+            .filter(|&(x, y)| a.pixel(x, y) != b.pixel(x, y))
+            .count()
+    };
+    assert!(differs(&on_text, &on_files) > 200);
+    // A chip is a filled block, not bare text on the panel: somewhere a
+    // long run of one colour that is not the panel's. Text never makes one.
+    let (x0, y0, x1, y1) = chips;
+    let longest_fill = (y0..y1)
+        .map(|y| {
+            let mut best = 0;
+            let mut run = 0;
+            for x in x0..x1 {
+                let p = on_files.pixel(x, y);
+                let same = x > x0 && p == on_files.pixel(x - 1, y);
+                run = if same { run + 1 } else { 1 };
+                if p != Rgb8(0x12, 0x34, 0x56) {
+                    best = best.max(run);
+                }
+            }
+            best
+        })
+        .max()
+        .unwrap();
+    assert!(longest_fill >= 100, "no chip: longest fill {longest_fill}");
+}

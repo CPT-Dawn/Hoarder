@@ -114,7 +114,7 @@ impl Model {
 
     /// The Concealed Clips on screen in a list `rows` tall that are not
     /// revealed yet.
-    pub(crate) fn to_reveal(&mut self, rows: usize) -> Vec<i64> {
+    pub(crate) fn unrevealed(&mut self, rows: usize) -> Vec<i64> {
         let ids: Vec<i64> = (self.visible(rows).into_iter())
             .filter(|(e, _)| e.concealed)
             .map(|(e, _)| e.id)
@@ -381,12 +381,12 @@ mod tests {
         m.entries[1].concealed = true;
         m.entries[1].preview = MASK.into();
 
-        assert_eq!(m.to_reveal(10), [101]);
+        assert_eq!(m.unrevealed(10), [101]);
         let line = |m: &Model| m.line(&m.entries[1]).to_owned();
         assert_eq!(line(&m), MASK);
         m.reveal(101, "hunter2".into());
         assert_eq!(line(&m), "hunter2");
-        assert!(m.to_reveal(10).is_empty());
+        assert!(m.unrevealed(10).is_empty());
         assert!(m.hide());
         assert_eq!(line(&m), MASK);
         // Never searched, revealed or not.

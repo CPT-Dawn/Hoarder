@@ -89,6 +89,29 @@ pub trait History {
     /// The text of Concealed Clip `id`. Called only while the user holds
     /// Alt, for the Concealed Clips on screen.
     fn reveal(&mut self, id: i64) -> Option<String>;
+
+    /// What the preview pane shows for `entry`, a Clip that is not
+    /// Concealed. Called once the first frame is up, as the selection
+    /// moves.
+    fn detail(&mut self, entry: &Entry) -> Detail;
+}
+
+/// A Clip in full, for the preview pane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Detail {
+    /// Its text (or as much of it as fits).
+    Text(String),
+    /// An image in straight RGBA, `width × height` pixels, shown at its
+    /// real pixel size.
+    Image {
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    },
+    /// The paths of a file list, shown as chips.
+    Files(Vec<String>),
+    /// Nothing beyond its preview line.
+    Nothing,
 }
 
 /// What the user picked.
@@ -156,6 +179,7 @@ pub fn run(history: &mut dyn History, options: &Options) -> Result<Option<Pick>,
         theme: options.theme.clone(),
         started: options.started,
         model: None,
+        detail: None,
         keys: Vec::new(),
         mods: Modifiers::default(),
         scale: 1,
@@ -185,6 +209,7 @@ pub fn run(history: &mut dyn History, options: &Options) -> Result<Option<Pick>,
             }
         }
         app.reveal(history);
+        app.fetch_detail(history);
         app.draw(&qh);
     }
 
@@ -210,6 +235,8 @@ struct App {
     started: Instant,
     /// `None` until History has arrived.
     model: Option<Model>,
+    /// The selected Clip's detail, by its id.
+    detail: Option<(i64, Detail)>,
     /// Keys pressed and not yet acted on, with the modifiers held. The
     /// main loop acts on them, since it can ask History for full-text hits.
     keys: Vec<(KeyEvent, Modifiers)>,
@@ -272,7 +299,17 @@ impl App {
                 return;
             }
         };
-        paint::paint(canvas, scale, model, &self.theme, &mut self.fonts);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64);
+        let selected = model.selected().map(|e| e.id);
+        let extra = paint::Extra {
+            detail: (self.detail.as_ref())
+                .filter(|(id, _)| Some(*id) == selected)
+                .map(|(_, d)| d),
+            now_ms,
+        };
+        paint::paint(canvas, scale, model, &extra, &self.theme, &mut self.fonts);
         if !self.shown {
             timing(self.started, "picker_painted");
         }
@@ -289,6 +326,23 @@ impl App {
         self.dirty = false;
     }
 
+    /// Once the first frame is up, fetch the selected Clip's detail if it
+    /// is not there yet.
+    fn fetch_detail(&mut self, history: &mut dyn History) {
+        let Some(model) = &self.model else { return };
+        if !self.shown || self.outcome.is_some() {
+            return;
+        }
+        let Some(entry) = model.selected().filter(|e| !e.concealed) else {
+            return;
+        };
+        if self.detail.as_ref().is_some_and(|(id, _)| *id == entry.id) {
+            return;
+        }
+        self.detail = Some((entry.id, history.detail(entry)));
+        self.dirty = true;
+    }
+
     /// While Alt is held, fetch the text of the Concealed Clips on screen;
     /// once it is let go, wipe it.
     fn reveal(&mut self, history: &mut dyn History) {
@@ -299,7 +353,7 @@ impl App {
             self.dirty |= model.hide();
             return;
         }
-        for id in model.to_reveal(paint::rows()) {
+        for id in model.unrevealed(paint::rows()) {
             // A Clip that expired meanwhile just stays masked.
             if let Some(text) = history.reveal(id) {
                 model.reveal(id, text);
