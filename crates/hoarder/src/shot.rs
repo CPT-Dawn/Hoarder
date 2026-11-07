@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use clap::ValueEnum;
 use hoarder_config::{Config, MixedScale, Screenshot, State, StoredRegion};
 use hoarder_ui::{Options, Outcome, OverlayError, Region, Theme, countdown, overlay};
-use hoarder_wayland::{CaptureError, Frozen};
+use hoarder_wayland::{CaptureError, Frozen, Window};
 
 use crate::Exit;
 use crate::after::Delivered;
@@ -70,8 +70,9 @@ pub fn run(
             height: r.height,
         }),
         theme: Theme::load(&config.theme),
-        // Decided in `from_overlay`, once it is known what the outputs are.
+        // Both decided in `from_overlay`, for the moment the Overlay shows.
         clamp_to_output: false,
+        windows: Vec::new(),
     };
     if let Some(delay) = when.delay.filter(|d| !d.is_zero()) {
         countdown::run(delay, &options).map_err(overlay_error)?;
@@ -192,6 +193,17 @@ fn beside(path: &Path, suffix: &str) -> PathBuf {
     path.with_file_name(name)
 }
 
+/// The windows the Overlay can snap to. Without a provider there are none;
+/// if the compositor cannot tell, say why and carry on without them.
+fn windows() -> Vec<Window> {
+    hoarder_wayland::windows::detect()
+        .windows()
+        .unwrap_or_else(|e| {
+            eprintln!("hoarder: no window snapping: {e}");
+            Vec::new()
+        })
+}
+
 fn freeze() -> Result<Frozen, (Exit, String)> {
     hoarder_wayland::freeze().map_err(|e| {
         let code = match e {
@@ -224,8 +236,10 @@ fn from_overlay(
     let (frozen, outcome) = if live {
         // No Frozen Frames yet to judge the scales by: the Overlay clamps only
         // if the live outputs it covers turn out to differ in scale.
+        // The windows as they are now, on the desktop the Overlay goes over.
         let options = Options {
             clamp_to_output: settings.mixed_scale == MixedScale::Clamp,
+            windows: windows(),
             ..options.clone()
         };
         let outcome = overlay::run_live(started, &options).map_err(overlay_error)?;
@@ -234,9 +248,13 @@ fn from_overlay(
         }
         (freeze()?, outcome)
     } else {
+        // Ask where the windows are while the outputs freeze, so both
+        // describe the same moment.
+        let windows = std::thread::spawn(windows);
         let frozen = freeze()?;
         let options = Options {
             clamp_to_output: cut::clamps_regions(&frozen.frames, settings),
+            windows: windows.join().unwrap_or_default(),
             ..options.clone()
         };
         let outcome = overlay::run(&frozen, started, &options).map_err(overlay_error)?;
@@ -271,6 +289,19 @@ fn from_overlay(
                 height: frame.logical.height as f64,
             };
             (cut::cut(&frozen.frames, Some(&whole), settings), "output")
+        }
+        Outcome::Window(window) => {
+            // What you saw: the window's rectangle cut from the Frozen Frames,
+            // popups and anything over it included, under the same mixed-scale
+            // and depth policies as any Region.
+            let r = window.rect;
+            let region = Region {
+                x: r.x as f64,
+                y: r.y as f64,
+                width: r.width as f64,
+                height: r.height as f64,
+            };
+            (cut::cut(&frozen.frames, Some(&region), settings), "window")
         }
         Outcome::AllOutputs => (cut::cut(&frozen.frames, None, settings), "all"),
         Outcome::Cancelled => return Err((Exit::Cancelled, "cancelled".into())),

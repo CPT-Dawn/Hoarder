@@ -1,6 +1,6 @@
 //! The Overlay chrome: everything drawn on top of a Frozen Frame (dimming,
-//! selection border, size label), painted into an `Argb8888` buffer in
-//! physical pixels and only where it changed.
+//! window highlight, selection border, labels), painted into an `Argb8888`
+//! buffer in physical pixels and only where it changed.
 
 use cosmic_text::{Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache};
 
@@ -15,7 +15,7 @@ pub(crate) const DIM: [u8; 4] = [0, 0, 0, 115];
 /// The theme's colours as premultiplied `Argb8888` bytes, ready to fill with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Palette {
-    /// The selection border.
+    /// Borders, Refine's handles and (at a quarter) the window tint.
     pub accent: [u8; 4],
 }
 
@@ -33,9 +33,19 @@ fn argb(c: hoarder_config::Colour) -> [u8; 4] {
     [p(c.b), p(c.g), p(c.r), c.a]
 }
 
+/// The tint over a hovered window: `accent` (premultiplied `Argb8888`) at
+/// a quarter of its opacity.
+fn tint(accent: [u8; 4]) -> [u8; 4] {
+    accent.map(|v| v / 4)
+}
+
 /// What one output's chrome shows, in that output's physical pixels.
+/// Layers, bottom first: dimming, the window highlight, the selection, and
+/// then their labels.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Scene {
+    /// The window under the pointer.
+    pub window: Option<Highlight>,
     /// The selected pixels: shown undimmed with a border just outside.
     pub selection: Option<Rect>,
     pub label: Option<Label>,
@@ -43,20 +53,28 @@ pub struct Scene {
     pub handles: Vec<Rect>,
 }
 
+/// A hovered window: tinted, with a border just outside and its title.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Highlight {
+    /// Which window (an index into the Overlay's window list).
+    pub index: usize,
+    /// The window's pixels; may reach past the output's edges.
+    pub rect: Rect,
+    pub label: Option<Label>,
+}
+
 impl Scene {
     /// Every pixel that differs between `self` and `next` lies in one of these.
     pub fn damage(&self, next: &Scene) -> Vec<Rect> {
         let mut out = Vec::new();
-        match (self.selection, next.selection) {
-            (a, b) if a == b => {}
-            (Some(a), Some(b)) => {
-                out.extend(a.subtract(&b));
-                out.extend(b.subtract(&a));
-                out.extend(a.ring());
-                out.extend(b.ring());
-            }
-            (Some(r), None) | (None, Some(r)) => out.push(r.inflate(1)),
-            (None, None) => {}
+        let rect = |s: &Scene| s.window.as_ref().map(|w| w.rect);
+        framed_damage(rect(self), rect(next), &mut out);
+        framed_damage(self.selection, next.selection, &mut out);
+        let label = |s: &Scene| s.window.as_ref().and_then(|w| w.label.clone());
+        let (a, b) = (label(self), label(next));
+        if a != b {
+            out.extend(a.map(|l| l.rect));
+            out.extend(b.map(|l| l.rect));
         }
         if self.label != next.label {
             out.extend(self.label.as_ref().map(|l| l.rect));
@@ -99,35 +117,76 @@ impl Scene {
                     .fill(palette.accent);
             }
         }
-        if let Some(label) = &self.label {
+        let window_label = self.window.as_ref().and_then(|w| w.label.as_ref());
+        for label in window_label.into_iter().chain(&self.label) {
             label.blend_into(canvas, width, area);
         }
     }
 
-    /// Row `y` as `(start, end, colour)` spans covering every x.
+    /// Row `y` as `(start, end, colour)` spans covering every x, in order.
     fn row_spans(&self, y: i32, accent: [u8; 4]) -> Vec<(i32, i32, [u8; 4])> {
-        let Some(s) = self.selection else {
-            return vec![(i32::MIN, i32::MAX, DIM)];
-        };
-        let ring = s.inflate(1);
-        if y < ring.y || y >= ring.bottom() {
-            vec![(i32::MIN, i32::MAX, DIM)]
-        } else if y == ring.y || y == ring.bottom() - 1 {
-            vec![
-                (i32::MIN, ring.x, DIM),
-                (ring.x, ring.right(), accent),
-                (ring.right(), i32::MAX, DIM),
-            ]
-        } else {
-            vec![
-                (i32::MIN, ring.x, DIM),
-                (ring.x, s.x, accent),
-                (s.x, s.right(), CLEAR),
-                (s.right(), ring.right(), accent),
-                (ring.right(), i32::MAX, DIM),
-            ]
+        let mut spans = vec![(i32::MIN, i32::MAX, DIM)];
+        if let Some(w) = &self.window {
+            framed_row(&mut spans, w.rect, (accent, tint(accent)), y);
+        }
+        if let Some(s) = self.selection {
+            framed_row(&mut spans, s, (accent, CLEAR), y);
+        }
+        spans
+    }
+}
+
+/// What changes when a rectangle framed by a one-pixel border moves from
+/// `a` to `b`.
+fn framed_damage(a: Option<Rect>, b: Option<Rect>, out: &mut Vec<Rect>) {
+    match (a, b) {
+        (a, b) if a == b => {}
+        (Some(a), Some(b)) => {
+            out.extend(a.subtract(&b));
+            out.extend(b.subtract(&a));
+            out.extend(a.ring());
+            out.extend(b.ring());
+        }
+        (Some(r), None) | (None, Some(r)) => out.push(r.inflate(1)),
+        (None, None) => {}
+    }
+}
+
+/// Lay row `y` of `r`, filled with `fill` inside a `border` just outside
+/// it, over `spans`.
+fn framed_row(
+    spans: &mut Vec<(i32, i32, [u8; 4])>,
+    r: Rect,
+    (border, fill): ([u8; 4], [u8; 4]),
+    y: i32,
+) {
+    let ring = r.inflate(1);
+    if y < ring.y || y >= ring.bottom() {
+        return;
+    }
+    cover(spans, ring.x, ring.right(), border);
+    if y != ring.y && y != ring.bottom() - 1 {
+        cover(spans, r.x, r.right(), fill);
+    }
+}
+
+/// Paint `[x0, x1)` with `colour` over ordered spans that cover every x.
+fn cover(spans: &mut Vec<(i32, i32, [u8; 4])>, x0: i32, x1: i32, colour: [u8; 4]) {
+    if x0 >= x1 {
+        return;
+    }
+    let mut out = Vec::with_capacity(spans.len() + 2);
+    for &(a, b, c) in spans.iter() {
+        if a < x0 {
+            out.push((a, b.min(x0), c));
+        }
+        if b > x1 {
+            out.push((a.max(x1), b, c));
         }
     }
+    let at = out.iter().position(|s| s.0 >= x1).unwrap_or(out.len());
+    out.insert(at, (x0, x1, colour));
+    *spans = out;
 }
 
 /// A rendered size pill, e.g. `1280 × 720`.

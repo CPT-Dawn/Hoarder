@@ -1,0 +1,79 @@
+[
+  {
+    "address": "0x55764847fa40", "mapped": true, "hidden": false, "visible": true, "acceptsInput": true,
+    "at": [2, 34], "size": [1532, 924],
+    "workspace": { "address": "2", "id": 2, "type": "normal", "name": "2" },
+    "floating": false, "monitor": 1, "class": "kitty", "title": "laptop terminal",
+    "initialClass": "kitty", "initialTitle": "kitty", "pid": 1001, "xwayland": false,
+    "pinned": false, "pinFullscreened": false, "fullscreen": 0, "fullscreenClient": 0,
+    "grouped": [], "tags": [], "swallowing": "0x0", "focusHistoryID": 3,
+    "inhibitingIdle": false, "xdgTag": "", "xdgDescription": "", "contentType": "none",
+    "tearingHint": false, "stableId": "18000011"
+  },
+  {
+    "address": "0x557648e50bd0", "mapped": true, "hidden": false, "visible": true, "acceptsInput": true,
+    "at": [1541, 5], "size": [950, 1070],
+    "workspace": { "address": "1", "id": 1, "type": "normal", "name": "1" },
+    "floating": false, "monitor": 0, "class": "firefox", "title": "tiled browser",
+    "initialClass": "firefox", "initialTitle": "Mozilla Firefox", "pid": 1002, "xwayland": false,
+    "pinned": false, "pinFullscreened": false, "fullscreen": 0, "fullscreenClient": 0,
+    "grouped": [], "tags": [], "swallowing": "0x0", "focusHistoryID": 0,
+    "inhibitingIdle": false, "xdgTag": "", "xdgDescription": "", "contentType": "none",
+    "tearingHint": false, "stableId": "18000028"
+  },
+  {
+    "address": "0x557648e60000", "mapped": true, "hidden": false, "visible": true, "acceptsInput": true,
+    "at": [2000, 200], "size": [600, 400],
+    "workspace": { "address": "1", "id": 1, "type": "normal", "name": "1" },
+    "floating": true, "monitor": 0, "class": "pavucontrol", "title": "floating mixer",
+    "initialClass": "pavucontrol", "initialTitle": "Volume Control", "pid": 1003, "xwayland": false,
+    "pinned": false, "pinFullscreened": false, "fullscreen": 0, "fullscreenClient": 0,
+    "grouped": [], "tags": [], "swallowing": "0x0", "focusHistoryID": 2,
+    "inhibitingIdle": false, "xdgTag": "", "xdgDescription": "", "contentType": "none",
+    "tearingHint": false, "stableId": "18000030"
+  },
+  {
+    "address": "0x557648e70000", "mapped": true, "hidden": false, "visible": true, "acceptsInput": true,
+    "at": [1541, 5], "size": [1910, 1070],
+    "workspace": { "address": "3", "id": 3, "type": "normal", "name": "3" },
+    "floating": false, "monitor": 0, "class": "code", "title": "on a hidden workspace",
+    "initialClass": "code", "initialTitle": "Code", "pid": 1004, "xwayland": false,
+    "pinned": false, "pinFullscreened": false, "fullscreen": 0, "fullscreenClient": 0,
+    "grouped": [], "tags": [], "swallowing": "0x0", "focusHistoryID": 1,
+    "inhibitingIdle": false, "xdgTag": "", "xdgDescription": "", "contentType": "none",
+    "tearingHint": false, "stableId": "18000031"
+  },
+  {
+    "address": "0x557648e80000", "mapped": true, "hidden": false, "visible": true, "acceptsInput": true,
+    "at": [1800, 100], "size": [800, 600],
+    "workspace": { "address": "-98", "id": -98, "type": "special", "name": "special:scratch" },
+    "floating": true, "monitor": 0, "class": "foot", "title": "scratchpad terminal",
+    "initialClass": "foot", "initialTitle": "foot", "pid": 1005, "xwayland": false,
+    "pinned": false, "pinFullscreened": false, "fullscreen": 0, "fullscreenClient": 0,
+    "grouped": [], "tags": [], "swallowing": "0x0", "focusHistoryID": 4,
+    "inhibitingIdle": false, "xdgTag": "", "xdgDescription": "", "contentType": "none",
+    "tearingHint": false, "stableId": "18000032"
+  },
+  {
+    "address": "0x557648e90000", "mapped": true, "hidden": true, "visible": false, "acceptsInput": true,
+    "at": [1541, 5], "size": [950, 1070],
+    "workspace": { "address": "1", "id": 1, "type": "normal", "name": "1" },
+    "floating": false, "monitor": 0, "class": "firefox", "title": "hidden group member",
+    "initialClass": "firefox", "initialTitle": "Mozilla Firefox", "pid": 1006, "xwayland": false,
+    "pinned": false, "pinFullscreened": false, "fullscreen": 0, "fullscreenClient": 0,
+    "grouped": [], "tags": [], "swallowing": "0x0", "focusHistoryID": 5,
+    "inhibitingIdle": false, "xdgTag": "", "xdgDescription": "", "contentType": "none",
+    "tearingHint": false, "stableId": "18000033"
+  },
+  {
+    "address": "0x557648ea0000", "mapped": false, "hidden": false, "visible": true, "acceptsInput": true,
+    "at": [0, 0], "size": [0, 0],
+    "workspace": { "address": "2", "id": 2, "type": "normal", "name": "2" },
+    "floating": false, "monitor": 1, "class": "steam", "title": "unmapped",
+    "initialClass": "steam", "initialTitle": "Steam", "pid": 1007, "xwayland": true,
+    "pinned": false, "pinFullscreened": false, "fullscreen": 0, "fullscreenClient": 0,
+    "grouped": [], "tags": [], "swallowing": "0x0", "focusHistoryID": 6,
+    "inhibitingIdle": false, "xdgTag": "", "xdgDescription": "", "contentType": "none",
+    "tearingHint": false, "stableId": "18000034"
+  }
+]
