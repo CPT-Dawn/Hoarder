@@ -28,6 +28,8 @@ futures-util = { version = "0.3", default-features = false }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "avif", "qoi", "rayon"] }
 inotify = { version = "0.11", default-features = false }
 jiff = "0.2"
+# The Picker's fuzzy match (helix's matcher, without its thread pool).
+nucleo-matcher = "0.3.1"
 png = "0.18"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

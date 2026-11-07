@@ -125,12 +125,29 @@ Recorded results (headless Sway 1.12, pixman, one 3840×2160 output, release bui
 
 This is within budget, so ADR-0007 stands. The next easy win is giving the freeze's memfd to the Overlay instead of copying the 33 MB frame (about 8 ms).
 
+### The Picker's first frame
+
+`hoarder picker` prints `picker_configured_ms`, `picker_history_ms` (History has arrived from the Daemon), `picker_painted_ms` and `picker_visible_ms` (the first frame callback), measured from the start of `picker`. `budget_picker_first_frame_with_1000_clips` (in `e2e_picker.rs`) seeds 1,000 Clips straight into the Store before starting the Daemon and checks the "Picker first frame < 50 ms" budget:
+
+```sh
+cargo test --release -p hoarder --test e2e_picker budget -- --nocapture
+```
+
+| Date | Change | Median | Breakdown |
+|---|---|---|---|
+| 2026-11-08 | #78, first cut: `FontSystem::new` on a thread, all ~2,500 system faces | 53.4 ms | History 10, fonts plus first line shaped 37 (matching a family opens every non-regular face's file) |
+| 2026-11-08 | #78: fonts load first thing, and only regular upright faces are kept | 29.7 ms | History 11, fonts 20 (in parallel), paint 3, compositor 3 |
+
+Font loading (a full fontconfig scan, about 20 ms) is now the floor. The Overlay's labels share the trimmed font set.
+
+The Picker tests (`e2e_picker.rs`) start it with `Overlay::start(&session, &["picker"], …)`, which works for any `hoarder` command that changes what grim sees.
+
 ### Scaling budgets on slow machines
 
 Every budget test checks through one helper, `hoarder_e2e::budget::assert_within`, which prints the measurement next to the budget (`budget: …: measured 41.2 ms, budget 60.0 ms (PLAN 60.0 ms x 1)`) and fails if it is over. The budgets in the tests are PLAN's numbers. `HOARDER_BUDGET_SCALE` multiplies all of them (default `1.0`, so local runs enforce PLAN as written). CI sets it to `3`, because shared GitHub runners take 187–245 ms for the 150 ms shot-to-clipboard path that a desktop does well under budget. Read the printed measurements in the CI log to spot a regression that 3× would hide. New budget tests must use the helper, not their own `assert!`.
 
 ```sh
-HOARDER_BUDGET_SCALE=3 cargo test --release -p hoarder --test e2e_shot_clipboard --test e2e_overlay -- 150_ms budget --nocapture
+HOARDER_BUDGET_SCALE=3 cargo test --release -p hoarder --test e2e_shot_clipboard --test e2e_overlay --test e2e_picker -- 150_ms budget --nocapture
 ```
 
 ## CI (`.github/workflows/ci.yml`)

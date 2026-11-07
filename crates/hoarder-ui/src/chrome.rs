@@ -211,18 +211,18 @@ impl Fonts {
     /// Start loading the system fonts on a background thread.
     pub fn load() -> Fonts {
         Fonts {
-            loading: Some(std::thread::spawn(FontSystem::new)),
+            loading: Some(std::thread::spawn(system_fonts)),
             ready: None,
         }
     }
 
-    fn get(&mut self) -> &mut (FontSystem, SwashCache) {
+    pub(crate) fn get(&mut self) -> &mut (FontSystem, SwashCache) {
         self.ready.get_or_insert_with(|| {
             let fonts = self
                 .loading
                 .take()
                 .and_then(|h| h.join().ok())
-                .unwrap_or_else(FontSystem::new);
+                .unwrap_or_else(system_fonts);
             (fonts, SwashCache::new())
         })
     }
@@ -315,9 +315,42 @@ impl Label {
     }
 }
 
+/// The system's fonts, as `FontSystem::new` finds them, less every face
+/// that is not regular weight and upright: everything Hoarder draws is.
+///
+/// Matching a family weighs every face, and for each one of another weight
+/// cosmic-text opens the font file to look for a variable weight axis. With
+/// a couple of thousand faces installed that took 10–20 ms on the first
+/// line drawn, on the Picker's critical path; without them it takes well
+/// under one.
+fn system_fonts() -> FontSystem {
+    use cosmic_text::fontdb::{Database, Style, Weight};
+    let mut db = Database::new();
+    db.load_system_fonts();
+    // What `FontSystem::new` sets.
+    db.set_monospace_family("Noto Sans Mono");
+    db.set_sans_serif_family("Open Sans");
+    db.set_serif_family("DejaVu Serif");
+    let unused: Vec<_> = db
+        .faces()
+        .filter(|f| f.weight != Weight::NORMAL || f.style != Style::Normal)
+        .map(|f| f.id)
+        .collect();
+    for id in unused {
+        db.remove_face(id);
+    }
+    let locale = std::env::var("LC_ALL")
+        .ok()
+        .or_else(|| std::env::var("LANG").ok())
+        .and_then(|l| l.split(['.', '@']).next().map(|l| l.replace('_', "-")))
+        .filter(|l| !l.is_empty() && l != "C" && l != "POSIX")
+        .unwrap_or_else(|| "en-US".to_owned());
+    FontSystem::new_with_locale_and_db(locale, db)
+}
+
 /// The first family of the CSS-style `stack` that is installed (generic names
 /// always are), or sans-serif.
-fn installed_family<'a>(fonts: &FontSystem, stack: &'a str) -> Family<'a> {
+pub(crate) fn installed_family<'a>(fonts: &FontSystem, stack: &'a str) -> Family<'a> {
     stack
         .split(',')
         .map(|f| f.trim().trim_matches(['"', '\'']).trim())
@@ -337,7 +370,7 @@ fn installed_family<'a>(fonts: &FontSystem, stack: &'a str) -> Family<'a> {
         .unwrap_or(Family::SansSerif)
 }
 
-fn rounded_rect(w: f32, h: f32, r: f32) -> Option<tiny_skia::Path> {
+pub(crate) fn rounded_rect(w: f32, h: f32, r: f32) -> Option<tiny_skia::Path> {
     let r = r.min(w / 2.0).min(h / 2.0);
     let mut pb = tiny_skia::PathBuilder::new();
     pb.move_to(r, 0.0);

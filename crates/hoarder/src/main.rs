@@ -9,6 +9,7 @@ mod history;
 mod hook;
 mod image;
 mod notify;
+mod picker;
 mod save;
 mod setup;
 mod shot;
@@ -85,6 +86,9 @@ enum Command {
     Config(config::ConfigCommand),
     /// Empty the clipboard, and keep the Daemon from restoring it.
     Clear,
+    /// Search History in a panel; Enter makes the selected Clip the
+    /// clipboard again, Esc closes (needs the Daemon).
+    Picker,
     /// List, read, restore and delete Clips in History (needs the Daemon).
     #[command(subcommand)]
     History(history::HistoryCommand),
@@ -183,6 +187,7 @@ fn main() -> ExitCode {
         Some(Command::NotifyCapture(args)) => notify::serve_child(args),
         Some(Command::Config(command)) => config::run(command, &cli.overrides),
         Some(Command::Clear) => daemon::clear(),
+        Some(Command::Picker) => picker::run(&cli.overrides),
         Some(Command::History(command)) => history::run(command),
         Some(Command::Daemon) => daemon::run(&cli.overrides),
         Some(Command::Service(command)) => daemon::service::run(command),
