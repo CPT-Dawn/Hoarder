@@ -5,6 +5,7 @@ use std::path::Path;
 use std::time::Instant;
 
 use clap::ValueEnum;
+use hoarder_config::Config;
 use hoarder_ui::{Outcome, OverlayError, overlay};
 use hoarder_wayland::CaptureError;
 
@@ -20,7 +21,18 @@ pub enum Target {
     All,
 }
 
-pub fn run(target: Target, output: &Path) -> Result<(), (Exit, String)> {
+impl Target {
+    /// The name used in file name templates.
+    fn name(self) -> &'static str {
+        match self {
+            Target::Region => "region",
+            Target::All => "all",
+        }
+    }
+}
+
+/// Capture `target`. `output` (`-o`) replaces saving to `screenshot.dir`.
+pub fn run(target: Target, output: Option<&Path>, config: &Config) -> Result<(), (Exit, String)> {
     let started = Instant::now();
     let frozen = hoarder_wayland::freeze().map_err(|e| {
         let code = match e {
@@ -42,8 +54,16 @@ pub fn run(target: Target, output: &Path) -> Result<(), (Exit, String)> {
             Outcome::Cancelled => return Err((Exit::Cancelled, "cancelled".into())),
         },
     };
-    deliver(&image, output)
-        .map_err(|e| (Exit::Io, format!("cannot write {}: {e}", output.display())))
+    match output {
+        Some(output) => deliver(&image, output)
+            .map_err(|e| (Exit::Io, format!("cannot write {}: {e}", output.display()))),
+        None if config.screenshot.save => {
+            let path = crate::save::save(&image, target.name(), None, &config.screenshot)?;
+            println!("{}", path.display());
+            Ok(())
+        }
+        None => Ok(()),
+    }
 }
 
 fn deliver(image: &Image, output: &Path) -> std::io::Result<()> {
