@@ -54,6 +54,14 @@ Nothing is published to crates.io.
 | KDE Plasma (KWin) | no: KWin only offers capture through the portal | yes | — |
 | GNOME | no | no | — |
 
+On Hyprland with layer animations on, the Overlay can wait on a still screen until the mouse moves: the compositor's fade only advances while something redraws. Exempt Hoarder's layers:
+
+```lua
+hl.layer_rule({ name = "hoarder-no-anim", match = { namespace = "^hoarder-" }, no_anim = true })
+```
+
+(Lua config shown; in a `hyprland.conf`, the same `noanim` layer rule on namespace `^hoarder-`.)
+
 ## Quickstart
 
 ```sh

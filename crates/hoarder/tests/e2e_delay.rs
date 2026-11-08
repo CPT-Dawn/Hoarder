@@ -81,8 +81,7 @@ fn the_countdown_freezes_at_zero_and_opens_the_overlay() {
     app.paint(out, &Pattern::Quadrants).unwrap();
     assert!(child.try_wait().unwrap().is_none(), "still counting down");
 
-    // At zero the Overlay opens over the frozen desktop, ring gone (once
-    // its 100 ms fade-in is done).
+    // At zero the Overlay opens over the frozen desktop, ring gone.
     let seen = screenshot_when(&session, "HEADLESS-1", |s| dimmed_white(s.pixel(600, 400)));
     assert!(
         started.elapsed() >= Duration::from_millis(1500),

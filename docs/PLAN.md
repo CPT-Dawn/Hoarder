@@ -123,7 +123,7 @@ Idle ──press──► Dragging ──release──► Capture
 - The **Loupe** is an 8× grid of 15×15 px with a crosshair, coordinates and the hex colour. It appears after 300 ms of stillness or while `Alt` is held.
 - Hovering a window gives it a tinted fill and a label with its icon and title.
 - A hint bar (`drag · click window · O output · A all · C cursor · Esc`) fades out after 1.5 s. It is hidden after 20 uses, a count kept in `$XDG_STATE_HOME/hoarder/state.toml`.
-- The Overlay fades in over 100 ms. There is no shutter sound and no flash unless they are enabled in the config.
+- The Overlay dims at full strength from its first frame, so a still screen shows at once that the shortcut fired. There is no shutter sound and no flash unless they are enabled in the config.
 
 **Snapping and window geometry.** A `WindowGeometry` provider trait has three implementations:
 - `HyprlandIpc`: `j/clients` and `j/monitors`, with `hyprland_toplevel_mapping_v1` linking a toplevel to its address;

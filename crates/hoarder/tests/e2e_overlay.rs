@@ -318,10 +318,10 @@ fn budget_overlay_visible_on_4k() {
     );
 }
 
-/// PLAN.md §4.2: the Overlay fades in over 100 ms, so the dimming arrives
-/// in steps rather than all at once.
+/// PLAN.md §4.2: the Overlay dims at full strength from its first frame, so
+/// it is plain at once that the shortcut fired.
 #[test]
-fn the_overlay_fades_in() {
+fn the_overlay_dims_at_once() {
     let session = Session::start(&[OutputSpec::new(320, 240)]).unwrap();
     let app = session.client().unwrap();
     app.paint(
@@ -353,7 +353,7 @@ fn the_overlay_fades_in() {
 
     assert!((138..=142).contains(seen.last().unwrap()), "{seen:?}");
     assert!(
-        seen.iter().any(|g| (150..=245).contains(g)),
-        "no step between undimmed and dimmed: {seen:?}"
+        seen.iter().all(|g| *g == 255 || (138..=142).contains(g)),
+        "a step between undimmed and dimmed: {seen:?}"
     );
 }
