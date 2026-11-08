@@ -57,6 +57,10 @@ const EXT_OUTPUT_SOURCE: &str = "ext_output_image_capture_source_manager_v1";
 const WLR_SCREENCOPY: &str = "zwlr_screencopy_manager_v1";
 const COLOR_MANAGER: &str = "wp_color_manager_v1";
 
+/// How long the cursor copy may lag the outputs' before the Capture goes on
+/// without the cursor.
+const CURSOR_GRACE: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// Which protocol took the Frozen Frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
@@ -660,9 +664,18 @@ impl Freezer {
             cursor.format = Some(format);
             cursor_frames.push((*i, frame, shm));
         }
-        self.dispatch_until(queue, "capture", |s| {
-            s.copies().all(|c| c.ready) && s.cursors().all(|c| c.done)
-        })?;
+        self.dispatch_until(queue, "capture", |s| s.copies().all(|c| c.ready))?;
+        // Hyprland copies a cursor only once it changes, so on a still
+        // screen the copy waits for the mouse to move. The cursor is
+        // optional: give it a moment, then go on without it.
+        let deadline = std::time::Instant::now() + CURSOR_GRACE;
+        crate::wait::dispatch_until(queue, &mut self.state, deadline, |s| {
+            s.cursors().all(|c| c.done)
+        })
+        .map_err(|e| CaptureError::Failed(format!("cursor capture: {e}")))?;
+        if let Some(why) = self.state.failure.take() {
+            return Err(CaptureError::Failed(why));
+        }
 
         for (i, (frame, shm)) in frames.into_iter().enumerate() {
             frame.destroy();
