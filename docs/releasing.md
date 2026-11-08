@@ -55,11 +55,13 @@ git cliff --unreleased --tag v1.0.0 --strip header                              
    gh run watch   # the Release workflow
    ```
    Download the `aur` and `binary-*` artifacts and check them. Then delete the tag: `git push --delete origin v1.0.0-dryrun.1 && git tag -d v1.0.0-dryrun.1`.
-4. Release:
+4. Run the manual pass in [`release-checklist.md`](release-checklist.md) on real hardware. Every row passes or has an issue judged not to block.
+5. Release:
    ```sh
    git tag -s v1.0.0 -m "Hoarder 1.0.0" && git push origin v1.0.0
    ```
-5. Push the AUR packages from the release's `hoarder-1.0.0-aur.tar.gz`:
+6. Attach the filled-in checklist to the release: `gh release upload v1.0.0 checklist-v1.0.0.md`.
+7. Push the AUR packages from the release's `hoarder-1.0.0-aur.tar.gz`:
    ```sh
    gh release download v1.0.0 --pattern 'hoarder-1.0.0-aur.tar.gz'
    mkdir aur && tar -xzf hoarder-1.0.0-aur.tar.gz -C aur
