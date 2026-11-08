@@ -38,7 +38,7 @@ git cliff --unreleased --tag v1.0.0 --strip header                              
 
 ## One-time setup (before the first release)
 
-1. **AUR account.** It needs an SSH key (<https://aur.archlinux.org/account>). Each of the four names is a free AUR repository until its first push creates it. As of 2026-11-08, `hoarder`, `hoarder-bin`, `hoarder-git` and `hoarder-wl-compat` were all unclaimed.
+1. **AUR account.** It needs an SSH key (<https://aur.archlinux.org/account>). Each of the four names is a free AUR repository until its first push creates it. `hoarder-bin`, `hoarder-git` and `hoarder-wl-compat` were created by the 1.0.0 push. `hoarder` was the deleted package of the bookmark manager since renamed Karakeep; it was restored as an orphan and adopted (`ssh aur@aur.archlinux.org restore hoarder`, then `adopt hoarder`, which a Package Maintainer must grant).
 
 ## Cutting v1.0.0
 
