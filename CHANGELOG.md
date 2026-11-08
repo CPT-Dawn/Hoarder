@@ -119,6 +119,7 @@ Every notable change to Hoarder. The format follows
 - **config:** Document every key, and a test that keeps it so ([d4b3af8](https://github.com/CPT-Dawn/Hoarder/commit/d4b3af8d91518165d9eb6a93b7e0886b506bb280))
 - **readme:** From work in progress to a proper front door ([8c5e3d1](https://github.com/CPT-Dawn/Hoarder/commit/8c5e3d12b753698801411fcd78a9b72758cf9fab))
 - Add CONTRIBUTING and issue forms that ask for hoarder doctor ([b317a8c](https://github.com/CPT-Dawn/Hoarder/commit/b317a8c26c3e322d17ea46239d2986467cf1c680))
+- **release:** A checklist to fill in before the tag, not after ([db7399a](https://github.com/CPT-Dawn/Hoarder/commit/db7399ae3bad678b2415cc6425e069d61cb47d69))
 
 ### Tests
 
