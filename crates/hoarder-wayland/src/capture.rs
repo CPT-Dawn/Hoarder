@@ -616,8 +616,15 @@ impl Freezer {
         }
         self.dispatch_until(queue, "capture constraints", |s| {
             s.copies().all(|c| c.constraints_done)
-                && s.cursors().all(|c| c.constraints_done || c.stopped)
         })?;
+        // Hyprland sends a cursor session's constraints only once the cursor
+        // changes, so on a still screen they wait for the mouse to move. The
+        // cursor is optional: give it a moment, then go on without it.
+        let deadline = std::time::Instant::now() + CURSOR_GRACE;
+        crate::wait::dispatch_until(queue, &mut self.state, deadline, |s| {
+            s.cursors().all(|c| c.constraints_done || c.stopped)
+        })
+        .map_err(|e| CaptureError::Failed(format!("cursor capture: {e}")))?;
 
         let wl_shm = self.shm()?;
         let mut frames = Vec::new();
@@ -651,7 +658,11 @@ impl Freezer {
                 .into_iter()
                 .find(|f| cursor.offered.contains(&(f.wl() as u32)));
             let (width, height) = cursor.size;
-            let wanted = cursor.entered && !cursor.stopped && width > 0 && height > 0;
+            let wanted = cursor.constraints_done
+                && cursor.entered
+                && !cursor.stopped
+                && width > 0
+                && height > 0;
             let Some(format) = format.filter(|_| wanted) else {
                 cursor.done = true;
                 continue;
