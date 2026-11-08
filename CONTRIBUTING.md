@@ -1,6 +1,6 @@
 # Contributing to Hoarder
 
-Thanks for helping. Bug reports, app-compatibility reports and PRs are all welcome.
+Thanks for helping. Hoarder is feature-complete and in maintenance mode: bug reports and app-compatibility reports are the most useful contributions. New features are considered on request, so open an issue to discuss one before writing code.
 
 ## Reporting a bug
 

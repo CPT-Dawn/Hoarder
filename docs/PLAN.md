@@ -1,6 +1,6 @@
 # Hoarder — implementation plan
 
-> Status: agreed design, pre-code (2026-11-07). Vocabulary follows [`GLOSSARY.md`](../GLOSSARY.md); decisions are recorded in [`docs/adr/`](adr/); prior-art research is in [`docs/research/`](research/).
+> Status: complete. Shipped as v1.0.0 on 2026-11-08; the project is in maintenance mode (see §14). The design below was agreed on 2026-11-07. Vocabulary follows [`GLOSSARY.md`](../GLOSSARY.md); decisions are recorded in [`docs/adr/`](adr/); prior-art research is in [`docs/research/`](research/).
 
 Hoarder replaces grim, slurp, grimblast/Hyprshot, hyprpicker, wl-clipboard, wl-clip-persist and cliphist with one Rust-native, resource-light tool for Wayland: pixel-exact Captures that land on the clipboard, a clipboard that survives the app that set it, and a private, searchable History.
 
@@ -259,7 +259,7 @@ The Zenith module only restores; it never auto-pastes.
   - `Alt`: reveal Concealed Clips.
   - `Shift+Arrows`: scroll an image bigger than the preview pane.
   - `Esc`: close.
-- **v1.1 transforms** (`Ctrl+T`): trim, join lines, change case, encode or decode base64/URL/JSON.
+- **Parked, not planned:** transforms (`Ctrl+T`): trim, join lines, change case, encode or decode base64/URL/JSON.
 
 ## 7. Zenith module
 
@@ -432,7 +432,7 @@ Tests go through as few seams as possible, and as high up as possible.
 
 ## 14. Milestones
 
-> Work is tracked as vertical-slice tickets #57–#86 under spec #56, grouped into the GitHub milestones below; v1.1 stays in epic #50. The lists here describe scope, not ticket boundaries. M0's spikes were folded into #58 (fidelity), #61 (rendering budgets) and #72 (Takeover app matrix).
+> Work is tracked as vertical-slice tickets #57–#86 under spec #56, grouped into the GitHub milestones below; the parked v1.1 ideas are in the closed epic #50. The lists here describe scope, not ticket boundaries. M0's spikes were folded into #58 (fidelity), #61 (rendering budgets) and #72 (Takeover app matrix).
 
 ### M0: De-risking prototypes
 1. **Takeover prototype:** a minimal data-control daemon implementing ADR-0005, run against the app matrix. It produces a compatibility report and confirms or revises the reader deny list.
@@ -451,8 +451,10 @@ hoarder-ui widgets (list, text field) · Picker layout and search · preview pan
 ### M4: Ship v1.0
 `hoarder doctor` · `hoarder setup <wm>` · completions and man pages (clap_mangen) · systemd unit · README, docs site and GIF demos · CONTRIBUTING and issue templates · release workflow (git-cliff, GitHub release artefacts; nothing on crates.io) · AUR packages `hoarder`, `hoarder-bin`, `hoarder-git`, `hoarder-wl-compat` · release checklist pass.
 
-### v1.1
-In-place annotation in Refine (arrow, box, text, highlighter, numbered steps, blur/pixelate) · Picker transforms · OCR (optional `tesseract`) · QR decode · `text-input-v3` IME in the Picker.
+### After v1.0: maintenance mode
+v1.0 is the finished product. No further features are planned. Work resumes only for bug reports and for feature requests from users that fit the principles above and the [non-goals](adr/0008-non-goals.md).
+
+Ideas that were once sketched for a v1.1 are parked, not scheduled: in-place annotation in Refine, Picker transforms, OCR, QR decode and `text-input-v3` IME in the Picker. Their specs stay in the closed issues #50–#55, ready to reopen if users ask for them.
 
 ## 15. Risks
 
@@ -462,5 +464,5 @@ In-place annotation in Refine (arrow, box, text, highlighter, numbered steps, bl
 | ext-image-copy-capture quirks differ between compositors | Fidelity spike; wlr fallback; `hoarder doctor` reports which path is used |
 | Focused-app heuristic misfires (CLI copies, focus races) | Patterns and the Secret hint are the primary signals; app exclusion is defence in depth |
 | Hidden-workspace windows come out stale on Hyprland | Documented; the window list shows a "may be stale" badge |
-| Custom text input lacks IME | `text-input-v3` scheduled for v1.1; CJK users can still filter with ASCII prefixes |
+| Custom text input lacks IME | `text-input-v3` parked until requested (#55); CJK users can still filter with ASCII prefixes |
 | HDR captures look washed out | "HDR" badge; tone mapping tracked as future work |

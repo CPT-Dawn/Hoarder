@@ -4,7 +4,7 @@ labels: [needs-triage]
 body:
   - type: markdown
     attributes:
-      value: Check the [non-goals](https://github.com/CPT-Dawn/Hoarder/blob/main/docs/adr/0008-non-goals.md) and the [v1.1 epic](https://github.com/CPT-Dawn/Hoarder/issues/50) first.
+      value: Hoarder is feature-complete and in maintenance mode; features are added when users ask for them. Check the [non-goals](https://github.com/CPT-Dawn/Hoarder/blob/main/docs/adr/0008-non-goals.md) and the [parked ideas](https://github.com/CPT-Dawn/Hoarder/issues?q=label%3Aenhancement+is%3Aclosed) first: a thumbs-up or comment on one counts as a request.
   - type: textarea
     id: problem
     attributes:

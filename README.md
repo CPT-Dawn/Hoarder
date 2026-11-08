@@ -14,6 +14,10 @@ One Rust binary replaces grim, slurp, grimblast/Hyprshot, hyprpicker, wl-clipboa
 
 <!-- Demo GIFs: docs/media/shot.gif, docs/media/picker.gif -->
 
+## Status
+
+Hoarder is complete: v1.0 is the finished product and the project is in maintenance mode. Bugs are fixed as they are reported, and new features are considered when users ask for them. [Open an issue](https://github.com/CPT-Dawn/Hoarder/issues/new/choose) for either.
+
 ## Install
 
 Arch Linux, from the AUR:
