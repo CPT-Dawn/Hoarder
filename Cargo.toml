@@ -10,7 +10,7 @@ edition = "2024"
 rust-version = "1.97"
 license = "MIT"
 repository = "https://github.com/CPT-Dawn/Hoarder"
-authors = ["Swastik Patel <CPT-Dawn@users.noreply.github.com>"]
+authors = ["Swastik Patel <ping@cptdawn.dev>"]
 
 [workspace.dependencies]
 hoarder-config = { path = "crates/hoarder-config" }
