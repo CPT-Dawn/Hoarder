@@ -38,7 +38,7 @@ Every package ships the systemd user unit, man pages, bash/zsh/fish completions 
 Elsewhere: a tarball from [Releases](https://github.com/CPT-Dawn/Hoarder/releases), or
 
 ```sh
-cargo install --locked --git https://github.com/CPT-Dawn/Hoarder --tag v1.0.0 hoarder
+cargo install --locked --git https://github.com/CPT-Dawn/Hoarder --tag v1.0.1 hoarder
 ```
 
 Nothing is published to crates.io.

@@ -4,6 +4,24 @@ Every notable change to Hoarder. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.1](https://github.com/CPT-Dawn/Hoarder/releases/tag/v1.0.1) - 2026-11-08
+
+### Fixes
+
+- **overlay:** Dim at once so Print visibly does something ([afb462e](https://github.com/CPT-Dawn/Hoarder/commit/afb462ebea99edd362869d09e3d47972b6008dea))
+- **capture:** Stop waiting on Hyprland's cursor until the mouse moves ([824a417](https://github.com/CPT-Dawn/Hoarder/commit/824a417e557a1bb9347b13a2577faec0852e9660))
+- **capture:** Don't wait on cursor constraints Hyprland never sends ([a476156](https://github.com/CPT-Dawn/Hoarder/commit/a4761566ec955ed34a17a75a33490871303517c7))
+
+### Documentation
+
+- **release:** The hoarder AUR name had a past life ([75222f6](https://github.com/CPT-Dawn/Hoarder/commit/75222f6988600df1adf3fd9f1fecf079a27f5d0a))
+- V1.0 is the whole hoard; maintenance mode from here ([3a3e489](https://github.com/CPT-Dawn/Hoarder/commit/3a3e4895c696454f8f6766477b4e6732d57ffc08))
+- **readme:** Drop the noanim advice, the cursor was the culprit ([69df40c](https://github.com/CPT-Dawn/Hoarder/commit/69df40c0c6b5cfeeda0c331bd60b27fc7ba92e02))
+
+### Chores
+
+- **packaging:** Sign the PKGBUILDs with the public inbox ([246996a](https://github.com/CPT-Dawn/Hoarder/commit/246996af61a64118206f5bcb7fae4596d4c3ae90))
+
 ## [1.0.0](https://github.com/CPT-Dawn/Hoarder/releases/tag/v1.0.0) - 2026-11-08
 
 ### Features
