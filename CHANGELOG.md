@@ -4,7 +4,7 @@ Every notable change to Hoarder. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [1.0.0](https://github.com/CPT-Dawn/Hoarder/releases/tag/v1.0.0) - 2026-11-07
+## [1.0.0](https://github.com/CPT-Dawn/Hoarder/releases/tag/v1.0.0) - 2026-11-08
 
 ### Features
 
@@ -116,6 +116,9 @@ Every notable change to Hoarder. The format follows
 - **adr:** Concealed memory is locked without a single unsafe block ([35ce491](https://github.com/CPT-Dawn/Hoarder/commit/35ce491d5cada66339654d0ff4e11cab3735077b))
 - Focus sources, file kinds and the Refine toolbar, written down ([43f7b9a](https://github.com/CPT-Dawn/Hoarder/commit/43f7b9a0c6888674a92adecd6c96b5623f042813))
 - **setup:** Tell Lua Hyprland users where hoarder.lua goes ([722890e](https://github.com/CPT-Dawn/Hoarder/commit/722890e5cd9e8855e197baea9fc6f36fc75643f5))
+- **config:** Document every key, and a test that keeps it so ([d4b3af8](https://github.com/CPT-Dawn/Hoarder/commit/d4b3af8d91518165d9eb6a93b7e0886b506bb280))
+- **readme:** From work in progress to a proper front door ([8c5e3d1](https://github.com/CPT-Dawn/Hoarder/commit/8c5e3d12b753698801411fcd78a9b72758cf9fab))
+- Add CONTRIBUTING and issue forms that ask for hoarder doctor ([b317a8c](https://github.com/CPT-Dawn/Hoarder/commit/b317a8c26c3e322d17ea46239d2986467cf1c680))
 
 ### Tests
 
@@ -153,6 +156,7 @@ Every notable change to Hoarder. The format follows
 - **deps:** Pin age 0.11 and excuse its build-time macro fossils ([5497a53](https://github.com/CPT-Dawn/Hoarder/commit/5497a53a6d66818179f5fcc32fa7ae97c1abbc40))
 - **release:** Tag-driven pipeline, AUR quartet and a budget referee ([a3292bd](https://github.com/CPT-Dawn/Hoarder/commit/a3292bde2c42bcb6519afdce2ebaade20dc5dc21))
 - **release:** Run container jobs in bash, give builder a real HOME ([684380c](https://github.com/CPT-Dawn/Hoarder/commit/684380c4ff25bbe4458b918245fedc3d9f2957f4))
+- **shm:** Give 4K frames room to breathe in /dev/shm ([39d7a4c](https://github.com/CPT-Dawn/Hoarder/commit/39d7a4ce909b659768fada0ce2221f4d7a3111a1))
 
 ### Chores
 
