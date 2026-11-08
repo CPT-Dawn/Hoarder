@@ -1,0 +1,50 @@
+name: Bug report
+description: Something does not work as documented.
+labels: [needs-triage]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: hoarder doctor
+      description: The full output of `hoarder doctor`.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: hoarder --version
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Capture (shot, pick, Overlay)
+        - Clipboard Persistence (Takeover)
+        - History and Picker
+        - copy / paste and the wl-clipboard shims
+        - Config, setup, service
+        - Packaging
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: apps
+    attributes:
+      label: Apps involved
+      description: For clipboard bugs, the app you copied from and the app you pasted into, with versions.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant lines from `journalctl --user -u hoarder`. Remove anything secret.
+      render: text

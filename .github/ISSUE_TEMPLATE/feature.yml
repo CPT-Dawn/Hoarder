@@ -1,0 +1,18 @@
+name: Feature request
+description: Suggest something Hoarder should do.
+labels: [needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: Check the [non-goals](https://github.com/CPT-Dawn/Hoarder/blob/main/docs/adr/0008-non-goals.md) and the [v1.1 epic](https://github.com/CPT-Dawn/Hoarder/issues/50) first.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do, and why it is hard today.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you would like
