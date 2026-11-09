@@ -194,9 +194,13 @@ impl Target {
                 (Wm::Hyprland, Lang::Native) => {
                     l.starts_with("source") && l.contains("hoarder.conf")
                 }
-                (Wm::Sway, _) => {
-                    l.starts_with("include") && (l.contains("hoarder") || l.contains("config.d/*"))
-                }
+                (Wm::Sway, _) => l.strip_prefix("include").is_some_and(|path| {
+                    let path = path.trim().trim_matches(|c| c == '"' || c == '\'');
+                    // The file lands in the user's config.d; the stock
+                    // `include /etc/sway/config.d/*` never loads it.
+                    let system = path.starts_with("/etc/") || path.starts_with("/usr/");
+                    path.contains("hoarder") || (path.ends_with("config.d/*") && !system)
+                }),
                 (Wm::Niri, _) => l.starts_with("include") && l.contains("hoarder.kdl"),
             })
     }
@@ -324,6 +328,18 @@ fn diff(old: &str, new: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sways_stock_system_include_does_not_count_as_hoarders() {
+        let sway = native(Wm::Sway);
+        // The last line of /etc/sway/config: it never loads ~/.config/sway/config.d.
+        assert!(!sway.includes("include /etc/sway/config.d/*\n"));
+        assert!(!sway.includes("include '/etc/sway/config.d/*'\n"));
+        assert!(sway.includes("include ~/.config/sway/config.d/*\n"));
+        assert!(sway.includes("include $HOME/.config/sway/config.d/*\n"));
+        assert!(sway.includes("include config.d/*\n"));
+        assert!(sway.includes("include ~/.config/sway/config.d/hoarder\n"));
+    }
 
     #[test]
     fn diff_marks_kept_removed_and_added_lines() {
