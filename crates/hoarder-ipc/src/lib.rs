@@ -586,7 +586,9 @@ pub fn parse_request(line: &str) -> Result<Request, Response> {
         return Err(fail(ErrorCode::BadRequest, "missing \"op\"".into()));
     };
     serde_json::from_value(value).map_err(|e| {
-        if e.to_string().contains("unknown variant") {
+        // Only the op itself being unknown is `unknown_op`; an unknown value
+        // inside a known op (`"selection":"secondary"`) is a bad request.
+        if e.to_string().contains(&format!("unknown variant `{op}`")) {
             fail(ErrorCode::UnknownOp, format!("unknown op {op:?}"))
         } else {
             fail(ErrorCode::BadRequest, e.to_string())

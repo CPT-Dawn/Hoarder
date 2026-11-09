@@ -160,6 +160,11 @@ fn broken_requests_get_the_documented_error_codes() {
     );
     assert_eq!(code(r#"{"v":1,"id":1,"op":"dance"}"#), ErrorCode::UnknownOp);
     assert_eq!(code(r#"{"v":1,"id":1,"op":"get"}"#), ErrorCode::BadRequest);
+    // A known op with a bad value inside is a bad request, not an unknown op.
+    assert_eq!(
+        code(r#"{"v":1,"id":1,"op":"clear","selection":"secondary"}"#),
+        ErrorCode::BadRequest
+    );
 }
 
 fn clip() -> ClipSummary {
