@@ -198,14 +198,22 @@ impl Vault {
     }
 }
 
-/// Zero every representation nobody else holds, and empty the list.
-pub fn scrub(reprs: &mut Vec<Representation>) {
-    for (_, data) in reprs.iter_mut() {
-        if let Some(bytes) = Arc::get_mut(data) {
+/// Zero every buffer nobody else holds, and empty the list; returns how many
+/// buffers were wiped.
+///
+/// Representations may share one buffer (Normal and Secret offers keep one
+/// `Arc` per MIME type). They are let go one by one, so the last of them is
+/// the sole owner and wipes it. A buffer a paste or a History job still
+/// holds a clone of is left to that holder: the limit of a plain `Arc<[u8]>`.
+pub fn scrub(reprs: &mut Vec<Representation>) -> usize {
+    let mut wiped = 0;
+    for (_, mut data) in reprs.drain(..) {
+        if let Some(bytes) = Arc::get_mut(&mut data) {
             bytes.zeroize();
+            wiped += 1;
         }
     }
-    reprs.clear();
+    wiped
 }
 
 /// Append `more` to `buf` without leaving copies behind: when `buf` has to
@@ -399,6 +407,27 @@ mod tests {
             extend_scrubbed(&mut buf, chunk);
         }
         assert_eq!(buf, b"abcdefghijklmnopqrstuvwxyz");
+    }
+
+    #[test]
+    fn scrubbing_aliases_of_one_buffer_wipes_it_once() {
+        let shared: Arc<[u8]> = Arc::from(b"hunter2".as_slice());
+        let mut reprs: Vec<Representation> = ["text/plain", "UTF8_STRING", "STRING"]
+            .iter()
+            .map(|m| (m.to_string(), Arc::clone(&shared)))
+            .collect();
+        drop(shared);
+        assert_eq!(scrub(&mut reprs), 1);
+        assert!(reprs.is_empty());
+    }
+
+    #[test]
+    fn scrubbing_leaves_a_buffer_a_paste_still_sends() {
+        let shared: Arc<[u8]> = Arc::from(b"hunter2".as_slice());
+        let sending = Arc::clone(&shared);
+        let mut reprs: Vec<Representation> = vec![("text/plain".into(), shared)];
+        assert_eq!(scrub(&mut reprs), 0);
+        assert_eq!(&sending[..], b"hunter2");
     }
 
     #[test]
