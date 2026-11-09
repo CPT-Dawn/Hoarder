@@ -312,6 +312,10 @@ impl Session {
     /// a fresh `HOME`, private XDG directories, and no trace of the caller's
     /// `WAYLAND_DISPLAY`, `DISPLAY` or Hyprland instance.
     pub fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> Command {
+        let program = program.as_ref();
+        if program == "wl-copy" || program == "wl-paste" {
+            require_wl_clipboard();
+        }
         let home = self.dir.path().join("home");
         let mut cmd = Command::new(program);
         cmd.env_clear()
@@ -358,5 +362,52 @@ impl Drop for Session {
                 self.dir.path().display()
             );
         }
+    }
+}
+
+/// Whether `wl-copy --version` printed this came from wl-clipboard itself.
+/// `hoarder-wl-compat` puts Hoarder behind the same names (`wl-copy 1.0.1`).
+fn is_wl_clipboard(version: &str) -> bool {
+    version.starts_with("wl-clipboard ")
+}
+
+/// The tests use `wl-copy`/`wl-paste` as an independent oracle, so Hoarder
+/// standing in for them (hoarder-wl-compat) would test Hoarder against
+/// itself. Stop with a clear message instead of a puzzling failure.
+fn require_wl_clipboard() {
+    static CHECK: std::sync::OnceLock<std::result::Result<(), String>> = std::sync::OnceLock::new();
+    let check = CHECK.get_or_init(|| {
+        let out = Command::new("wl-copy")
+            .arg("--version")
+            .output()
+            .map_err(|e| format!("cannot run wl-copy: {e}"))?;
+        let version = String::from_utf8_lossy(&out.stdout);
+        if is_wl_clipboard(&version) {
+            Ok(())
+        } else {
+            Err(format!(
+                "wl-copy on PATH is not wl-clipboard (it says {:?}; is hoarder-wl-compat \
+                 installed?). The e2e tests need the real one as an oracle: put \
+                 wl-clipboard's binaries first on PATH (docs/testing.md)",
+                version.trim()
+            ))
+        }
+    });
+    if let Err(e) = check {
+        panic!("{e}");
+    }
+}
+
+#[cfg(test)]
+mod wl_clipboard_tests {
+    use super::is_wl_clipboard;
+
+    #[test]
+    fn tells_wl_clipboard_from_the_hoarder_shim() {
+        assert!(is_wl_clipboard(
+            "wl-clipboard 2.3.0\nCopyright (C) 2018-2023 Sergey Bugaev\n"
+        ));
+        assert!(!is_wl_clipboard("wl-copy 1.0.1\n"));
+        assert!(!is_wl_clipboard(""));
     }
 }

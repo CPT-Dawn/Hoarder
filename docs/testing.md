@@ -20,6 +20,13 @@ The end-to-end tests need these on `PATH` (Arch: `sway grim wl-clipboard libavif
 | `dbus-daemon` | A private session bus per notification test (`crates/hoarder/tests/bus/`, used by `e2e_notify.rs` and `e2e_pick.rs`), with a stand-in notification server on it, so no test ever reaches your real desktop. |
 | `bash`, `zsh`, `man` | Oracles for what packages ship (`e2e_dist.rs`): bash runs the completion function, `zsh -n` parses its script, man(1) renders the man pages. |
 
+With `hoarder-wl-compat` installed, `wl-copy` and `wl-paste` are Hoarder itself and conflict with `wl-clipboard`, so the tests that use them stop with a message saying so. Put wl-clipboard's binaries first on `PATH` without installing it, for example from the pacman cache:
+
+```sh
+mkdir -p ~/.cache/wl-clipboard && bsdtar -xf /var/cache/pacman/pkg/wl-clipboard-*.pkg.tar.zst -C ~/.cache/wl-clipboard usr/bin
+PATH=~/.cache/wl-clipboard/usr/bin:$PATH cargo test --workspace
+```
+
 Latency budgets (4K shot-to-clipboard under 150 ms) are `#[ignore]`d in debug builds, since timing unoptimised code proves nothing. Run them with `cargo test --release -p hoarder --test e2e_shot_clipboard`; see [Timings and budgets](#timings-and-budgets) for scaling them with `HOARDER_BUDGET_SCALE`.
 
 Each test starts its own Sway in a private directory under `/tmp`, so tests run in parallel and never touch your real desktop, config or History. Set `HOARDER_E2E_KEEP=1` to keep that directory (it holds a `--debug` `sway.log`) and print its path.
