@@ -104,17 +104,19 @@ fn functional(args: &str) -> Option<Colour> {
         ([r, g, b, a], None) => ([*r, *g, *b], Some(*a)),
         _ => return None,
     };
+    // `f32::from_str` takes "nan" and "inf", which no CSS colour does.
+    let number = |v: &str| v.parse::<f32>().ok().filter(|n| n.is_finite());
     let channel = |v: &str| -> Option<u8> {
         match v.strip_suffix('%') {
-            Some(p) => Some(unit(p.parse::<f32>().ok()? / 100.0)),
-            None => Some(v.parse::<f32>().ok()?.clamp(0.0, 255.0).round() as u8),
+            Some(p) => Some(unit(number(p)? / 100.0)),
+            None => Some(number(v)?.clamp(0.0, 255.0).round() as u8),
         }
     };
     let a = match alpha {
         None => 255,
         Some(a) => match a.strip_suffix('%') {
-            Some(p) => unit(p.parse::<f32>().ok()? / 100.0),
-            None => unit(a.parse().ok()?),
+            Some(p) => unit(number(p)? / 100.0),
+            None => unit(number(a)?),
         },
     };
     let [r, g, b] = channels;
@@ -200,5 +202,24 @@ pub(crate) mod unset_or_radius {
             }
         }
         d.deserialize_any(V)
+    }
+}
+
+#[cfg(test)]
+mod finite_tests {
+    use super::*;
+
+    #[test]
+    fn nan_and_infinity_are_not_colours() {
+        for bad in [
+            "rgb(nan nan nan)",
+            "rgb(inf 0 0)",
+            "rgb(0 0 0 / NaN)",
+            "rgba(1, 2, 3, infinity)",
+            "rgb(nan% 0 0)",
+        ] {
+            assert!(bad.parse::<Colour>().is_err(), "{bad} parsed");
+        }
+        assert!("rgb(10 20 30 / 50%)".parse::<Colour>().is_ok());
     }
 }
