@@ -181,13 +181,21 @@ impl Wire {
         line
     }
 
-    /// The next `name` event, skipping other kinds.
+    /// The next `name` event. Events of other kinds stay queued, in order:
+    /// the protocol doesn't order events from different sources (a
+    /// `clip_added` from the History thread may beat the `selection` the
+    /// compositor echoes), so waiting for one must not throw the other away.
     fn next(&mut self, name: &str) -> Value {
+        if let Some(i) = self.events.iter().position(|e| e["event"] == name) {
+            return self.events.remove(i).expect("just found");
+        }
         loop {
-            let event = self.event();
-            if event["event"] == name {
-                return event;
+            let line = self.read_line();
+            assert!(line.get("event").is_some(), "an event, not {line}");
+            if line["event"] == name {
+                return line;
             }
+            self.events.push_back(line);
         }
     }
 
@@ -1058,4 +1066,28 @@ fn the_documented_examples_run() {
             "this example printed nothing:\n{example}"
         );
     }
+}
+
+/// CI flake (run 42546425810): under load the History thread's `clip_added`
+/// can arrive before the compositor-echoed `selection`. Waiting for one
+/// event must keep the other, whatever order they come in.
+#[test]
+fn waiting_for_an_event_keeps_the_ones_that_came_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("fake-daemon");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let mut wire = Wire::connect(&socket);
+    let (mut daemon, _) = listener.accept().unwrap();
+    daemon
+        .write_all(
+            b"{\"v\":1,\"event\":\"clip_added\",\"clip\":{\"preview\":\"offered\"}}\n\
+              {\"v\":1,\"event\":\"selection\",\"selection\":\"clipboard\",\"types\":[\"text/plain\"]}\n",
+        )
+        .unwrap();
+    wire.stream
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+
+    assert_eq!(wire.next("selection")["types"], json!(["text/plain"]));
+    assert_eq!(wire.next("clip_added")["clip"]["preview"], "offered");
 }
