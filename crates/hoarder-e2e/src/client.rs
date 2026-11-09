@@ -160,6 +160,23 @@ impl Client {
         self.call(move |w| w.set_selection(selection, offer))
     }
 
+    /// Copy again the way Chromium and GLFW apps do: destroy the source this
+    /// client owns, then set a new one, in the same flush. The compositor
+    /// sees the Selection go empty for an instant in between.
+    pub fn recopy(&self, selection: Selection, offer: &[(&str, &[u8])]) -> Result<()> {
+        let offer: Offer = offer
+            .iter()
+            .map(|(m, d)| (m.to_string(), Arc::new(Reply::Now(d.to_vec()))))
+            .collect();
+        self.call(move |w| {
+            if let Some(old) = w.state.owned[selection as usize].take() {
+                w.state.sources.remove(&old.id());
+                old.destroy();
+            }
+            w.set_selection(selection, offer)
+        })
+    }
+
     /// Like [`set_selection`](Self::set_selection), but each type answers a
     /// paste the way its [`Reply`] says: at once, late, or never. Use it to
     /// play a slow or stuck source app.
@@ -266,7 +283,7 @@ pub(crate) struct State {
     /// What each live data source offers, by MIME type.
     sources: HashMap<ObjectId, Offer>,
     /// The source currently set on each Selection, until it is cancelled.
-    owned: [Option<ObjectId>; 2],
+    owned: [Option<ExtDataControlSourceV1>; 2],
     /// Pipes of [`Reply::Never`] pastes, held open until the client exits.
     stalled: Vec<OwnedFd>,
     /// Every MIME type anyone has pasted from this client, in order.
@@ -490,12 +507,12 @@ impl Worker {
             source.offer(mime.clone());
         }
         self.state.sources.insert(source.id(), offer);
-        self.state.owned[selection as usize] = Some(source.id());
         let device = self.data_device.as_ref().expect("created above");
         match selection {
             Selection::Clipboard => device.set_selection(Some(&source)),
             Selection::Primary => device.set_primary_selection(Some(&source)),
         }
+        self.state.owned[selection as usize] = Some(source);
         self.roundtrip()
     }
 
@@ -778,7 +795,7 @@ impl Dispatch<ExtDataControlSourceV1, ()> for State {
             }
             ext_data_control_source_v1::Event::Cancelled => {
                 for owned in &mut state.owned {
-                    if owned.as_ref() == Some(&source.id()) {
+                    if owned.as_ref() == Some(source) {
                         *owned = None;
                     }
                 }

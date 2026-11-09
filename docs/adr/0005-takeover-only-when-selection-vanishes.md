@@ -6,5 +6,6 @@ wl-clip-persist re-offers immediately on every copy, and that replacement is the
 
 ## Consequences
 
+- The Selection must stay empty for 150 ms before the Takeover. Chromium/Electron and GLFW apps copy by destroying their old source before setting the new one, so it blinks empty on every copy but the first; an immediate Takeover there landed after the new copy and silently replaced it with the old Clip.
 - An app that *deliberately* clears the clipboard will see the last content restored. Exceptions: Secret and Concealed Clips are never restored, and `hoarder clear` is honoured.
 - This is a hypothesis until a prototype is exercised against Firefox, Chromium/Electron, GTK, Qt, IntelliJ and LibreOffice.

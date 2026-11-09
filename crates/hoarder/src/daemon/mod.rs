@@ -37,6 +37,12 @@ type Fail = (Exit, String);
 /// How often retention runs besides on every insert.
 const RETENTION_EVERY: Duration = Duration::from_secs(60 * 60);
 
+/// How long a Selection must stay empty before the Daemon takes it over.
+/// Chromium and GLFW apps copy by destroying their old source before setting
+/// the new one, so the Selection blinks empty on every copy but the first; a
+/// Takeover in that blink would land after the new copy and replace it.
+const TAKEOVER_GRACE: Duration = Duration::from_millis(150);
+
 const SELECTIONS: [Selection; 2] = [Selection::Clipboard, Selection::Primary];
 
 /// Run the Daemon until the compositor goes away.
@@ -243,6 +249,9 @@ struct Slot {
     take_over_after_read: bool,
     /// Bumped on every change, so stale read callbacks know to stop.
     generation: u64,
+    /// Bumped whenever the Selection changes hands or the Daemon takes on
+    /// something new, so a pending Takeover knows it is stale.
+    epoch: u64,
 }
 
 /// What a Selection holds once the Daemon takes it on: everything
@@ -293,6 +302,7 @@ impl Slot {
         self.sensitivity = sensitivity;
         self.concealed = concealed;
         self.take_over_after_read = false;
+        self.epoch += 1;
     }
 
     /// Hold nothing: wipe what was kept and forget its Concealed Clip.
@@ -392,6 +402,7 @@ impl Daemon {
         for event in events {
             match event {
                 WatchEvent::Changed { which, offer } => {
+                    self.slots[which as usize].epoch += 1;
                     self.current[which as usize] = offer.clone();
                     self.broadcast(&hoarder_ipc::Event::Selection {
                         selection: to_ipc(which),
@@ -520,13 +531,41 @@ impl Daemon {
         let slot = &mut self.slots[which as usize];
         slot.owner = Some(Owner::None);
         slot.offered.clear();
-        match &mut slot.read {
-            // The source is gone: finish the type in flight, skip the rest.
-            Some(read) => {
-                read.queue.clear();
-                slot.take_over_after_read = true;
-            }
-            None => self.take_over(which),
+        // The source is gone: finish the type in flight, skip the rest.
+        if let Some(read) = &mut slot.read {
+            read.queue.clear();
+        }
+        if !slot.may_take_over {
+            return;
+        }
+        let epoch = slot.epoch;
+        let timer = self.handle.insert_source(
+            Timer::from_duration(TAKEOVER_GRACE),
+            move |_, _, daemon: &mut Daemon| {
+                daemon.still_empty(which, epoch);
+                TimeoutAction::Drop
+            },
+        );
+        if timer.is_err() {
+            self.still_empty(which, epoch);
+        }
+    }
+
+    /// The grace after `which` went empty is over: take it over unless
+    /// anything has happened to it since.
+    fn still_empty(&mut self, which: Selection, epoch: u64) {
+        // A new copy may be sitting unread on the socket.
+        if self.on_wayland().is_err() || self.fatal.is_some() {
+            return;
+        }
+        let slot = &mut self.slots[which as usize];
+        if slot.epoch != epoch || slot.owner != Some(Owner::None) {
+            return;
+        }
+        if slot.read.is_some() {
+            slot.take_over_after_read = true;
+        } else {
+            self.take_over(which);
         }
     }
 

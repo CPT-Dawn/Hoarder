@@ -247,6 +247,33 @@ fn hoarder_never_owns_the_selection_while_its_source_is_alive() {
 }
 
 #[test]
+fn copying_again_from_the_same_app_is_never_undone() {
+    // Chromium and GLFW apps copy by destroying their old source before
+    // setting the new one, so the Selection is empty for an instant. That
+    // is not the app going away: a Takeover there would put the old Clip
+    // back over the new copy.
+    let session = Session::start_default().unwrap();
+    let daemon = Daemon::start(&session, &[]);
+    let app = session.client().unwrap();
+    app.set_selection(Selection::Clipboard, &[("text/plain", b"first".as_slice())])
+        .unwrap();
+    daemon.settled();
+
+    for n in 0..20 {
+        let text = format!("copy {n}");
+        app.recopy(Selection::Clipboard, &[("text/plain", text.as_bytes())])
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            app.owns_selection(Selection::Clipboard).unwrap(),
+            "copy {n} was taken back"
+        );
+        assert_eq!(paste_type(&session, "text/plain"), text.as_bytes());
+        daemon.settled();
+    }
+}
+
+#[test]
 fn nothing_is_kept_with_persist_off() {
     let session = Session::start_default().unwrap();
     let daemon = Daemon::start(&session, &["--set", "clipboard.persist=false"]);
