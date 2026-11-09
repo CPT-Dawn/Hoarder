@@ -491,6 +491,33 @@ fn ctrl_digits_restore_that_row_at_once() {
 }
 
 #[test]
+fn ctrl_shift_digit_restores_that_row_as_plain_text() {
+    let (session, _paint) = painted();
+    seed(
+        &session,
+        &[Seed {
+            reprs: &[
+                ("text/html", b"<b>bold</b> move"),
+                ("text/plain;charset=utf-8", b"bold move"),
+            ],
+            app: None,
+            pinned: false,
+        }],
+    );
+    let _daemon = Daemon::start(&session);
+
+    let picker = open_picker(&session);
+    session
+        .input()
+        .chord(&[keys::KEY_LEFTCTRL, keys::KEY_LEFTSHIFT, keys::KEY_1])
+        .unwrap();
+    let done = picker.finish();
+
+    assert!(done.status.success(), "{}", done.stderr);
+    assert_eq!(pasteable_types(&session), ["text/plain;charset=utf-8"]);
+}
+
+#[test]
 fn ctrl_digits_count_the_rows_a_query_left() {
     let (session, _paint) = painted();
     seed(

@@ -392,8 +392,8 @@ impl App {
                     model.set_pinned(id, !pinned);
                 }
             }
-            sym if ctrl && quick_row(sym).is_some() => {
-                let n = quick_row(sym).unwrap_or_default();
+            sym if ctrl && quick_row(event.raw_code, sym).is_some() => {
+                let n = quick_row(event.raw_code, sym).unwrap_or_default();
                 if let Some(clip) = model.row(n, rows as usize) {
                     self.outcome = Some(Some(Pick {
                         id: clip.id,
@@ -460,10 +460,43 @@ fn scroll_preview(
     }
 }
 
-/// The row (from 0) Ctrl+`sym` quick-restores, for the digits 1–9.
-fn quick_row(sym: Keysym) -> Option<usize> {
-    let digit = sym.key_char()?.to_digit(10)?;
-    (1..=9).contains(&digit).then(|| digit as usize - 1)
+/// The row (from 0) Ctrl+<key> quick-restores, for the digits 1–9.
+///
+/// The row comes from the physical digit-row key (`raw_code` is the evdev
+/// code, so KEY_1..KEY_9 are 2..10), because `sym` has the layout and
+/// Shift applied: AZERTY gives `ampersand` for the 1 key, and Shift+1 on US
+/// gives `exclam`. Keypad digits still go by their keysym.
+fn quick_row(raw_code: u32, sym: Keysym) -> Option<usize> {
+    const FIRST: u32 = 2; // KEY_1
+    if (FIRST..FIRST + 9).contains(&raw_code) {
+        return Some((raw_code - FIRST) as usize);
+    }
+    let (kp1, kp9) = (Keysym::KP_1.raw(), Keysym::KP_9.raw());
+    (kp1..=kp9)
+        .contains(&sym.raw())
+        .then(|| (sym.raw() - kp1) as usize)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quick_row_follows_the_physical_key_on_any_layout() {
+        // AZERTY: the 1 key yields `ampersand`; US with Shift yields `exclam`.
+        assert_eq!(quick_row(2, Keysym::ampersand), Some(0));
+        assert_eq!(quick_row(2, Keysym::exclam), Some(0));
+        assert_eq!(quick_row(10, Keysym::ccedilla), Some(8));
+        assert_eq!(quick_row(11, Keysym::_0), None);
+        assert_eq!(quick_row(16, Keysym::q), None);
+    }
+
+    #[test]
+    fn quick_row_keeps_keypad_digits() {
+        assert_eq!(quick_row(79, Keysym::KP_1), Some(0));
+        assert_eq!(quick_row(73, Keysym::KP_9), Some(8));
+        assert_eq!(quick_row(82, Keysym::KP_0), None);
+    }
 }
 
 impl CompositorHandler for App {
