@@ -672,7 +672,7 @@ impl Freezer {
             frame.attach_buffer(&shm.buffer);
             frame.damage_buffer(0, 0, width as i32, height as i32);
             frame.capture();
-            cursor.format = Some(format);
+            cursor.buffer = Some((format, width, height));
             cursor_frames.push((*i, frame, shm));
         }
         self.dispatch_until(queue, "capture", |s| s.copies().all(|c| c.ready))?;
@@ -919,7 +919,9 @@ struct CursorCopy {
     offered: Vec<u32>,
     constraints_done: bool,
     stopped: bool,
-    format: Option<ShmFormat>,
+    /// Format and size of the buffer the copy went into. Constraints may
+    /// change `size` after that, so the pixels are read with these.
+    buffer: Option<(ShmFormat, u32, u32)>,
     transform: Option<Transform>,
     ready: bool,
     /// Captured, failed, or not worth capturing.
@@ -930,11 +932,10 @@ struct CursorCopy {
 impl CursorCopy {
     /// The cursor image upright, as premultiplied `Argb8888`.
     fn finish(self) -> Option<FrozenCursor> {
-        let (format, (x, y)) = (self.format?, self.position?);
+        let ((format, w, h), (x, y)) = (self.buffer?, self.position?);
         if !self.ready {
             return None;
         }
-        let (w, h) = self.size;
         let transform = self.transform.unwrap_or(Transform::Normal);
         let (uw, uh) = if transform.swaps_axes() {
             (h, w)
@@ -946,7 +947,7 @@ impl CursorCopy {
             for ux in 0..uw {
                 let (bx, by) = transform.buffer_position(ux, uy, w, h);
                 let i = (by * w + bx) as usize * 4;
-                let mut p: [u8; 4] = self.data[i..i + 4].try_into().ok()?;
+                let mut p: [u8; 4] = self.data.get(i..i + 4)?.try_into().ok()?;
                 if format == ShmFormat::Abgr8888 {
                     p.swap(0, 2);
                 }
@@ -1352,5 +1353,28 @@ mod tests {
             assert_eq!(format.rgb(frame.upright_pixel(1, 0)), [half; 3]);
             assert_eq!(frame.upright_pixel(1, 0) >> 30, white >> 30, "padding kept");
         }
+    }
+}
+
+#[cfg(test)]
+mod cursor_resize_tests {
+    use super::*;
+
+    #[test]
+    fn a_cursor_resized_after_its_copy_does_not_panic() {
+        // Allocated and copied at 24x24, then Hyprland re-sent constraints
+        // for a 32x32 cursor before the Capture finished.
+        let cursor = CursorCopy {
+            entered: true,
+            position: Some((100, 100)),
+            size: (32, 32),
+            buffer: Some((ShmFormat::Argb8888, 24, 24)),
+            ready: true,
+            done: true,
+            data: vec![0xff; 24 * 24 * 4],
+            ..CursorCopy::default()
+        };
+        let frozen = cursor.finish().expect("the cursor as copied");
+        assert_eq!((frozen.width, frozen.height), (24, 24));
     }
 }
