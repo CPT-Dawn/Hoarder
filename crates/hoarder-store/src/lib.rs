@@ -24,7 +24,7 @@ mod clip;
 mod crypt;
 pub mod retention;
 
-use std::fs::{DirBuilder, OpenOptions, Permissions};
+use std::fs::{DirBuilder, File, OpenOptions, Permissions};
 use std::io::Write as _;
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
@@ -576,7 +576,9 @@ impl Store {
 
     /// Rebuild the in-memory search indexes of an unlocked encrypted History
     /// from its sealed text. Deleting a Clip by any path drops its entries.
-    fn index_in_memory(&self) -> Result<()> {
+    /// A Clip whose sealed text cannot be opened is dropped (and logged), so
+    /// one bad row cannot make the rest of the History unavailable.
+    fn index_in_memory(&mut self) -> Result<()> {
         let Some(key) = self.sealer()? else {
             return Ok(());
         };
@@ -600,12 +602,28 @@ impl Store {
             .db
             .prepare("SELECT id, sealed FROM clips WHERE sealed IS NOT NULL")?;
         let mut rows = sealed.query([])?;
+        let mut bad = Vec::new();
         while let Some(row) = rows.next()? {
             let id: i64 = row.get(0)?;
-            let (preview, text) = open_text(&key.open(&row.get::<_, Vec<u8>>(1)?)?)?;
-            previews.execute(params![id, preview])?;
-            texts.execute(params![id, text])?;
+            match key
+                .open(&row.get::<_, Vec<u8>>(1)?)
+                .and_then(|plain| open_text(&plain))
+            {
+                Ok((preview, text)) => {
+                    previews.execute(params![id, preview])?;
+                    texts.execute(params![id, text])?;
+                }
+                Err(e) => {
+                    eprintln!(
+                        "hoarder-store: dropping clip {id}, its sealed text is unreadable: {e}"
+                    );
+                    bad.push(id);
+                }
+            }
         }
+        drop(rows);
+        drop((sealed, previews, texts));
+        self.delete_all(&bad)?;
         Ok(())
     }
 
@@ -616,6 +634,7 @@ impl Store {
         let from = self.sealer()?.cloned();
         let (from, to) = (from.as_ref(), to.as_ref());
         let mut old_blobs = Vec::new();
+        let mut bad = Vec::new();
         let tx = self.db.transaction()?;
         let ids: Vec<i64> = tx
             .prepare("SELECT id FROM clips")?
@@ -629,9 +648,23 @@ impl Store {
                 .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
                 .collect::<rusqlite::Result<_>>()?;
             let mut plain = Vec::with_capacity(rows.len());
+            let mut readable = true;
             for (ord, mime, inline, blob) in rows {
                 old_blobs.extend(blob.clone());
-                plain.push((ord, mime, load_repr(&self.blobs, from, inline, blob)?));
+                match load_repr(&self.blobs, from, inline, blob) {
+                    Ok(data) => plain.push((ord, mime, data)),
+                    Err(e) => {
+                        eprintln!(
+                            "hoarder-store: dropping clip {id}, a representation is unreadable: {e}"
+                        );
+                        readable = false;
+                        break;
+                    }
+                }
+            }
+            if !readable {
+                bad.push(id);
+                continue;
             }
             for (ord, _, data) in &plain {
                 let (inline, blob) = store_repr(&self.blobs, to, data)?;
@@ -688,6 +721,7 @@ impl Store {
         tx.commit()?;
         self.recipient = recipient;
         self.key = to.cloned();
+        self.delete_all(&bad)?;
         for hash in old_blobs {
             let users: i64 = self.db.query_row(
                 "SELECT count(*) FROM reprs WHERE blob_hash = ?1",
@@ -834,6 +868,9 @@ fn write_blob(blobs: &Path, hash: &[u8], data: &[u8]) -> Result<()> {
     file.write_all(data)?;
     file.sync_data()?;
     std::fs::rename(&tmp, &path)?;
+    // Persist the new directory entry, or a crash can leave the database
+    // pointing at a blob that is not there.
+    File::open(blobs)?.sync_all()?;
     Ok(())
 }
 
@@ -866,6 +903,64 @@ fn migrate(db: &mut Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One undecryptable `sealed` row is dropped on unlock; the rest of the
+    /// History opens.
+    #[test]
+    fn unlock_skips_a_corrupt_sealed_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = Key::generate();
+        let (good, bad) = {
+            let mut store = Store::open(dir.path()).unwrap();
+            store.encrypt(key.clone()).unwrap();
+            let good = store
+                .record(&[("text/plain", b"keep vault")], None, 1)
+                .unwrap()
+                .id;
+            let bad = store
+                .record(&[("text/plain", b"lose vault")], None, 2)
+                .unwrap()
+                .id;
+            store
+                .db
+                .execute("UPDATE clips SET sealed = x'00' WHERE id = ?1", [bad])
+                .unwrap();
+            (good, bad)
+        };
+        let mut store = Store::open(dir.path()).unwrap();
+        store.unlock(key).unwrap();
+        let ids: Vec<i64> = store.list(10).unwrap().into_iter().map(|c| c.id).collect();
+        assert_eq!(ids, [good]);
+        assert!(store.clip(bad).unwrap().is_none());
+        assert_eq!(store.search("vault", 10).unwrap().len(), 1);
+    }
+
+    /// A missing blob drops its Clip instead of blocking the encryption
+    /// rewrite.
+    #[test]
+    fn encrypt_skips_a_clip_whose_blob_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
+        let big = vec![7u8; INLINE_MAX + 1];
+        let other = vec![9u8; INLINE_MAX + 1];
+        let lost = store.record(&[("image/png", &big)], None, 1).unwrap().id;
+        let kept = store.record(&[("image/png", &other)], None, 2).unwrap().id;
+        let blob: Vec<u8> = store
+            .db
+            .query_row(
+                "SELECT blob_hash FROM reprs WHERE clip_id = ?1",
+                [lost],
+                |r| r.get(0),
+            )
+            .unwrap();
+        std::fs::remove_file(store.blob_path(&blob)).unwrap();
+        store.encrypt(Key::generate()).unwrap();
+        assert!(store.is_encrypted());
+        let ids: Vec<i64> = store.list(10).unwrap().into_iter().map(|c| c.id).collect();
+        assert_eq!(ids, [kept]);
+        let reprs = store.representations(kept).unwrap().unwrap();
+        assert_eq!(reprs[0].1, other);
+    }
 
     /// A History written before the `clips_text` index (schema version 1)
     /// upgrades in place: old Clips become searchable, deletes reach the new
