@@ -34,7 +34,10 @@ pub fn encode(
         Format::Webp => {
             // `image` only encodes lossless WebP; libwebp does the lossy kind.
             let quality = settings.webp.quality.get() as f32;
-            let encoded = webp::Encoder::from_rgb(&rgb, w, h).encode(quality);
+            // Not `encode`: it unwraps, so a too-big image would panic.
+            let encoded = webp::Encoder::from_rgb(&rgb, w, h)
+                .encode_simple(false, quality)
+                .map_err(|e| failed(&format!("{e:?}")))?;
             return out.write_all(&encoded).map_err(|e| failed(&e));
         }
         Format::Jpeg => image::codecs::jpeg::JpegEncoder::new_with_quality(
@@ -56,4 +59,23 @@ pub fn encode(
 /// Whether saving `image` as `format` drops bits: only PNG holds 16 bits.
 pub fn narrows(image: &Image, format: Format) -> bool {
     image.depth == Depth::Sixteen && format != Format::Png
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lossy_webp() -> Screenshot {
+        let mut settings = Screenshot::default();
+        settings.webp.lossless = false;
+        settings
+    }
+
+    #[test]
+    fn lossy_webp_too_wide_for_libwebp_is_an_error_not_a_panic() {
+        // libwebp's limit is 16383 px a side; five 4K outputs side by side pass it.
+        let image = Image::new(16_384, 1, Depth::Eight);
+        let err = encode(&image, Format::Webp, &lossy_webp(), Vec::new()).unwrap_err();
+        assert!(err.starts_with("cannot encode webp"), "{err}");
+    }
 }
