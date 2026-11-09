@@ -4,6 +4,16 @@ Every notable change to Hoarder. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.3](https://github.com/CPT-Dawn/Hoarder/releases/tag/v1.0.3) - 2026-11-09
+
+### Fixes
+
+- **daemon:** Stop Takeover from stomping on a fresh Ctrl+C ([6900d84](https://github.com/CPT-Dawn/Hoarder/commit/6900d84434f7ab62567e6fa7f83aba9c710e6b38))
+
+### Tests
+
+- **ipc:** Stop next() from eating events it wasn't waiting for ([35600f2](https://github.com/CPT-Dawn/Hoarder/commit/35600f2b9643ce7a2290297426e6bae1d96ba4b0))
+
 ## [1.0.2](https://github.com/CPT-Dawn/Hoarder/releases/tag/v1.0.2) - 2026-11-09
 
 ### Fixes
