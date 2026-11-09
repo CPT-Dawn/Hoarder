@@ -134,3 +134,21 @@ fn shot_last_takes_the_last_region_again_without_an_overlay() {
     assert_eq!((png.width, png.height), (100, 50));
     assert_cut_from(&png, &Pattern::Ramp, (320, 240), (30, 20));
 }
+
+#[test]
+fn shot_last_with_an_off_screen_last_region_is_a_usage_error() {
+    let (session, _app) = two_outputs();
+    let state = session.runtime_dir().join("home/.local/state/hoarder");
+    std::fs::create_dir_all(&state).unwrap();
+    std::fs::write(
+        state.join("state.toml"),
+        "[last_region]\nx = 5000.0\ny = 5000.0\nwidth = 100.0\nheight = 50.0\n",
+    )
+    .unwrap();
+
+    let out = run(&session, &["shot", "last", "-o", "-"]);
+
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("off-screen"), "{err}");
+}

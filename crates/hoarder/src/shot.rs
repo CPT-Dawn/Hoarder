@@ -122,10 +122,16 @@ pub fn run(
                 )
             })?;
             let frozen = frozen_with_cursor(config)?;
-            (
-                cut::cut(&frozen.frames, Some(&region), &config.capture),
-                target.name(),
-            )
+            let cut = cut::cut(&frozen.frames, Some(&region), &config.capture);
+            let image = &cut.main_part().image;
+            if image.width == 0 || image.height == 0 {
+                return Err((
+                    Exit::Usage,
+                    "the last Region is off-screen: take a new one with `hoarder shot region`"
+                        .into(),
+                ));
+            }
+            (cut, target.name())
         }
         (Target::Output, None) => {
             let frozen = frozen_with_cursor(config)?;
