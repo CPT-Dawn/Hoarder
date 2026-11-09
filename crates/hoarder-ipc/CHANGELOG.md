@@ -2,7 +2,13 @@
 
 All notable changes to `hoarder-ipc`. The crate is versioned with Hoarder and fetched by git from a release tag (it is not on crates.io); the compatibility policy in its README holds: additive protocol changes keep `v: 1`, breaking ones bump the protocol `v`.
 
-## Unreleased
+## 1.0.2
+
+Protocol v1, wire format unchanged.
+
+- `parse_request`: an unknown value inside a known op (`"selection":"secondary"`) is now `bad_request`, not `unknown_op`.
+
+## 1.0.0
 
 First release, protocol v1, from tag `v1.0.0`.
 

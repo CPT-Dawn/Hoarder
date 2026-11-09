@@ -4,6 +4,33 @@ Every notable change to Hoarder. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.2](https://github.com/CPT-Dawn/Hoarder/releases/tag/v1.0.2) - 2026-11-09
+
+### Fixes
+
+- **capture:** Read the cursor at the size it was copied, not resized ([a352407](https://github.com/CPT-Dawn/Hoarder/commit/a352407fc982d94b0f18c9c42604d770c251b623))
+- **config:** Write through a symlinked config instead of over it ([532a722](https://github.com/CPT-Dawn/Hoarder/commit/532a722124f87736d3312087c0028ebb5728892b))
+- **ipc:** Blame the bad field, not the op that carried it ([9dde62e](https://github.com/CPT-Dawn/Hoarder/commit/9dde62ecac6f7c8ab08943f84a251936d99c704d))
+- **encode:** Let libwebp say no without taking the process with it ([2c1d1d2](https://github.com/CPT-Dawn/Hoarder/commit/2c1d1d2acaadfb938234706a57f28a347c7d47dc))
+- **config:** Nan is not a colour, however you spell it ([dc1a87f](https://github.com/CPT-Dawn/Hoarder/commit/dc1a87f3d17916c8d4e8ada1f7a7d251e93ce427))
+- **setup:** /etc/sway/config.d is not where Hoarder left your binds ([060c054](https://github.com/CPT-Dawn/Hoarder/commit/060c0544e76ead85bb1b47bf60127bbe9f3d650f))
+- **store:** Let one bad row or lost blob walk the plank, not the History ([30febb2](https://github.com/CPT-Dawn/Hoarder/commit/30febb2482622f2aa02ad9c52d83d1a46cffc8af))
+- **shot:** Say when the last Region is off-screen, not 'zero width' ([73a755c](https://github.com/CPT-Dawn/Hoarder/commit/73a755c971050cb145d755121843a1a13abbbb6e))
+- **select:** Keep Refine selections and clicks from collapsing to nothing ([cb454b1](https://github.com/CPT-Dawn/Hoarder/commit/cb454b11bbb9c5c8df569019bb038e25bbfbc493))
+- **daemon:** Let the last alias of a clipboard buffer wipe it ([3120769](https://github.com/CPT-Dawn/Hoarder/commit/312076951ce4a5cc1881eb7a189b8550b0b2a127))
+- **clipboard:** Make wl-copy stop eating typos as text, flags and all ([d8d7e78](https://github.com/CPT-Dawn/Hoarder/commit/d8d7e78fa74ee07528474eb2a1b2fb151edb7494))
+- **config:** Make live reload follow symlinks, and survive a rm -rf of the dir ([7e5274b](https://github.com/CPT-Dawn/Hoarder/commit/7e5274b2ee1e7d3119c3668a6c0b3d1031df5b7c))
+- **picker:** Quick-restore by physical digit key, not by shifted keysym ([1d29b5b](https://github.com/CPT-Dawn/Hoarder/commit/1d29b5bcbb52c76b94be1fa2100e9f57e5842541))
+
+### Documentation
+
+- **readme:** Give Hoarder the storefront it deserves ([ea8ac6c](https://github.com/CPT-Dawn/Hoarder/commit/ea8ac6c1015ffd9ffbd467de2555f5d0e13998d5))
+- **claude:** Write down the commands that actually work here ([95b4c8f](https://github.com/CPT-Dawn/Hoarder/commit/95b4c8f52c9a52a73905e02ae957bbb2da651da1))
+
+### Tests
+
+- **e2e:** Refuse to grade Hoarder with Hoarder's own wl-copy ([f7bb95b](https://github.com/CPT-Dawn/Hoarder/commit/f7bb95b87f19350175127e3aefa74f6cd69e7ea1))
+
 ## [1.0.1](https://github.com/CPT-Dawn/Hoarder/releases/tag/v1.0.1) - 2026-11-08
 
 ### Fixes
