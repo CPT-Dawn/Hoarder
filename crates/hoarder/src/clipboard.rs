@@ -57,7 +57,7 @@ pub struct CopyArgs {
     #[arg(short, long, value_name = "NAME")]
     seat: Option<String>,
     /// Text to copy, joined with spaces. Without it, stdin is copied.
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    #[arg()]
     text: Vec<String>,
 }
 
@@ -89,9 +89,14 @@ pub struct PasteArgs {
 #[command(
     name = "wl-copy",
     version,
+    disable_version_flag = true,
+    infer_long_args = true,
     about = "Copy stdin or text to the Wayland clipboard"
 )]
 struct WlCopy {
+    /// Print the version (wl-clipboard's `-v`; `-V` kept).
+    #[arg(short = 'v', short_alias = 'V', long, action = clap::ArgAction::Version)]
+    version: (),
     #[command(flatten)]
     args: CopyArgs,
 }
@@ -101,9 +106,14 @@ struct WlCopy {
 #[command(
     name = "wl-paste",
     version,
+    disable_version_flag = true,
+    infer_long_args = true,
     about = "Paste the Wayland clipboard to stdout"
 )]
 struct WlPaste {
+    /// Print the version (wl-clipboard's `-v`; `-V` kept).
+    #[arg(short = 'v', short_alias = 'V', long, action = clap::ArgAction::Version)]
+    version: (),
     #[command(flatten)]
     args: PasteArgs,
 }

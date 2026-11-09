@@ -86,8 +86,10 @@ enum Command {
         format: Option<String>,
     },
     /// Copy stdin or text to the clipboard (accepts every wl-copy flag).
+    #[command(infer_long_args = true)]
     Copy(clipboard::CopyArgs),
     /// Paste the clipboard to stdout (accepts every wl-paste flag).
+    #[command(infer_long_args = true)]
     Paste(clipboard::PasteArgs),
     /// Serve an Offer read from stdin; started by Hoarder itself.
     #[command(name = clipboard::SERVE_SUBCOMMAND, hide = true)]

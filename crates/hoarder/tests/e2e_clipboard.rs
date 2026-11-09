@@ -141,7 +141,7 @@ fn run(session: &Session, mut cmd: Command, stdin: Option<&[u8]>) -> Ran {
     let mut child = cmd.spawn().expect("spawn");
     if let Some(data) = stdin {
         let mut pipe = child.stdin.take().expect("piped stdin");
-        pipe.write_all(data).expect("write stdin");
+        let _ = pipe.write_all(data); // a usage error exits before reading
     }
     let status = wait_with_timeout(&mut child, Duration::from_secs(10));
     Ran {
@@ -537,5 +537,116 @@ fn copy_and_paste_fall_back_to_wlr_data_control() {
         let mut gone = session.command("wl-paste");
         gone.args(flag);
         assert!(!run(&session, gone, None).status.success(), "cleared");
+    }
+}
+
+/// What a copy with odd arguments observably did: whether it succeeded, and
+/// what both selections held afterwards.
+#[derive(Debug, PartialEq, Eq)]
+struct CopyEffect {
+    ok: bool,
+    clipboard: Option<Vec<u8>>,
+    primary: Option<Vec<u8>>,
+}
+
+fn copy_effect(session: &Session, tool: Tool, args: &[&str], stdin: Option<&[u8]>) -> CopyEffect {
+    for primary in [false, true] {
+        let mut clear = Tool::Hoarder.copy(session);
+        clear.arg("--clear");
+        if primary {
+            clear.arg("--primary");
+        }
+        assert!(run(session, clear, None).status.success());
+    }
+    let mut cmd = tool.copy(session);
+    cmd.args(args);
+    let ok = run(session, cmd, stdin).status.success();
+    let held = |primary: bool| {
+        let mut cmd = Tool::WlClipboard.paste(session);
+        cmd.arg("--no-newline");
+        if primary {
+            cmd.arg("--primary");
+        }
+        let out = run(session, cmd, None);
+        out.status.success().then_some(out.stdout)
+    };
+    CopyEffect {
+        ok,
+        clipboard: held(false),
+        primary: held(true),
+    }
+}
+
+/// Copy argument lists wl-copy treats in its own way: unknown options are a
+/// usage error, options may follow the text, `--` ends options.
+type OddCase = (&'static str, &'static [&'static str], Option<&'static [u8]>);
+const ODD_ARGS: &[OddCase] = &[
+    ("unknown long option", &["--bogus"], Some(b"in")),
+    ("unknown short option", &["-z", "text"], Some(b"in")),
+    ("typo of --sensitive", &["--sensitve"], Some(b"secret")),
+    ("option after text", &["hello", "-n"], None),
+    ("text after option", &["-n", "hello"], None),
+    ("option between text", &["a", "-p", "b"], None),
+    ("dash dash ends options", &["--", "-v"], None),
+    ("dash dash then flag-like", &["--", "--primary", "x"], None),
+    ("lone dash", &["-"], None),
+    ("flag after dash dash is text", &["hello", "--", "-n"], None),
+    ("abbreviated long option", &["--prim", "x"], None),
+    ("abbreviated clear", &["--cle"], None),
+    ("value attached", &["-ttext/x-a", "hello"], None),
+    ("bundled shorts", &["-pn", "hello"], None),
+];
+
+#[test]
+fn copy_parses_options_like_wl_copy() {
+    let session = Session::start_default().unwrap();
+    for (name, args, stdin) in ODD_ARGS {
+        let reference = copy_effect(&session, Tool::WlClipboard, args, *stdin);
+        for tool in [Tool::Hoarder, Tool::Shim] {
+            let got = copy_effect(&session, tool, args, *stdin);
+            assert_eq!(
+                got, reference,
+                "case {name:?} {args:?}: {tool:?} disagrees with wl-copy"
+            );
+        }
+    }
+}
+
+/// `-v`/`--version` print a version and succeed in wl-copy and wl-paste, so
+/// the shims must too.
+#[test]
+fn shims_print_a_version_for_dash_v() {
+    let session = Session::start_default().unwrap();
+    for name in ["wl-copy", "wl-paste"] {
+        for flag in ["-v", "--version"] {
+            let mut real = session.command(name);
+            real.arg(flag);
+            assert!(run(&session, real, None).status.success(), "{name} {flag}");
+            let mut cmd = session.command(shim(&session, name));
+            cmd.arg(flag);
+            let got = run(&session, cmd, None);
+            assert!(got.status.success(), "{name} {flag}: {}", got.stderr);
+            assert!(!got.stdout.is_empty(), "{name} {flag} printed nothing");
+        }
+    }
+}
+
+/// wl-paste rejects what it does not know, too.
+#[test]
+fn paste_rejects_unknown_options_like_wl_paste() {
+    let session = Session::start_default().unwrap();
+    let mut real = Tool::WlClipboard.paste(&session);
+    real.arg("--bogus");
+    let want = run(&session, real, None).status.code();
+    assert_ne!(want, Some(0));
+    for tool in [Tool::Hoarder, Tool::Shim] {
+        let mut cmd = tool.paste(&session);
+        cmd.arg("--bogus");
+        let out = run(&session, cmd, None);
+        assert!(
+            !out.status.success() && out.stdout.is_empty(),
+            "{tool:?}: {}",
+            out.stderr
+        );
     }
 }
