@@ -196,6 +196,9 @@ pub struct Selector {
     outputs: Option<Vec<Rect>>,
     /// The output the current selection is held to.
     home: Option<Rect>,
+    /// The `home` a Refine selection had before a press began a new drag,
+    /// restored when that press turns out to be a click.
+    previous_home: Option<Rect>,
 }
 
 impl Selector {
@@ -208,6 +211,7 @@ impl Selector {
             space: false,
             outputs: None,
             home: None,
+            previous_home: None,
         }
     }
 
@@ -280,7 +284,13 @@ impl Selector {
             return None;
         };
         Some(match tool {
-            Tool::Capture => Action::Region(self.clamped(rect).region()),
+            Tool::Capture => {
+                let region = self.clamped(rect).region();
+                if region.width <= 0.0 || region.height <= 0.0 {
+                    return None; // nothing to capture: stay in Refine
+                }
+                Action::Region(region)
+            }
             Tool::Cursor => Action::ToggleCursor,
             Tool::Cancel => Action::Cancel,
         })
@@ -315,6 +325,7 @@ impl Selector {
     }
 
     fn start_drag(&mut self, at: (f64, f64), previous: Option<Rect>) {
+        self.previous_home = self.home;
         self.home = self.outputs.as_ref().and_then(|outputs| {
             outputs
                 .iter()
@@ -371,6 +382,7 @@ impl Selector {
                 if tiny {
                     return match previous {
                         Some(rect) => {
+                            self.home = self.previous_home;
                             self.refine(rect, Edges::ALL);
                             None
                         }
@@ -458,7 +470,13 @@ impl Selector {
                     top: active.top && dy != 0.0,
                     bottom: active.bottom && dy != 0.0,
                 };
+                let (before, flags) = (*rect, edges);
                 rect.shift(&mut edges, (dx, dy));
+                if rect.x0 >= rect.x1 || rect.y0 >= rect.y1 {
+                    // A nudge never takes the last physical pixel away.
+                    *rect = before;
+                    edges = flags;
+                }
                 if dx != 0.0 {
                     (active.left, active.right) = (edges.left, edges.right);
                 } else {
@@ -561,5 +579,30 @@ mod tests {
             s.release((10.0, 120.0), 1.0),
             Some(Action::Region(region(320.0, 100.0, 10.0, 20.0)))
         );
+    }
+
+    #[test]
+    fn a_click_on_another_output_in_refine_keeps_the_selection_where_it_was() {
+        let mut s = Selector::new(true, None);
+        s.clamp_to(vec![(0.0, 0.0, 320.0, 240.0), (320.0, 0.0, 320.0, 240.0)]);
+        s.press((100.0, 100.0));
+        s.release((200.0, 200.0), 1.0);
+        s.press((400.0, 100.0));
+        s.release((400.0, 100.0), 1.0);
+        assert_eq!(s.region(), Some(region(100.0, 100.0, 100.0, 100.0)));
+    }
+
+    #[test]
+    fn nudging_a_refine_edge_never_collapses_the_selection() {
+        let mut s = Selector::new(true, None);
+        s.press((10.0, 10.0));
+        s.release((15.0, 20.0), 1.0);
+        for _ in 0..5 {
+            s.key(Key::Left, false, 1.0);
+        }
+        match s.key(Key::Enter, false, 1.0) {
+            Some(Action::Region(r)) => assert!(r.width >= 1.0, "zero-width Region {r:?}"),
+            other => panic!("expected a Region, got {other:?}"),
+        }
     }
 }
