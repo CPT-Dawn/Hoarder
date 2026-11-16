@@ -1,13 +1,12 @@
 <div align="center">
 
-<img src="assets/logo.svg" width="96" alt="Hoarder logo">
+<img src="assets/logo.svg" width="64" alt="Hoarder logo">
 
 # Hoarder
 
 **Pixel-exact screenshots and clipboard history for Wayland.**
 
-One Rust binary that captures the screen, keeps every copy alive after its app closes,<br>
-and finds it again with <kbd>Super</kbd>+<kbd>V</kbd>. It replaces seven tools and never stores your passwords.
+One Rust binary replaces seven tools, keeps every copy alive and never stores your passwords.
 
 [![Release](https://img.shields.io/github/v/release/CPT-Dawn/Hoarder?style=flat-square)](https://github.com/CPT-Dawn/Hoarder/releases/latest)
 [![CI](https://img.shields.io/github/actions/workflow/status/CPT-Dawn/Hoarder/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/CPT-Dawn/Hoarder/actions/workflows/ci.yml)
