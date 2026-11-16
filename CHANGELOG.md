@@ -4,6 +4,12 @@ Every notable change to Hoarder. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.4](https://github.com/CPT-Dawn/Hoarder/releases/tag/v1.0.4) - 2026-11-16
+
+### Features
+
+- **picker:** Hold keys to repeat, keep pinned Clips on top ([db33851](https://github.com/CPT-Dawn/Hoarder/commit/db33851f481c99e9bbafe578819620bd2108d9b7))
+
 ## [1.0.3](https://github.com/CPT-Dawn/Hoarder/releases/tag/v1.0.3) - 2026-11-09
 
 ### Fixes
