@@ -2,7 +2,9 @@
 //! Typing searches it (with the filter prefixes `img:`, `txt:`, `file:`,
 //! `pin:` and `app:<id>`), Up and Down select, Enter picks the selected
 //! Clip, Shift+Enter picks it as plain text, Ctrl+1–9 pick a row at once,
-//! Ctrl+P pins or unpins, Del deletes and Esc closes.
+//! Ctrl+P pins or unpins, Del deletes and Esc closes. Pinned Clips lead
+//! the list. Held arrows, Page Up/Down, Del, Backspace and typed text
+//! repeat.
 //!
 //! The panel knows nothing of the Daemon: [`run`] reads Clips and full-text
 //! hits through a [`History`], pins and deletes through it, and returns the
@@ -10,6 +12,7 @@
 
 mod model;
 mod paint;
+mod repeat;
 
 use std::time::Instant;
 
@@ -22,7 +25,7 @@ use smithay_client_toolkit::{
     registry_handlers,
     seat::{
         Capability, SeatHandler, SeatState,
-        keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers},
+        keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers, RawModifiers, RepeatInfo},
     },
     shell::{
         WaylandSurface,
@@ -49,6 +52,7 @@ use crate::surface::{self, Error, Layered, failed, timing};
 use crate::theme::Theme;
 pub use hoarder_ipc::Kind;
 use model::Model;
+use repeat::Repeat;
 
 /// One Clip as the Picker lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,6 +179,7 @@ pub fn run(history: &mut dyn History, options: &Options) -> Result<Option<Pick>,
         detail: None,
         scroll: (0, 0),
         keys: Vec::new(),
+        repeat: Repeat::new(),
         mods: Modifiers::default(),
         scale: 1,
         configured: false,
@@ -185,8 +190,14 @@ pub fn run(history: &mut dyn History, options: &Options) -> Result<Option<Pick>,
     };
 
     while app.outcome.is_none() {
-        hoarder_wayland::wait::dispatch_once(&mut queue, None).map_err(|e| failed(&e))?;
+        hoarder_wayland::wait::dispatch_once(&mut queue, app.repeat.deadline())
+            .map_err(|e| failed(&e))?;
         queue.dispatch_pending(&mut app).map_err(|e| failed(&e))?;
+        if let Some(held) = app.repeat.due(Instant::now())
+            && app.outcome.is_none()
+        {
+            app.keys.push(held);
+        }
         if app.configured && app.model.is_none() {
             timing(app.started, "picker_configured");
             app.model = Some(Model::new(history.clips().map_err(|e| failed(&e))?));
@@ -236,6 +247,8 @@ struct App {
     /// Keys pressed and not yet acted on, with the modifiers held. The
     /// main loop acts on them, since it can ask History for full-text hits.
     keys: Vec<(KeyEvent, Modifiers)>,
+    /// The held key that repeats, with the modifiers it went down with.
+    repeat: Repeat<(KeyEvent, Modifiers)>,
     mods: Modifiers,
     /// Buffer scale of the output the panel is on.
     scale: i32,
@@ -460,6 +473,32 @@ fn scroll_preview(
     }
 }
 
+/// Whether a key pressed with `mods` held repeats while held: moving,
+/// scrolling the preview, deleting and typing do; picking, closing, pinning
+/// and the other Ctrl shortcuts do not.
+fn repeats(event: &KeyEvent, mods: &Modifiers) -> bool {
+    match event.keysym {
+        Keysym::Up
+        | Keysym::KP_Up
+        | Keysym::Down
+        | Keysym::KP_Down
+        | Keysym::Page_Up
+        | Keysym::KP_Page_Up
+        | Keysym::Page_Down
+        | Keysym::KP_Page_Down
+        | Keysym::Delete
+        | Keysym::KP_Delete
+        | Keysym::BackSpace => true,
+        Keysym::Left | Keysym::Right => mods.shift,
+        Keysym::Return | Keysym::KP_Enter | Keysym::Escape => false,
+        _ => {
+            !mods.ctrl
+                && !mods.alt
+                && (event.utf8.as_deref()).is_some_and(|t| !t.chars().any(char::is_control))
+        }
+    }
+}
+
 /// The row (from 0) Ctrl+<key> quick-restores, for the digits 1–9.
 ///
 /// The row comes from the physical digit-row key (`raw_code` is the evdev
@@ -620,6 +659,7 @@ impl KeyboardHandler for App {
     ) {
         // No more modifier news: hide anything Alt revealed.
         self.mods = Modifiers::default();
+        self.repeat.stop();
         self.dirty = true;
     }
 
@@ -632,18 +672,25 @@ impl KeyboardHandler for App {
         event: KeyEvent,
     ) {
         if self.outcome.is_none() {
+            let held = repeats(&event, &self.mods).then(|| (event.clone(), self.mods));
+            self.repeat.press(event.raw_code, held, Instant::now());
             self.keys.push((event, self.mods));
         }
     }
 
+    /// A repeat the compositor sent itself (wl_keyboard v10); it then turns
+    /// client-side repeat off through the repeat info.
     fn repeat_key(
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
         _: &WlKeyboard,
         _: u32,
-        _: KeyEvent,
+        event: KeyEvent,
     ) {
+        if self.outcome.is_none() && repeats(&event, &self.mods) {
+            self.keys.push((event, self.mods));
+        }
     }
 
     fn release_key(
@@ -652,8 +699,22 @@ impl KeyboardHandler for App {
         _: &QueueHandle<Self>,
         _: &WlKeyboard,
         _: u32,
-        _: KeyEvent,
+        event: KeyEvent,
     ) {
+        self.repeat.release(event.raw_code);
+    }
+
+    fn update_repeat_info(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &WlKeyboard,
+        info: RepeatInfo,
+    ) {
+        match info {
+            RepeatInfo::Repeat { rate, delay } => self.repeat.set_info(rate.get(), delay),
+            RepeatInfo::Disable => self.repeat.set_info(0, 0),
+        }
     }
 
     fn update_modifiers(

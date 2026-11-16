@@ -268,9 +268,13 @@ fn filter_prefixes_narrow_by_kind_pin_and_app() {
     pick_with(&session, "img:");
     assert_eq!(top_id(&session), img);
 
+    // The pinned text Clip leads the text Clips.
     pick_with(&session, "txt:");
+    assert_eq!(top_id(&session), pinned);
+    assert_eq!(paste(&session, None), "pinned note");
+
+    pick_with(&session, "txt: firefox");
     assert_eq!(top_id(&session), link);
-    assert_eq!(paste(&session, None), "firefox link");
 
     pick_with(&session, "file:");
     assert_eq!(top_id(&session), file);
@@ -416,6 +420,114 @@ fn ctrl_p_pins_the_selected_clip_and_unpins_a_pinned_one() {
     session.input().tap(keys::KEY_ESC).unwrap();
     picker.finish();
     assert!(!pinned(ids[0]));
+}
+
+#[test]
+fn pinned_clips_lead_the_list() {
+    let (session, _paint) = painted();
+    let ids = seed(
+        &session,
+        &[
+            Seed {
+                reprs: &text("old pinned"),
+                app: None,
+                pinned: true,
+            },
+            Seed {
+                reprs: &text("newer"),
+                app: None,
+                pinned: false,
+            },
+            Seed {
+                reprs: &text("newest"),
+                app: None,
+                pinned: false,
+            },
+        ],
+    );
+    let _daemon = Daemon::start(&session);
+
+    pick_with(&session, "");
+    assert_eq!(top_id(&session), ids[0]);
+
+    // The list is [old pinned, newest, newer]. Pinning the last row moves
+    // it into the pinned group (newer than "old pinned", so first), and the
+    // selection goes with it.
+    let picker = open_picker(&session);
+    session.input().tap(keys::KEY_DOWN).unwrap();
+    session.input().tap(keys::KEY_DOWN).unwrap();
+    session
+        .input()
+        .chord(&[keys::KEY_LEFTCTRL, keys::KEY_P])
+        .unwrap();
+    session.input().tap(keys::KEY_ENTER).unwrap();
+    let done = picker.finish();
+    assert!(done.status.success(), "{}", done.stderr);
+    let pinned: Vec<_> = (history(&session).iter())
+        .filter(|c| c["pinned"].as_bool().unwrap())
+        .map(|c| c["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(pinned.len(), 2, "{pinned:?}");
+    assert_eq!(top_id(&session), ids[1]);
+}
+
+/// Hold `key` down for `for_ms` milliseconds.
+fn hold(session: &Session, key: u32, for_ms: u64) {
+    session.input().key_down(key).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(for_ms));
+    session.input().key_up(key).unwrap();
+}
+
+#[test]
+fn holding_down_keeps_moving_the_selection() {
+    let (session, _paint) = painted();
+    let texts: Vec<String> = (0..30).map(|i| format!("clip {i}")).collect();
+    let reprs: Vec<_> = texts.iter().map(|t| text(t)).collect();
+    let seeds: Vec<Seed> = (reprs.iter())
+        .map(|reprs| Seed {
+            reprs,
+            app: None,
+            pinned: false,
+        })
+        .collect();
+    let ids = seed(&session, &seeds);
+    let _daemon = Daemon::start(&session);
+
+    let picker = open_picker(&session);
+    // Past the repeat delay (600 ms in Sway), then a few repeats.
+    hold(&session, keys::KEY_DOWN, 1200);
+    session.input().tap(keys::KEY_ENTER).unwrap();
+    let done = picker.finish();
+
+    assert!(done.status.success(), "{}", done.stderr);
+    // The newest is ids[29]; one press alone would land on ids[28].
+    let picked = top_id(&session);
+    let row = ids.iter().rev().position(|&id| id == picked).unwrap();
+    assert!(row > 2, "held Down only reached row {row}");
+}
+
+#[test]
+fn holding_del_keeps_deleting() {
+    let (session, _paint) = painted();
+    let texts: Vec<String> = (0..30).map(|i| format!("clip {i}")).collect();
+    let reprs: Vec<_> = texts.iter().map(|t| text(t)).collect();
+    let seeds: Vec<Seed> = (reprs.iter())
+        .map(|reprs| Seed {
+            reprs,
+            app: None,
+            pinned: false,
+        })
+        .collect();
+    seed(&session, &seeds);
+    let _daemon = Daemon::start(&session);
+
+    let picker = open_picker(&session);
+    hold(&session, keys::KEY_DELETE, 1200);
+    session.input().tap(keys::KEY_ESC).unwrap();
+    picker.finish();
+
+    let left = history(&session).len();
+    assert!(left < 28, "held Del left {left} of 30");
 }
 
 #[test]

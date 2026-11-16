@@ -189,7 +189,7 @@ hoarder shot last                       # the last Region again, no Overlay
 | <kbd>Alt</kbd> | Reveal Concealed Clips |
 | <kbd>Esc</kbd> | Close |
 
-Filter with `img:`, `txt:`, `file:`, `pin:` and `app:<id>`.
+Filter with `img:`, `txt:`, `file:`, `pin:` and `app:<id>`. Pinned Clips sit at the top of the list (a search ranks by match instead). Holding the arrows, <kbd>Page Up</kbd>/<kbd>Page Down</kbd>, <kbd>Del</kbd> or <kbd>Backspace</kbd> repeats them at your keyboard's repeat rate.
 
 ### From the terminal
 

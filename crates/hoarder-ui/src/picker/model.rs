@@ -1,6 +1,9 @@
 //! What the Picker shows, apart from how it is drawn: the query, which
 //! Clips match it and in what order, and which one is selected.
 //!
+//! With no search text the list is pinned Clips first, then the rest,
+//! each most recently used first.
+//!
 //! Matching (PLAN.md §6) is a fuzzy match (nucleo) over every preview,
 //! best first and newest first among equals, followed by the Clips only
 //! the full-text search found (long text whose match lies past its
@@ -85,8 +88,8 @@ pub(crate) const MASK: &str = "••••••••";
 impl Model {
     pub(crate) fn new(clips: Vec<Clip>) -> Model {
         let by_id = clips.iter().enumerate().map(|(i, e)| (e.id, i)).collect();
-        Model {
-            shown: (0..clips.len()).collect(),
+        let mut model = Model {
+            shown: Vec::new(),
             clips,
             by_id,
             matcher: Matcher::new(Config::DEFAULT),
@@ -94,7 +97,19 @@ impl Model {
             selected: 0,
             top: 0,
             revealed: HashMap::new(),
-        }
+        };
+        model.shown = model.browse(&Filter::default());
+        model
+    }
+
+    /// The Clips `filter` keeps, pinned first, each most recently used
+    /// first: the list while no text is searched.
+    fn browse(&self, filter: &Filter) -> Vec<usize> {
+        let kept = |&i: &usize| filter.keeps(&self.clips[i]);
+        let (pinned, rest): (Vec<usize>, Vec<usize>) = (0..self.clips.len())
+            .filter(kept)
+            .partition(|&i| self.clips[i].pinned);
+        pinned.into_iter().chain(rest).collect()
     }
 
     /// The line a Clip's row shows: its preview, or for a Concealed Clip
@@ -154,9 +169,7 @@ impl Model {
         let filter = Filter::parse(query);
         let kept = |e: &Clip| filter.keeps(e);
         if filter.text.is_empty() {
-            self.shown = (0..self.clips.len())
-                .filter(|&i| kept(&self.clips[i]))
-                .collect();
+            self.shown = self.browse(&filter);
             return;
         }
         let pattern = Pattern::parse(&filter.text, CaseMatching::Smart, Normalization::Smart);
@@ -220,11 +233,23 @@ impl Model {
         Some(&self.clips[i])
     }
 
-    /// Mark Clip `id` pinned or not.
+    /// Mark Clip `id` pinned or not. With no search text it moves into
+    /// or out of the pinned group, and the selection follows it.
     pub(crate) fn set_pinned(&mut self, id: i64, pinned: bool) {
-        if let Some(&i) = self.by_id.get(&id) {
-            self.clips[i].pinned = pinned;
+        let Some(&i) = self.by_id.get(&id) else {
+            return;
+        };
+        self.clips[i].pinned = pinned;
+        let filter = Filter::parse(&self.query);
+        if !filter.text.is_empty() {
+            return;
         }
+        let selected = self.shown.get(self.selected).copied();
+        self.shown = self.browse(&filter);
+        if let Some(n) = selected.and_then(|s| self.shown.iter().position(|&j| j == s)) {
+            self.selected = n;
+        }
+        self.selected = self.selected.min(self.shown.len().saturating_sub(1));
     }
 
     /// Drop Clip `id`; the selection moves to the Clip after it, or the
@@ -391,6 +416,45 @@ mod tests {
         // Never searched, revealed or not.
         m.set_query("sec", &[101]);
         assert!(shown(&mut m).is_empty());
+    }
+
+    #[test]
+    fn pinned_clips_lead_the_list_newest_first() {
+        let mut m = model(&["a", "b", "c", "d"]);
+        m.clips[1].pinned = true;
+        m.clips[3].pinned = true;
+        let mut m = Model::new(m.clips);
+
+        assert_eq!(shown(&mut m), ["b", "d", "a", "c"]);
+        assert_eq!(m.selected().unwrap().preview, "b");
+        m.set_query("txt:", &[]);
+        assert_eq!(shown(&mut m), ["b", "d", "a", "c"]);
+        m.set_query("pin:", &[]);
+        assert_eq!(shown(&mut m), ["b", "d"]);
+    }
+
+    #[test]
+    fn pinning_moves_the_clip_to_the_top_and_the_selection_follows() {
+        let mut m = model(&["a", "b", "c"]);
+        m.move_by(2);
+
+        m.set_pinned(102, true);
+
+        assert_eq!(shown(&mut m), ["c", "a", "b"]);
+        assert_eq!(m.selected().unwrap().preview, "c");
+        m.set_pinned(102, false);
+        assert_eq!(shown(&mut m), ["a", "b", "c"]);
+        assert_eq!(m.selected().unwrap().preview, "c");
+    }
+
+    #[test]
+    fn a_search_ranks_by_match_not_by_pin() {
+        let mut m = model(&["s, r and c", "src/main.rs"]);
+        m.set_pinned(100, true);
+
+        m.set_query("src", &[]);
+
+        assert_eq!(shown(&mut m), ["src/main.rs", "s, r and c"]);
     }
 
     #[test]
