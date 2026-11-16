@@ -34,6 +34,19 @@ The end-to-end tests drive the real `hoarder` binary inside a headless Sway sess
 
 CI also runs `cargo deny`, the performance budgets (a regression of more than 20% fails), and checks that every config key is documented in [docs/config.md](docs/config.md): a new key needs a row there and a line in `crates/hoarder-config/src/default.toml`.
 
+## Building on Hoarder
+
+Front ends talk to the Daemon over a versioned JSON-lines socket, documented in [docs/ipc.md](docs/ipc.md). Rust clients can depend on the `hoarder-ipc` crate by git, pinned to a release tag; the [Zenith](https://github.com/CPT-Dawn/Zenith) bar's clipboard module is built on it.
+
+## The README screenshots
+
+`assets/shot.png` and `assets/picker.png` are taken inside a throwaway headless Sway session, never on a real desktop, so no real History, paths or hostnames show:
+
+1. Start `sway` with `WLR_BACKENDS=headless WLR_RENDERER=pixman`, one 2560x1440 output at scale 1.5, and `HOME` plus every `XDG_*` directory pointed at an empty folder.
+2. Run `hoarder daemon` there, open two floating terminals with invented text, and fill History with `hoarder copy` and one `hoarder shot window --list <title>`.
+3. Open `hoarder picker` (or `hoarder shot`, then drag with a `zwlr_virtual_pointer_v1` client), and capture with `hoarder shot all -o frame.png --no-copy --no-notify`. Keys go in with `wtype`.
+4. Crop the frame to 16:9 with `magick`. `assets/social-preview.png` is made from the Picker frame with the readme skill's `readme-assets social`.
+
 ## Commits and pull requests
 
 - Branch from `main`; one logical change per PR.
