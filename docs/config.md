@@ -132,3 +132,5 @@ The History panel opened by `hoarder picker` (usually bound to Super+V).
 |---|---|---|---|
 | `picker.auto_paste` | `true` | bool | After a Restore, paste into the window that was focused before, by sending Ctrl+V. |
 | `picker.terminal_apps` | `["kitty", "foot", "Alacritty", "org.wezfurlong.wezterm", "com.mitchellh.ghostty", "org.kde.konsole"]` | app ids | Apps that get Ctrl+Shift+V instead. |
+
+[Back to the README](../README.md)

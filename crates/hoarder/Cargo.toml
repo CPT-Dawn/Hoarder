@@ -1,6 +1,6 @@
 [package]
 name = "hoarder"
-description = "Pixel-exact screenshots and a clipboard that outlives the app that set it, for Wayland."
+description = "Pixel-exact screenshots and clipboard history for Wayland, in one Rust binary that replaces grim and cliphist."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
